@@ -1,0 +1,8 @@
+<menu>
+    <Services>
+        <KeaUnbound VisibleName="Kea Unbound" cssClass="fa fa-exchange fa-fw">
+            <General order="10" VisibleName="Settings" url="/ui/keaunbound/index"/>
+            <LogFile order="100" VisibleName="Log File" url="/ui/diagnostics/log/core/kea-unbound-ddns"/>
+        </KeaUnbound>
+    </Services>
+</menu>
