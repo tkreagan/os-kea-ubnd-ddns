@@ -208,20 +208,16 @@ def reverse_ptr(ip: str) -> str | None:
 def is_static_entry(name: str, rdtype: str, logger: logging.Logger,
                     static_files: list[str]) -> bool:
     """
-    Return True if name+type appears in any Unbound config file we don't own,
-    meaning we must not add or remove it. Specifically guards against
-    clobbering manual host overrides configured in the Unbound UI.
+    Return True if name+type appears in host_entries.conf (or any file in
+    static_files), meaning we must not add or remove it.
 
-    Also protects static DHCP reservation hostnames in the case where
-    "Register DHCP Static Mappings" is enabled in Unbound — those end up
-    in host_entries.conf alongside manual overrides, and since OPNsense
-    already registered them there, we should step aside rather than create
-    a duplicate or conflict via kea-dhcp-ddns.
-
-    If "Register DHCP Static Mappings" is disabled, static reservation
-    hostnames will NOT be in host_entries.conf, so kea-dhcp-ddns UPDATE
-    packets for those reservations will pass through this guard and be
-    registered normally by us — which is the correct behavior.
+    host_entries.conf is written entirely by OPNsense and contains:
+      1. Manual host overrides from Services → Unbound DNS → Host Overrides
+      2. Static DHCP reservation hostnames IF "Register DHCP Static Mappings"
+         is enabled (regdhcpstatic=1) — in which case OPNsense has already
+         registered them and we should step aside to avoid a conflict.
+         If regdhcpstatic is disabled, static reservations arrive via
+         kea-dhcp-ddns UPDATE packets and pass through this guard normally.
 
     Checks for:
       - Forward records: local-data: "name ... IN TYPE ..."
