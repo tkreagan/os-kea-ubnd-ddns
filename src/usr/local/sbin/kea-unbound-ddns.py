@@ -266,7 +266,8 @@ def is_static_entry(name: str, rdtype: str, logger: logging.Logger,
 
     return False
 
-def query_unbound(name: str, record_type: str, logger: logging.Logger) -> list[str]:
+def query_unbound(name: str, record_type: str, logger: logging.Logger,
+                  unbound_conf: str = DEFAULT_UNBOUND_CONF) -> list[str]:
     """
     Query Unbound's local data store for records of record_type for name.
     Returns a list of IP address strings (e.g. ['10.0.0.1']).
@@ -291,7 +292,7 @@ def query_unbound(name: str, record_type: str, logger: logging.Logger) -> list[s
     """
     try:
         result = subprocess.run(
-            [UNBOUND_CONTROL, "list_local_data"],
+            [UNBOUND_CONTROL, "-c", unbound_conf, "list_local_data"],
             capture_output=True, text=True, timeout=10
         )
         if result.returncode != 0:
@@ -395,7 +396,7 @@ def process_update(msg: dns.message.Message, unbound_conf: str,
                 # Preserve the other address family before removing the name.
                 # local_data_remove wipes ALL records for the name, so we
                 # must re-add any surviving family record afterward.
-                preserved = query_unbound(name, other_type, logger)
+                preserved = query_unbound(name, other_type, logger, unbound_conf)
                 preserved_ptrs = [
                     (ip, ptr)
                     for ip in preserved
@@ -406,7 +407,7 @@ def process_update(msg: dns.message.Message, unbound_conf: str,
                 # Find PTR(s) for the records being removed so we can clean
                 # them up. For delete forms 1&2 the rrset has no rdata, so
                 # query Unbound for the current value before removing.
-                current_ips = [str(rr) for rr in rrset] or query_unbound(name, rdtype, logger)
+                current_ips = [str(rr) for rr in rrset] or query_unbound(name, rdtype, logger, unbound_conf)
                 current_ptrs = [p for p in (reverse_ptr(ip) for ip in current_ips) if p]
 
                 logger.info("Remove: %s %s (preserving %d %s record(s))",
@@ -416,7 +417,7 @@ def process_update(msg: dns.message.Message, unbound_conf: str,
                 if ok:
                     # Remove PTR records for the deleted address(es)
                     for ptr in current_ptrs:
-                        if not is_static_entry(ptr, "PTR", logger):
+                        if not is_static_entry(ptr, "PTR", logger, static_files):
                             logger.info("Remove PTR: %s", ptr)
                             unbound_control(["local_data_remove", ptr],
                                             unbound_conf, dry_run, logger)
@@ -425,7 +426,7 @@ def process_update(msg: dns.message.Message, unbound_conf: str,
                         logger.info("Restore %s: %s -> %s", other_type, name, ip)
                         unbound_control(["local_data", f"{name} IN {other_type} {ip}"],
                                         unbound_conf, dry_run, logger)
-                        if not is_static_entry(ptr, "PTR", logger):
+                        if not is_static_entry(ptr, "PTR", logger, static_files):
                             logger.info("Restore PTR: %s -> %s", ptr, name)
                             unbound_control(["local_data", f"{ptr} IN PTR {name}."],
                                             unbound_conf, dry_run, logger)
@@ -458,7 +459,7 @@ def process_update(msg: dns.message.Message, unbound_conf: str,
                     if ok:
                         # Add PTR — works for both IPv4 and IPv6 via reverse_ptr()
                         ptr = reverse_ptr(rdata)
-                        if ptr and not is_static_entry(ptr, "PTR", logger):
+                        if ptr and not is_static_entry(ptr, "PTR", logger, static_files):
                             ptr_record = f"{ptr} {rrset.ttl} IN PTR {name}."
                             logger.info("Add PTR: %s", ptr_record)
                             unbound_control(["local_data", ptr_record],
