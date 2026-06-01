@@ -1,0 +1,53 @@
+<form>
+    <field>
+        <type>header</type>
+        <label>Service</label>
+    </field>
+    <field>
+        <id>general.general.enabled</id>
+        <label>Enabled</label>
+        <type>checkbox</type>
+        <help>Enable Kea to Unbound DNS registration. When enabled, DNS UPDATE packets from kea-dhcp-ddns are received and translated into Unbound local_data entries.</help>
+    </field>
+
+    <field>
+        <type>header</type>
+        <label>Listener</label>
+    </field>
+    <field>
+        <id>general.general.port</id>
+        <label>Port</label>
+        <type>text</type>
+        <hint>53535</hint>
+        <help>UDP port to listen on for DNS UPDATE packets from kea-dhcp-ddns. Must match the destination port configured in kea-dhcp-ddns. Default 53535.</help>
+    </field>
+
+    <field>
+        <type>header</type>
+        <label>TSIG Authentication</label>
+    </field>
+    <field>
+        <id>general.general.tsig_key_name</id>
+        <label>TSIG Key Name</label>
+        <type>text</type>
+        <help>Optional. TSIG key name for authenticating DNS UPDATE packets. If set, kea-dhcp-ddns must be configured to sign updates with the matching key. Leave empty to disable TSIG (safe since the listener only accepts connections from 127.0.0.1).</help>
+    </field>
+    <field>
+        <id>general.general.tsig_key_secret</id>
+        <label>TSIG Key Secret</label>
+        <type>password</type>
+        <help>Base64-encoded HMAC secret matching the key name above. Only used when TSIG Key Name is set.</help>
+    </field>
+
+    <field>
+        <type>header</type>
+        <label>Advanced</label>
+    </field>
+    <field>
+        <id>general.general.reload_unbound_on_kea_sync</id>
+        <label>Reload Unbound on Kea config change</label>
+        <type>checkbox</type>
+        <advanced>true</advanced>
+        <help>When enabled, Unbound is reloaded whenever Kea configuration changes so that updated static reservations become visible in DNS immediately. WARNING: Unbound reload briefly wipes dynamic lease DNS entries (they are automatically restored from the Kea lease database). Only needed if "Register DHCP Static Mappings" is also enabled in Services &rarr; Unbound DNS &rarr; General.</help>
+    </field>
+</form>
