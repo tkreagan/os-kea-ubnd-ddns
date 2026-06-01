@@ -66,10 +66,10 @@
  *     for devices to renew their leases.
  *
  *   bootup (priority 2) -- ensures our daemon starts after Unbound (priority
- *     1, no suffix = default). Kea does not register on the bootup hook so
- *     there is no ordering constraint against it -- our daemon will be ready
- *     before Kea sends any DNS UPDATE packets since Kea starts via its own
- *     rc.d mechanism after the bootup hook chain completes.
+ *     1, no suffix = default). Kea does not register on the bootup hook --
+ *     it starts via kea_services() which is handled by OPNsense's service
+ *     manager after the bootup hook chain completes. Our daemon is therefore
+ *     always ready before Kea starts sending DNS UPDATE packets.
  *
  * Verified: Unbound uses bootup with no priority (default=1). Kea does not
  *   use the bootup hook. Our :2 priority correctly places us after Unbound.
