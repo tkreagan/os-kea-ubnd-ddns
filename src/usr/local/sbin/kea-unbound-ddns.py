@@ -219,6 +219,17 @@ def is_static_entry(name: str, rdtype: str, logger: logging.Logger,
          If regdhcpstatic is disabled, static reservations arrive via
          kea-dhcp-ddns UPDATE packets and pass through this guard normally.
 
+    Known limitation — stale host_entries.conf:
+    OPNsense only rewrites host_entries.conf when Unbound reconfigures, not
+    when Kea config changes. This means if a static reservation is removed
+    from Kea, host_entries.conf may still contain it until the next Unbound
+    reconfigure — causing this guard to incorrectly block the corresponding
+    DELETE UPDATE from kea-dhcp-ddns.
+
+    Our plugin's keaunbound_configure() hook on kea_sync calls
+    unbound_add_host_entries() to rewrite host_entries.conf whenever Kea
+    config changes, keeping the file current and eliminating this issue.
+
     Checks for:
       - Forward records: local-data: "name ... IN TYPE ..."
       - PTR records:     local-data-ptr: "ip ..."
