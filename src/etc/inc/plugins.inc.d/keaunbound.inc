@@ -78,6 +78,25 @@
  * TODO: implement keaunbound_services() -- register with OPNsense service manager.
  * TODO: implement keaunbound_syslog() -- register log facility.
  * TODO: implement MVC model, controller, and UI view.
+ * TODO: implement stale record audit in the sync script (kea-unbound-sync.py).
+ *       local_data entries injected via unbound-control never expire -- if
+ *       kea-dhcp-ddns crashes after an add but before the corresponding delete,
+ *       stale A/AAAA/PTR records can accumulate indefinitely. The audit should:
+ *         1. Dump list_local_data
+ *         2. Cross-reference each A/AAAA record against:
+ *              - host_entries.conf (OPNsense-owned, expected)
+ *              - Kea active leases via ctrl-agent API (our records, expected)
+ *              - Kea static reservations via ctrl-agent API (our records, expected)
+ *         3. Flag any record not found in any of the above as potentially stale
+ *         4. Report flagged records (hostname, IP, type) for human review
+ *         5. PTR records should be treated as paired with their forward record --
+ *            report both together when a forward record is flagged
+ *         6. Optional --clean flag to remove flagged records after confirmation
+ *       The audit should never silently delete -- we do not own all of local_data
+ *       and other tools may be writing there. Conservative reporting only unless
+ *       --clean is explicitly passed.
+ *       Natural fit as an audit mode in kea-unbound-sync.py alongside the normal
+ *       sync mode. Could be scheduled weekly via OPNsense cron or scheduled tasks.
  */
 
 function keaunbound_configure()
