@@ -122,19 +122,78 @@ def unbound_control(args: list[str], unbound_conf: str, dry_run: bool,
 
 # Record types we handle. Everything else is logged and skipped.
 HANDLED_TYPES = {"A", "AAAA", "PTR"}
+
 # The "other" address family for dual-stack preservation
 OTHER_FAMILY = {"A": "AAAA", "AAAA": "A"}
+
+# Files containing statically-owned Unbound records that we must not touch.
+# host_entries.conf contains both manual host overrides and DHCP static
+# mappings written by OPNsense — both are out of our jurisdiction.
+# dhcpleases.conf contains dynamic lease entries written by the legacy ISC
+# DHCP watcher — we skip that file since we don't own those entries either,
+# but we also never conflict with it since Kea doesn't use it.
+STATIC_ENTRY_FILES = [
+    "/var/unbound/host_entries.conf",
+]
 
 def fqdn(name: dns.name.Name) -> str:
     """Return fully-qualified name string without trailing dot."""
     return str(name).rstrip(".")
 
 def reverse_ptr(ip: str) -> str | None:
-    """Return the PTR name for an IP address."""
+    """
+    Return the PTR name for an IP address.
+    Works for both IPv4 (in-addr.arpa) and IPv6 (ip6.arpa) — Python's
+    ipaddress module handles both correctly.
+    """
     try:
         return str(ipaddress.ip_address(ip).reverse_pointer)
     except ValueError:
         return None
+
+def is_static_entry(name: str, rdtype: str, logger: logging.Logger) -> bool:
+    """
+    Return True if name+type appears as a static entry in any of the
+    Unbound config files we don't own. Protects against clobbering manual
+    host overrides and OPNsense-managed static DHCP mappings on both add
+    and delete operations.
+
+    Checks for:
+      - Forward records: local-data: "name ... IN TYPE ..."
+      - PTR records:     local-data-ptr: "ip ..."
+    """
+    # For PTR records the name IS the PTR (e.g. 1.0.168.192.in-addr.arpa)
+    # For forward records check for the FQDN in a local-data line
+    import re
+    forward_pattern = re.compile(
+        rf'^local-data:\s+"' + re.escape(name) +
+        rf'\.?\s+.*\bIN\s+{re.escape(rdtype)}\b',
+        re.IGNORECASE
+    )
+    # PTR guard: for A/AAAA this checks the reverse PTR name;
+    # for PTR records it checks the name directly as a local-data-ptr entry
+    ptr_pattern = re.compile(
+        rf'^local-data-ptr:\s+"' + re.escape(name) + r'\b',
+        re.IGNORECASE
+    )
+
+    for filepath in STATIC_ENTRY_FILES:
+        try:
+            with open(filepath) as f:
+                for line in f:
+                    line = line.strip()
+                    if forward_pattern.match(line) or ptr_pattern.match(line):
+                        logger.info(
+                            "Skipping %s %s — static entry found in %s",
+                            rdtype, name, filepath
+                        )
+                        return True
+        except FileNotFoundError:
+            pass
+        except OSError as e:
+            logger.warning("Cannot read %s: %s", filepath, e)
+
+    return False
 
 def query_unbound(name: str, rdtype: str, logger: logging.Logger) -> list[str]:
     """
@@ -167,17 +226,26 @@ def process_update(msg: dns.message.Message, unbound_conf: str,
 
     Handles:
       - A, AAAA: forward record add/remove with dual-stack preservation and
-                 automatic PTR add/remove
+                 automatic PTR add/remove for both IPv4 and IPv6
       - PTR: direct add/remove, no secondary effects
+        Note: standalone PTR deletes are not expected from kea-dhcp-ddns in
+        normal operation — PTRs are always cleaned up as a side effect of
+        A/AAAA removal. The case is handled for correctness only.
       - All other types: logged and skipped
 
+    Guard: before any operation, check whether the name/type is owned by a
+    static Unbound config file (host overrides, OPNsense static DHCP
+    mappings). If so, skip both adds and deletes to avoid clobbering records
+    we don't own.
+
     Dual-stack preservation: unbound-control local_data_remove removes ALL
-    records for a name. When removing one address family (e.g. A), we first
-    query Unbound for the other family (AAAA), remove the name, then re-add
-    the preserved record so the other family survives.
+    records for a name, not just one type. When removing one address family
+    (e.g. A), first query Unbound for the other family (AAAA), remove the
+    name, then re-add the preserved record.
     """
     added = 0
     removed = 0
+    skipped = 0
     errors = 0
 
     for rrset in msg.authority:
@@ -187,6 +255,12 @@ def process_update(msg: dns.message.Message, unbound_conf: str,
         # Skip record types we don't handle
         if rdtype not in HANDLED_TYPES:
             logger.debug("Skipping unsupported record type %s for %s", rdtype, name)
+            continue
+
+        # Guard: skip anything owned by static Unbound config files.
+        # Check BEFORE is_delete so we never clobber on either add or delete.
+        if is_static_entry(name, rdtype, logger):
+            skipped += 1
             continue
 
         # RFC 2136 §2.5: deletion requires BOTH class ANY/NONE AND TTL=0.
@@ -203,20 +277,22 @@ def process_update(msg: dns.message.Message, unbound_conf: str,
 
         if is_delete:
             if rdtype in ("A", "AAAA"):
+                other_type = OTHER_FAMILY[rdtype]
+
                 # Preserve the other address family before removing the name.
                 # local_data_remove wipes ALL records for the name, so we
                 # must re-add any surviving family record afterward.
-                other_type = OTHER_FAMILY[rdtype]
                 preserved = query_unbound(name, other_type, logger)
-                preserved_ptrs = []
-                for ip in preserved:
-                    ptr = reverse_ptr(ip)
-                    if ptr:
-                        preserved_ptrs.append((ip, ptr))
+                preserved_ptrs = [
+                    (ip, ptr)
+                    for ip in preserved
+                    for ptr in [reverse_ptr(ip)]
+                    if ptr
+                ]
 
-                # Find the PTR(s) for the record(s) being removed so we can
-                # clean them up. For delete forms 1&2 the rrset has no rdata,
-                # so query Unbound for the current value before removing.
+                # Find PTR(s) for the records being removed so we can clean
+                # them up. For delete forms 1&2 the rrset has no rdata, so
+                # query Unbound for the current value before removing.
                 current_ips = [str(rr) for rr in rrset] or query_unbound(name, rdtype, logger)
                 current_ptrs = [p for p in (reverse_ptr(ip) for ip in current_ips) if p]
 
@@ -227,24 +303,28 @@ def process_update(msg: dns.message.Message, unbound_conf: str,
                 if ok:
                     # Remove PTR records for the deleted address(es)
                     for ptr in current_ptrs:
-                        logger.info("Remove PTR: %s", ptr)
-                        unbound_control(["local_data_remove", ptr],
-                                        unbound_conf, dry_run, logger)
-                    # Re-add preserved other-family records
+                        if not is_static_entry(ptr, "PTR", logger):
+                            logger.info("Remove PTR: %s", ptr)
+                            unbound_control(["local_data_remove", ptr],
+                                            unbound_conf, dry_run, logger)
+                    # Re-add preserved other-family forward and PTR records
                     for ip, ptr in preserved_ptrs:
                         logger.info("Restore %s: %s -> %s", other_type, name, ip)
                         unbound_control(["local_data", f"{name} IN {other_type} {ip}"],
                                         unbound_conf, dry_run, logger)
-                        logger.info("Restore PTR: %s -> %s", ptr, name)
-                        unbound_control(["local_data", f"{ptr} IN PTR {name}."],
-                                        unbound_conf, dry_run, logger)
+                        if not is_static_entry(ptr, "PTR", logger):
+                            logger.info("Restore PTR: %s -> %s", ptr, name)
+                            unbound_control(["local_data", f"{ptr} IN PTR {name}."],
+                                            unbound_conf, dry_run, logger)
                     removed += 1
                 else:
                     errors += 1
 
             elif rdtype == "PTR":
-                # PTR delete: the name IS the PTR (e.g. 1.0.0.10.in-addr.arpa)
-                logger.info("Remove PTR: %s", name)
+                # Standalone PTR delete — not expected from kea-dhcp-ddns in
+                # normal operation but handled for correctness.
+                # The name IS the PTR (e.g. 1.0.168.192.in-addr.arpa)
+                logger.info("Remove PTR: %s (standalone)", name)
                 ok = unbound_control(["local_data_remove", name],
                                      unbound_conf, dry_run, logger)
                 if ok:
@@ -263,8 +343,9 @@ def process_update(msg: dns.message.Message, unbound_conf: str,
                     ok = unbound_control(["local_data", record],
                                          unbound_conf, dry_run, logger)
                     if ok:
+                        # Add PTR — works for both IPv4 and IPv6 via reverse_ptr()
                         ptr = reverse_ptr(rdata)
-                        if ptr:
+                        if ptr and not is_static_entry(ptr, "PTR", logger):
                             ptr_record = f"{ptr} {rrset.ttl} IN PTR {name}."
                             logger.info("Add PTR: %s", ptr_record)
                             unbound_control(["local_data", ptr_record],
@@ -274,9 +355,12 @@ def process_update(msg: dns.message.Message, unbound_conf: str,
                         errors += 1
 
                 elif rdtype == "PTR":
-                    # Explicit PTR from kea-dhcp-ddns — add directly
+                    # Explicit PTR from kea-dhcp-ddns — add directly.
+                    # Not expected in normal operation (we generate PTRs
+                    # automatically from A/AAAA adds) but handled for
+                    # correctness if kea-dhcp-ddns is configured to send them.
                     record = f"{name} {rrset.ttl} IN PTR {rdata}"
-                    logger.info("Add PTR: %s", record)
+                    logger.info("Add PTR (explicit): %s", record)
                     ok = unbound_control(["local_data", record],
                                          unbound_conf, dry_run, logger)
                     if ok:
@@ -284,7 +368,8 @@ def process_update(msg: dns.message.Message, unbound_conf: str,
                     else:
                         errors += 1
 
-    logger.info("Update complete: added=%d removed=%d errors=%d", added, removed, errors)
+    logger.info("Update complete: added=%d removed=%d skipped=%d errors=%d",
+                added, removed, skipped, errors)
     return dns.rcode.NOERROR if errors == 0 else dns.rcode.SERVFAIL
 
 # ── Response builder ──────────────────────────────────────────────────────────
