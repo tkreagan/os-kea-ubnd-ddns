@@ -102,6 +102,29 @@
  *       sync mode. Could be scheduled weekly via OPNsense cron or scheduled tasks.
  */
 
+function keaunbound_services()
+{
+    $services = [];
+
+    $cfg = new \OPNsense\KeaUnbound\General();
+    if (empty((string)$cfg->enabled)) {
+        return $services;
+    }
+
+    $services[] = [
+        'configd' => [
+            'restart' => ['keaunbound restart'],
+            'start'   => ['keaunbound start'],
+            'stop'    => ['keaunbound stop'],
+        ],
+        'name'        => 'kea-unbound-ddns',
+        'description' => gettext('Kea Unbound DDNS registration'),
+        'pidfile'     => '/var/run/kea-unbound-ddns.pid',
+    ];
+
+    return $services;
+}
+
 function keaunbound_configure()
 {
     return [
