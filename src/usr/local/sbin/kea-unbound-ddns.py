@@ -151,9 +151,46 @@ STATIC_ENTRY_FILES = [
     DEFAULT_HOST_ENTRIES,
 ]
 
+# Hostname sanity checks — names that are technically valid DNS but
+# meaningless or dangerous for our purposes.
+_NONSENSE_NAMES = {
+    "",           # empty
+    ".",          # DNS root
+    "localhost",  # loopback alias — should never come from kea-dhcp-ddns
+    "localdomain",
+}
+# Valid hostname label characters per RFC 1123
+_LABEL_RE = re.compile(r'^[a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?$')
+
 def fqdn(name: dns.name.Name) -> str:
     """Return fully-qualified name string without trailing dot."""
     return str(name).rstrip(".")
+
+def is_sane_name(name: str, logger: logging.Logger) -> bool:
+    """
+    Return True if name is a plausible hostname we should act on.
+    Rejects empty strings, the DNS root, reserved names, and names
+    whose first label (the hostname part) contains invalid characters.
+    dnspython has already validated wire-format correctness; this is a
+    semantic sanity check for our specific use case.
+    """
+    if not name or name in _NONSENSE_NAMES:
+        logger.warning("Rejecting nonsense name: %r", name)
+        return False
+
+    # Check the leftmost label — the actual hostname
+    first_label = name.split(".")[0]
+    if not first_label or not _LABEL_RE.match(first_label):
+        logger.warning("Rejecting name with invalid first label: %r", name)
+        return False
+
+    # Reject names that are purely numeric (e.g. "192.168.1.1") —
+    # these are IPs accidentally used as hostnames
+    if all(part.isdigit() for part in name.split(".")):
+        logger.warning("Rejecting all-numeric name (looks like an IP): %r", name)
+        return False
+
+    return True
 
 def reverse_ptr(ip: str) -> str | None:
     """
@@ -226,7 +263,14 @@ def query_unbound(name: str, rdtype: str, logger: logging.Logger) -> list[str]:
             # unbound-control lookup output: "name TTL class type rdata"
             parts = line.split()
             if len(parts) >= 5 and parts[3] == rdtype:
-                records.append(parts[4])
+                ip = parts[4]
+                try:
+                    ipaddress.ip_address(ip)
+                    records.append(ip)
+                except ValueError:
+                    logger.warning(
+                        "Unexpected non-IP value in unbound-control lookup output: %r", ip
+                    )
         return records
     except Exception as e:
         logger.debug("unbound-control lookup %s %s failed: %s", name, rdtype, e)
@@ -271,6 +315,13 @@ def process_update(msg: dns.message.Message, unbound_conf: str,
         # Skip record types we don't handle
         if rdtype not in HANDLED_TYPES:
             logger.debug("Skipping unsupported record type %s for %s", rdtype, name)
+            continue
+
+        # Sanity check the name — PTR names (in-addr.arpa / ip6.arpa) are
+        # exempt since they don't look like hostnames but are always valid
+        # if dnspython accepted them from the wire format.
+        if rdtype != "PTR" and not is_sane_name(name, logger):
+            skipped += 1
             continue
 
         # Guard: skip anything owned by static Unbound config files.
