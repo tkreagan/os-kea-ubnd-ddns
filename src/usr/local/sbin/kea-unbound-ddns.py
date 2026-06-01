@@ -23,6 +23,8 @@ import socket
 import subprocess
 import sys
 
+_DNSPYTHON_MIN = (2, 8)
+
 try:
     import dns.message
     import dns.opcode
@@ -31,8 +33,22 @@ try:
     import dns.rdatatype
     import dns.tsig
     import dns.tsigkeyring
+    import dns.version
+    _ver = tuple(int(x) for x in dns.version.version.split(".")[:2])
+    if _ver < _DNSPYTHON_MIN:
+        print(
+            f"ERROR: dnspython {dns.version.version} is too old — "
+            f"{_DNSPYTHON_MIN[0]}.{_DNSPYTHON_MIN[1]}+ required. "
+            f"Upgrade with: pkg upgrade py313-dnspython",
+            file=sys.stderr
+        )
+        sys.exit(1)
 except ImportError:
-    print("ERROR: dnspython is required. Install with: pkg install py311-dnspython", file=sys.stderr)
+    print(
+        "ERROR: dnspython is not installed. "
+        "Install with: pkg install py313-dnspython",
+        file=sys.stderr
+    )
     sys.exit(1)
 
 # ── Constants ─────────────────────────────────────────────────────────────────
