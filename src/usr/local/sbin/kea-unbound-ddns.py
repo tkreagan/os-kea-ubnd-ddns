@@ -146,10 +146,17 @@ def process_update(msg: dns.message.Message, unbound_conf: str,
         rdtype = dns.rdatatype.to_text(rrset.rdtype)
         rdclass = dns.rdataclass.to_text(rrset.rdclass)
 
-        # RFC 2136 §2.5: deletion of an RRset uses class ANY or NONE with TTL=0
+        # RFC 2136 §2.5: deletion requires BOTH class ANY/NONE AND TTL=0.
+        # Three delete forms exist:
+        #   1. Delete RRset:      class=ANY,  type=<specific>, TTL=0, no rdata
+        #   2. Delete all RRsets: class=ANY,  type=ANY,        TTL=0, no rdata
+        #   3. Delete specific RR: class=NONE, type=<specific>, TTL=0, with rdata
+        # unbound-control only supports removing by name (not individual RRs),
+        # so all three forms are handled identically via local_data_remove.
+        # TTL=0 alone is not sufficient — class is the authoritative indicator.
         is_delete = (
-            rrset.ttl == 0 or
             rrset.rdclass in (dns.rdataclass.ANY, dns.rdataclass.NONE)
+            and rrset.ttl == 0
         )
 
         if is_delete:
