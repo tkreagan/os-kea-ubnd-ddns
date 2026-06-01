@@ -162,7 +162,7 @@ def is_static_entry(name: str, rdtype: str, logger: logging.Logger) -> bool:
     # For PTR records the name IS the PTR (e.g. 1.0.168.192.in-addr.arpa)
     # For forward records check for the FQDN in a local-data line
     forward_pattern = re.compile(
-        rf'^local-data:\s+"' + re.escape(name) +
+        r'^local-data:\s+"' + re.escape(name) +
         rf'\.?\s+.*\bIN\s+{re.escape(rdtype)}\b',
         re.IGNORECASE
     )
