@@ -1,0 +1,56 @@
+<model>
+    <mount>//OPNsense/KeaUnbound</mount>
+    <version>1.0.0</version>
+    <description>Kea Unbound DDNS registration</description>
+    <items>
+        <general>
+            <!-- Master enable switch. When disabled, the daemon does not start
+                 and all hooks (kea_sync, unbound_start, bootup) are no-ops. -->
+            <enabled type="BooleanField">
+                <Default>0</Default>
+                <Required>Y</Required>
+            </enabled>
+
+            <!-- UDP port the stub RFC 2136 listener binds to on 127.0.0.1.
+                 Must match the destination port configured in kea-dhcp-ddns.
+                 Default 53535 is in the Kea port family (kea-ctrl-agent uses
+                 53001) and does not conflict with any standard service. -->
+            <port type="IntegerField">
+                <Default>53535</Default>
+                <Required>Y</Required>
+                <MinimumValue>1024</MinimumValue>
+                <MaximumValue>65535</MaximumValue>
+            </port>
+
+            <!-- TSIG key name for authenticating DNS UPDATE packets from
+                 kea-dhcp-ddns. Optional — if empty, TSIG is disabled and
+                 packets are accepted unsigned (safe since we only listen on
+                 127.0.0.1). If set, kea-dhcp-ddns must be configured to
+                 sign updates with the matching key. -->
+            <tsig_key_name type="TextField">
+                <Required>N</Required>
+            </tsig_key_name>
+
+            <!-- TSIG shared secret (base64-encoded HMAC key). Only used when
+                 tsig_key_name is set. Stored in config.xml — ensure appropriate
+                 access controls on the OPNsense config backup. -->
+            <tsig_key_secret type="TextField">
+                <Required>N</Required>
+            </tsig_key_secret>
+
+            <!-- When enabled, kea_sync triggers a full Unbound reload so that
+                 updated static reservations become visible in DNS immediately.
+                 WARNING: Unbound reload wipes all runtime local_data entries
+                 injected for dynamic leases. The plugin automatically resyncs
+                 dynamic leases from the Kea lease DB after the reload, but
+                 there is a brief window during which dynamic lease DNS entries
+                 are unavailable.
+                 Only relevant if "Register DHCP Static Mappings" is also
+                 enabled in Services -> Unbound DNS -> General. -->
+            <reload_unbound_on_kea_sync type="BooleanField">
+                <Default>0</Default>
+                <Required>Y</Required>
+            </reload_unbound_on_kea_sync>
+        </general>
+    </items>
+</model>

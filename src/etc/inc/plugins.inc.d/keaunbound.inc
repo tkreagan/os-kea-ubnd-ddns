@@ -155,10 +155,10 @@ function keaunbound_on_kea_sync($verbose = false)
         service_log("KeaUnbound: unbound_add_host_entries() not available -- skipping.\n", $verbose);
     }
 
-    $unbound = new \OPNsense\Unbound\Unbound();
-    $regdhcpstatic = !empty((string)$unbound->general->regdhcpstatic);
+    $cfg = new \OPNsense\KeaUnbound\General();
+    $reload_on_sync = !empty((string)$cfg->general->reload_unbound_on_kea_sync);
 
-    if ($regdhcpstatic) {
+    if ($reload_on_sync) {
         /*
          * regdhcpstatic is on -- OPNsense manages static reservation DNS.
          * Step 2: reload Unbound to pick up updated static reservations.
