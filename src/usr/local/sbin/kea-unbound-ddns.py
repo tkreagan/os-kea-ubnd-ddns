@@ -247,6 +247,24 @@ def query_unbound(name: str, rdtype: str, logger: logging.Logger) -> list[str]:
     Query Unbound via unbound-control lookup for existing records of a given
     type for a name. Returns a list of rdata strings (e.g. ['10.0.0.1']).
     Used to preserve dual-stack records when removing one address family.
+
+    IMPORTANT — timeout behaviour and data loss risk:
+    unbound-control local_data_remove removes ALL records for a name, not
+    just one type. Before deleting an A or AAAA record we query for the
+    other family so we can restore it afterward. If this query times out
+    or fails, we return an empty list and the delete proceeds — meaning
+    the other family's record will be silently wiped.
+
+    This is an acceptable trade-off in normal operation since Unbound
+    should respond to local control commands in milliseconds. However,
+    in the rare case where Unbound is under heavy load and the lookup
+    exceeds the 5-second timeout, a valid AAAA record could be lost when
+    deleting an A record (or vice versa). The record will be restored the
+    next time kea-dhcp-ddns sends an update for that lease — typically
+    on the next renewal.
+
+    A longer timeout increases the window during which kea-dhcp-ddns is
+    blocked waiting for a response. 5 seconds is a pragmatic balance.
     """
     try:
         result = subprocess.run(
