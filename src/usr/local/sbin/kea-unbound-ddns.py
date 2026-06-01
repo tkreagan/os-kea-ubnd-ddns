@@ -17,6 +17,7 @@ import argparse
 import ipaddress
 import logging
 import os
+import re
 import signal
 import socket
 import subprocess
@@ -160,7 +161,6 @@ def is_static_entry(name: str, rdtype: str, logger: logging.Logger) -> bool:
     """
     # For PTR records the name IS the PTR (e.g. 1.0.168.192.in-addr.arpa)
     # For forward records check for the FQDN in a local-data line
-    import re
     forward_pattern = re.compile(
         rf'^local-data:\s+"' + re.escape(name) +
         rf'\.?\s+.*\bIN\s+{re.escape(rdtype)}\b',
@@ -169,7 +169,7 @@ def is_static_entry(name: str, rdtype: str, logger: logging.Logger) -> bool:
     # PTR guard: for A/AAAA this checks the reverse PTR name;
     # for PTR records it checks the name directly as a local-data-ptr entry
     ptr_pattern = re.compile(
-        rf'^local-data-ptr:\s+"' + re.escape(name) + r'\b',
+        r'^local-data-ptr:\s+"' + re.escape(name) + r'\b',
         re.IGNORECASE
     )
 
