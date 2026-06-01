@@ -65,11 +65,14 @@
  *     Together these fully repopulate Unbound from scratch without waiting
  *     for devices to renew their leases.
  *
- *   bootup (priority 2) -- ensures our daemon starts after Unbound (1) but
- *     before Kea (3), so the stub is ready to receive DNS UPDATE packets
- *     when Kea replays its lease database on startup.
+ *   bootup (priority 2) -- ensures our daemon starts after Unbound (priority
+ *     1, no suffix = default). Kea does not register on the bootup hook so
+ *     there is no ordering constraint against it -- our daemon will be ready
+ *     before Kea sends any DNS UPDATE packets since Kea starts via its own
+ *     rc.d mechanism after the bootup hook chain completes.
  *
- * TODO: verify Unbound and Kea bootup hook priorities to confirm :2 is correct.
+ * Verified: Unbound uses bootup with no priority (default=1). Kea does not
+ *   use the bootup hook. Our :2 priority correctly places us after Unbound.
  * TODO: implement keaunbound_reservation_sync() -- reads Kea config via
  *       kea-ctrl-agent API and registers static reservations in Unbound.
  * TODO: implement keaunbound_lease_sync() -- queries kea-ctrl-agent REST API
@@ -209,9 +212,9 @@ function keaunbound_start_do($verbose = false)
     /*
      * Start the kea-unbound-ddns.py daemon via configd.
      * Registered on the bootup hook at priority 2, which ensures we start
-     * after Unbound (priority 1) and before Kea (priority 3) so the stub
-     * is ready to receive DNS UPDATE packets when Kea replays its lease
-     * database on startup.
+     * after Unbound (no priority suffix = default/1). Kea does not use the
+     * bootup hook so no explicit ordering against it is needed -- our daemon
+     * will be ready before Kea's rc.d startup completes.
      *
      * configd_run() is non-blocking — it sends the action and returns
      * immediately without waiting for the daemon to be fully up. This is
