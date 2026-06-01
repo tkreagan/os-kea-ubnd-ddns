@@ -9,8 +9,8 @@ All other DNS opcodes are ignored. TSIG authentication is supported optionally.
 
 Usage:
     kea-unbound-ddns.py [--port PORT] [--pidfile FILE] [--logfile FILE]
-                        [--unbound-conf FILE] [--tsig-key NAME:SECRET]
-                        [--dry-run] [--verbose]
+                        [--unbound-conf FILE] [--host-entries FILE]
+                        [--tsig-key NAME:SECRET] [--dry-run] [--verbose]
 """
 
 import argparse
@@ -52,11 +52,12 @@ except ImportError:
     sys.exit(1)
 
 # ── Constants ─────────────────────────────────────────────────────────────────
-DEFAULT_PORT        = 53535
-DEFAULT_PIDFILE     = "/var/run/kea-unbound-ddns.pid"
-DEFAULT_LOGFILE     = "/var/log/kea-unbound.log"
+DEFAULT_PORT         = 53535
+DEFAULT_PIDFILE      = "/var/run/kea-unbound-ddns.pid"
+DEFAULT_LOGFILE      = "/var/log/kea-unbound.log"
 DEFAULT_UNBOUND_CONF = "/var/unbound/unbound.conf"
-LOG_PREFIX          = "[kea-unbound-ddns]"
+DEFAULT_HOST_ENTRIES = "/var/unbound/host_entries.conf"
+LOG_PREFIX           = "[kea-unbound-ddns]"
 
 # ── Argument parsing ──────────────────────────────────────────────────────────
 def parse_args():
@@ -69,6 +70,8 @@ def parse_args():
                    help=f"Log file path (default: {DEFAULT_LOGFILE})")
     p.add_argument("--unbound-conf", default=DEFAULT_UNBOUND_CONF,
                    help=f"Unbound config file (default: {DEFAULT_UNBOUND_CONF})")
+    p.add_argument("--host-entries", default=DEFAULT_HOST_ENTRIES,
+                   help=f"Unbound host entries file to guard against clobbering (default: {DEFAULT_HOST_ENTRIES})")
     p.add_argument("--tsig-key",     default=None,
                    help="TSIG key in NAME:SECRET format (base64 secret)")
     p.add_argument("--dry-run", "-n", action="store_true",
@@ -142,11 +145,10 @@ HANDLED_TYPES = {"A", "AAAA", "PTR"}
 # The "other" address family for dual-stack preservation
 OTHER_FAMILY = {"A": "AAAA", "AAAA": "A"}
 
-# Files containing statically-owned Unbound records that we must not touch.
-# host_entries.conf contains both manual host overrides and OPNsense-managed
-# static DHCP mappings — both are out of our jurisdiction.
+# Default list of files containing statically-owned Unbound records.
+# Overridden at runtime via --host-entries.
 STATIC_ENTRY_FILES = [
-    "/var/unbound/host_entries.conf",
+    DEFAULT_HOST_ENTRIES,
 ]
 
 def fqdn(name: dns.name.Name) -> str:
@@ -164,7 +166,8 @@ def reverse_ptr(ip: str) -> str | None:
     except ValueError:
         return None
 
-def is_static_entry(name: str, rdtype: str, logger: logging.Logger) -> bool:
+def is_static_entry(name: str, rdtype: str, logger: logging.Logger,
+                    static_files: list[str]) -> bool:
     """
     Return True if name+type appears as a static entry in any of the
     Unbound config files we don't own. Protects against clobbering manual
@@ -189,7 +192,7 @@ def is_static_entry(name: str, rdtype: str, logger: logging.Logger) -> bool:
         re.IGNORECASE
     )
 
-    for filepath in STATIC_ENTRY_FILES:
+    for filepath in static_files:
         try:
             with open(filepath) as f:
                 for line in f:
@@ -231,7 +234,8 @@ def query_unbound(name: str, rdtype: str, logger: logging.Logger) -> list[str]:
 
 # ── Update processing ─────────────────────────────────────────────────────────
 def process_update(msg: dns.message.Message, unbound_conf: str,
-                   dry_run: bool, logger: logging.Logger) -> int:
+                   dry_run: bool, logger: logging.Logger,
+                   static_files: list[str]) -> int:
     """
     Process a DNS UPDATE message. Returns DNS RCODE to send back.
     Update section lives in msg.authority for dnspython parsed UPDATE messages.
@@ -271,7 +275,7 @@ def process_update(msg: dns.message.Message, unbound_conf: str,
 
         # Guard: skip anything owned by static Unbound config files.
         # Check BEFORE is_delete so we never clobber on either add or delete.
-        if is_static_entry(name, rdtype, logger):
+        if is_static_entry(name, rdtype, logger, static_files):
             skipped += 1
             continue
 
@@ -431,8 +435,10 @@ def main():
         remove_pidfile(args.pidfile)
         sys.exit(1)
 
-    logger.info("Listening on 127.0.0.1:%d (dry_run=%s tsig=%s)",
-                args.port, args.dry_run, "yes" if keyring else "no")
+    static_files = [args.host_entries]
+
+    logger.info("Listening on 127.0.0.1:%d (dry_run=%s tsig=%s host_entries=%s)",
+                args.port, args.dry_run, "yes" if keyring else "no", args.host_entries)
 
     if args.dry_run:
         logger.info("[dry-run] No unbound-control calls will be made")
@@ -469,7 +475,7 @@ def main():
         logger.debug("DNS UPDATE from %s id=%d", addr, msg.id)
 
         # Process the update
-        rcode = process_update(msg, args.unbound_conf, args.dry_run, logger)
+        rcode = process_update(msg, args.unbound_conf, args.dry_run, logger, static_files)
 
         # Send response
         try:
