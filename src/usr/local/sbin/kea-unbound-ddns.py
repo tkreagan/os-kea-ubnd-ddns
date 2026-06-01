@@ -9,7 +9,8 @@ All other DNS opcodes are ignored. TSIG authentication is supported optionally.
 
 Usage:
     kea-unbound-ddns.py [--port PORT] [--unbound-conf FILE] [--host-entries FILE]
-                        [--tsig-key NAME:SECRET] [--dry-run] [--verbose]
+                        [--tsig-key NAME:SECRET] [--tsig-algorithm ALGO]
+                        [--dry-run] [--verbose]
 
 PID management is handled by daemon(8) which launches this script.
 Do not run this script directly in production — use configd actions.
@@ -77,8 +78,10 @@ def parse_args():
                    help=f"Unbound config file (default: {DEFAULT_UNBOUND_CONF})")
     p.add_argument("--host-entries", default=DEFAULT_HOST_ENTRIES,
                    help=f"Unbound host entries file to guard against clobbering (default: {DEFAULT_HOST_ENTRIES})")
-    p.add_argument("--tsig-key",     default=None,
+    p.add_argument("--tsig-key",       default=None,
                    help="TSIG key in NAME:SECRET format (base64 secret)")
+    p.add_argument("--tsig-algorithm", default="HMAC-SHA256",
+                   help="TSIG algorithm (default: HMAC-SHA256)")
     p.add_argument("--dry-run", "-n", action="store_true",
                    help="Parse and log updates but do not call unbound-control")
     p.add_argument("--verbose", "-v", action="store_true",
@@ -501,14 +504,30 @@ def build_response(request: dns.message.Message, rcode: int) -> bytes:
     return response.to_wire()
 
 # ── TSIG keyring ──────────────────────────────────────────────────────────────
-def parse_tsig_key(spec: str | None) -> dict | None:
+def parse_tsig_key(spec: str | None, algorithm: str = "HMAC-SHA256") -> dict | None:
     if not spec:
         return None
     if ":" not in spec:
         print("ERROR: --tsig-key must be NAME:SECRET (base64)", file=sys.stderr)
         sys.exit(1)
     name, secret = spec.split(":", 1)
-    return dns.tsigkeyring.make_keyring({name: secret})
+
+    # Map algorithm name to dnspython constant
+    algo_map = {
+        "HMAC-MD5":    dns.tsig.HMAC_MD5,
+        "HMAC-SHA1":   dns.tsig.HMAC_SHA1,
+        "HMAC-SHA224": dns.tsig.HMAC_SHA224,
+        "HMAC-SHA256": dns.tsig.HMAC_SHA256,
+        "HMAC-SHA384": dns.tsig.HMAC_SHA384,
+        "HMAC-SHA512": dns.tsig.HMAC_SHA512,
+    }
+    algo = algo_map.get(algorithm.upper())
+    if algo is None:
+        print(f"ERROR: unknown TSIG algorithm {algorithm!r}. "
+              f"Valid options: {', '.join(algo_map)}", file=sys.stderr)
+        sys.exit(1)
+
+    return dns.tsigkeyring.make_keyring({name: secret}, algorithm=algo)
 
 # ── Signal handling ───────────────────────────────────────────────────────────
 _running = True
@@ -521,7 +540,7 @@ def handle_signal(signum, frame):
 def main():
     args = parse_args()
     logger = setup_logging(args.verbose)
-    keyring = parse_tsig_key(args.tsig_key)
+    keyring = parse_tsig_key(args.tsig_key, args.tsig_algorithm)
 
     # Register signal handlers for graceful shutdown
     signal.signal(signal.SIGTERM, handle_signal)
@@ -540,7 +559,9 @@ def main():
     static_files = [args.host_entries]
 
     logger.info("Listening on 127.0.0.1:%d dry_run=%s tsig=%s host_entries=%s",
-                args.port, args.dry_run, "yes" if keyring else "no", args.host_entries)
+                args.port, args.dry_run,
+                args.tsig_algorithm if keyring else "disabled",
+                args.host_entries)
 
     if args.dry_run:
         logger.info("[dry-run] No unbound-control calls will be made")

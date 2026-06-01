@@ -38,6 +38,12 @@
         <type>password</type>
         <help>Base64-encoded HMAC secret matching the key name above. Only used when TSIG Key Name is set.</help>
     </field>
+    <field>
+        <id>general.general.tsig_algorithm</id>
+        <label>TSIG Algorithm</label>
+        <type>dropdown</type>
+        <help>Algorithm used to sign DNS UPDATE packets. Must match the algorithm configured in kea-dhcp-ddns for the same key. HMAC-SHA256 is recommended. Only used when TSIG Key Name is set.</help>
+    </field>
 
     <field>
         <type>header</type>

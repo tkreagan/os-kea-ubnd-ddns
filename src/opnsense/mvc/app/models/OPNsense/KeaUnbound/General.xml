@@ -38,6 +38,22 @@
                 <Required>N</Required>
             </tsig_key_secret>
 
+            <!-- TSIG algorithm. Must match the algorithm configured in
+                 kea-dhcp-ddns for the same key. HMAC-SHA256 is recommended —
+                 MD5 and SHA1 are cryptographically weak. -->
+            <tsig_algorithm type="OptionField">
+                <Required>N</Required>
+                <Default>HMAC-SHA256</Default>
+                <OptionValues>
+                    <HMAC-MD5>HMAC-MD5 (not recommended)</HMAC-MD5>
+                    <HMAC-SHA1>HMAC-SHA1 (not recommended)</HMAC-SHA1>
+                    <HMAC-SHA224>HMAC-SHA224</HMAC-SHA224>
+                    <HMAC-SHA256>HMAC-SHA256 (recommended)</HMAC-SHA256>
+                    <HMAC-SHA384>HMAC-SHA384</HMAC-SHA384>
+                    <HMAC-SHA512>HMAC-SHA512</HMAC-SHA512>
+                </OptionValues>
+            </tsig_algorithm>
+
             <!-- When enabled, kea_sync triggers a full Unbound reload so that
                  updated static reservations become visible in DNS immediately.
                  WARNING: Unbound reload wipes all runtime local_data entries
