@@ -2,7 +2,7 @@
 """
 kea-unbound-ddns.py — RFC 2136 stub listener for Kea → Unbound DNS registration.
 
-Listens on localhost:5353 (UDP), receives DNS UPDATE packets from kea-dhcp-ddns,
+Listens on localhost:53535 (UDP), receives DNS UPDATE packets from kea-dhcp-ddns,
 and translates them into unbound-control local_data / local_data_remove calls.
 
 All other DNS opcodes are ignored. TSIG authentication is supported optionally.
@@ -36,7 +36,7 @@ except ImportError:
     sys.exit(1)
 
 # ── Constants ─────────────────────────────────────────────────────────────────
-DEFAULT_PORT        = 5353
+DEFAULT_PORT        = 53535
 DEFAULT_PIDFILE     = "/var/run/kea-unbound-ddns.pid"
 DEFAULT_LOGFILE     = "/var/log/kea-unbound.log"
 DEFAULT_UNBOUND_CONF = "/var/unbound/unbound.conf"
