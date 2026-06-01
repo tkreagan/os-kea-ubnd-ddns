@@ -2,17 +2,37 @@
     <Services>
         <KeaUnbound VisibleName="Kea Unbound" cssClass="fa fa-exchange fa-fw">
             <General order="10" VisibleName="Settings" url="/ui/keaunbound/index"/>
-            <!-- TODO: Status view — shows live registration state across all sources:
-                 - Kea static reservations (from kea-ctrl-agent API)
-                 - Kea active leases (from kea-ctrl-agent API)
-                 - Unbound host_entries.conf (OPNsense-managed, not our records)
-                 - Unbound local_data we injected (from list_local_data)
-                 Columns: hostname, IP, source, registered in Unbound, status.
-                 Flags potentially stale records (in local_data but not in Kea
-                 leases, reservations, or host_entries). Backed by the audit
-                 mode of kea-unbound-sync.py. Optional --clean action to remove
-                 stale records after confirmation.
-                 See keaunbound.inc TODO for audit script implementation details.
+            <!--
+            TODO: Status view - shows live registration state across all sources.
+
+            Primary table columns:
+              hostname | IP | record type (A/AAAA) | PTR registered | source | in Unbound | status
+
+            PTR is shown as a column on the forward record row (paired),
+            not as a separate row - PTRs are almost always coupled to their
+            forward record. PTR column shows checkmark if the corresponding
+            in-addr.arpa or ip6.arpa record is present in Unbound.
+
+            Sources:
+              - Kea static reservations (kea-ctrl-agent API)
+              - Kea active leases (kea-ctrl-agent API)
+              - Unbound host_entries.conf (OPNsense-managed, shown for
+                context but marked "not managed by this plugin")
+
+            Status flags:
+              - OK: forward + PTR both present in Unbound
+              - Missing PTR: forward present but PTR absent
+              - Stale: in local_data but not in any Kea source or host_entries
+              - Static: in host_entries.conf, not managed by this plugin
+
+            Secondary table: "Orphaned PTR records" - PTRs in local_data
+            with no corresponding forward record. Rare but possible if daemon
+            crashed between adding the forward record and the PTR, or if
+            something else injected PTRs directly. Flagged for review.
+
+            Optional action: remove stale/orphaned records after confirmation.
+            Backed by audit mode of kea-unbound-sync.py (not yet implemented).
+
             <Status order="50" VisibleName="Status" url="/ui/keaunbound/status"/>
             -->
             <LogFile order="100" VisibleName="Log File" url="/ui/diagnostics/log/core/kea-unbound-ddns"/>
