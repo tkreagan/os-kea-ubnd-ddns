@@ -21,7 +21,6 @@ import signal
 import socket
 import subprocess
 import sys
-import time
 
 try:
     import dns.message
@@ -380,7 +379,7 @@ def parse_tsig_key(spec: str | None) -> dict | None:
     if not spec:
         return None
     if ":" not in spec:
-        print(f"ERROR: --tsig-key must be NAME:SECRET (base64)", file=sys.stderr)
+        print("ERROR: --tsig-key must be NAME:SECRET (base64)", file=sys.stderr)
         sys.exit(1)
     name, secret = spec.split(":", 1)
     return dns.tsigkeyring.make_keyring({name: secret})
