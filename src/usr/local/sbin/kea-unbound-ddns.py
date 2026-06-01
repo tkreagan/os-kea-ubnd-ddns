@@ -119,6 +119,12 @@ def unbound_control(args: list[str], unbound_conf: str, dry_run: bool,
         return False
 
 # ── DNS record helpers ────────────────────────────────────────────────────────
+
+# Record types we handle. Everything else is logged and skipped.
+HANDLED_TYPES = {"A", "AAAA", "PTR"}
+# The "other" address family for dual-stack preservation
+OTHER_FAMILY = {"A": "AAAA", "AAAA": "A"}
+
 def fqdn(name: dns.name.Name) -> str:
     """Return fully-qualified name string without trailing dot."""
     return str(name).rstrip(".")
@@ -130,71 +136,153 @@ def reverse_ptr(ip: str) -> str | None:
     except ValueError:
         return None
 
+def query_unbound(name: str, rdtype: str, logger: logging.Logger) -> list[str]:
+    """
+    Query Unbound via unbound-control lookup for existing records of a given
+    type for a name. Returns a list of rdata strings (e.g. ['10.0.0.1']).
+    Used to preserve dual-stack records when removing one address family.
+    """
+    try:
+        result = subprocess.run(
+            ["unbound-control", "lookup", name],
+            capture_output=True, text=True, timeout=5
+        )
+        records = []
+        for line in result.stdout.splitlines():
+            # unbound-control lookup output: "name TTL class type rdata"
+            parts = line.split()
+            if len(parts) >= 5 and parts[3] == rdtype:
+                records.append(parts[4])
+        return records
+    except Exception as e:
+        logger.debug("unbound-control lookup %s %s failed: %s", name, rdtype, e)
+        return []
+
 # ── Update processing ─────────────────────────────────────────────────────────
 def process_update(msg: dns.message.Message, unbound_conf: str,
                    dry_run: bool, logger: logging.Logger) -> int:
     """
     Process a DNS UPDATE message. Returns DNS RCODE to send back.
     Update section lives in msg.authority for dnspython parsed UPDATE messages.
+
+    Handles:
+      - A, AAAA: forward record add/remove with dual-stack preservation and
+                 automatic PTR add/remove
+      - PTR: direct add/remove, no secondary effects
+      - All other types: logged and skipped
+
+    Dual-stack preservation: unbound-control local_data_remove removes ALL
+    records for a name. When removing one address family (e.g. A), we first
+    query Unbound for the other family (AAAA), remove the name, then re-add
+    the preserved record so the other family survives.
     """
     added = 0
     removed = 0
     errors = 0
 
     for rrset in msg.authority:
-        name = fqdn(rrset.name)
+        name   = fqdn(rrset.name)
         rdtype = dns.rdatatype.to_text(rrset.rdtype)
-        rdclass = dns.rdataclass.to_text(rrset.rdclass)
+
+        # Skip record types we don't handle
+        if rdtype not in HANDLED_TYPES:
+            logger.debug("Skipping unsupported record type %s for %s", rdtype, name)
+            continue
 
         # RFC 2136 §2.5: deletion requires BOTH class ANY/NONE AND TTL=0.
-        # Three delete forms exist:
-        #   1. Delete RRset:      class=ANY,  type=<specific>, TTL=0, no rdata
-        #   2. Delete all RRsets: class=ANY,  type=ANY,        TTL=0, no rdata
+        # Three delete forms:
+        #   1. Delete RRset:       class=ANY,  type=<specific>, TTL=0, no rdata
+        #   2. Delete all RRsets:  class=ANY,  type=ANY,        TTL=0, no rdata
         #   3. Delete specific RR: class=NONE, type=<specific>, TTL=0, with rdata
-        # unbound-control only supports removing by name (not individual RRs),
-        # so all three forms are handled identically via local_data_remove.
-        # TTL=0 alone is not sufficient — class is the authoritative indicator.
+        # unbound-control only supports name-level removal, so all three are
+        # handled identically. TTL=0 alone is not sufficient.
         is_delete = (
             rrset.rdclass in (dns.rdataclass.ANY, dns.rdataclass.NONE)
             and rrset.ttl == 0
         )
 
         if is_delete:
-            logger.info("Remove: %s %s", rdtype, name)
-            ok = unbound_control(["local_data_remove", name],
-                                  unbound_conf, dry_run, logger)
-            # Also remove PTR if this is an A or AAAA record
-            if ok and rdtype in ("A", "AAAA"):
-                for rr in rrset:
-                    ptr = reverse_ptr(str(rr))
+            if rdtype in ("A", "AAAA"):
+                # Preserve the other address family before removing the name.
+                # local_data_remove wipes ALL records for the name, so we
+                # must re-add any surviving family record afterward.
+                other_type = OTHER_FAMILY[rdtype]
+                preserved = query_unbound(name, other_type, logger)
+                preserved_ptrs = []
+                for ip in preserved:
+                    ptr = reverse_ptr(ip)
                     if ptr:
+                        preserved_ptrs.append((ip, ptr))
+
+                # Find the PTR(s) for the record(s) being removed so we can
+                # clean them up. For delete forms 1&2 the rrset has no rdata,
+                # so query Unbound for the current value before removing.
+                current_ips = [str(rr) for rr in rrset] or query_unbound(name, rdtype, logger)
+                current_ptrs = [p for p in (reverse_ptr(ip) for ip in current_ips) if p]
+
+                logger.info("Remove: %s %s (preserving %d %s record(s))",
+                            rdtype, name, len(preserved), other_type)
+                ok = unbound_control(["local_data_remove", name],
+                                     unbound_conf, dry_run, logger)
+                if ok:
+                    # Remove PTR records for the deleted address(es)
+                    for ptr in current_ptrs:
                         logger.info("Remove PTR: %s", ptr)
                         unbound_control(["local_data_remove", ptr],
                                         unbound_conf, dry_run, logger)
-            if ok:
-                removed += 1
-            else:
-                errors += 1
+                    # Re-add preserved other-family records
+                    for ip, ptr in preserved_ptrs:
+                        logger.info("Restore %s: %s -> %s", other_type, name, ip)
+                        unbound_control(["local_data", f"{name} IN {other_type} {ip}"],
+                                        unbound_conf, dry_run, logger)
+                        logger.info("Restore PTR: %s -> %s", ptr, name)
+                        unbound_control(["local_data", f"{ptr} IN PTR {name}."],
+                                        unbound_conf, dry_run, logger)
+                    removed += 1
+                else:
+                    errors += 1
+
+            elif rdtype == "PTR":
+                # PTR delete: the name IS the PTR (e.g. 1.0.0.10.in-addr.arpa)
+                logger.info("Remove PTR: %s", name)
+                ok = unbound_control(["local_data_remove", name],
+                                     unbound_conf, dry_run, logger)
+                if ok:
+                    removed += 1
+                else:
+                    errors += 1
+
         else:
             # Addition
             for rr in rrset:
                 rdata = str(rr)
-                record = f"{name} {rrset.ttl} IN {rdtype} {rdata}"
-                logger.info("Add: %s", record)
-                ok = unbound_control(["local_data", record],
-                                      unbound_conf, dry_run, logger)
-                # Add PTR for A and AAAA records
-                if ok and rdtype in ("A", "AAAA"):
-                    ptr = reverse_ptr(rdata)
-                    if ptr:
-                        ptr_record = f"{ptr} {rrset.ttl} IN PTR {name}."
-                        logger.info("Add PTR: %s", ptr_record)
-                        unbound_control(["local_data", ptr_record],
-                                        unbound_conf, dry_run, logger)
-                if ok:
-                    added += 1
-                else:
-                    errors += 1
+
+                if rdtype in ("A", "AAAA"):
+                    record = f"{name} {rrset.ttl} IN {rdtype} {rdata}"
+                    logger.info("Add: %s", record)
+                    ok = unbound_control(["local_data", record],
+                                         unbound_conf, dry_run, logger)
+                    if ok:
+                        ptr = reverse_ptr(rdata)
+                        if ptr:
+                            ptr_record = f"{ptr} {rrset.ttl} IN PTR {name}."
+                            logger.info("Add PTR: %s", ptr_record)
+                            unbound_control(["local_data", ptr_record],
+                                            unbound_conf, dry_run, logger)
+                        added += 1
+                    else:
+                        errors += 1
+
+                elif rdtype == "PTR":
+                    # Explicit PTR from kea-dhcp-ddns — add directly
+                    record = f"{name} {rrset.ttl} IN PTR {rdata}"
+                    logger.info("Add PTR: %s", record)
+                    ok = unbound_control(["local_data", record],
+                                         unbound_conf, dry_run, logger)
+                    if ok:
+                        added += 1
+                    else:
+                        errors += 1
 
     logger.info("Update complete: added=%d removed=%d errors=%d", added, removed, errors)
     return dns.rcode.NOERROR if errors == 0 else dns.rcode.SERVFAIL
