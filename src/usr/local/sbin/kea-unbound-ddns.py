@@ -58,6 +58,7 @@ DEFAULT_LOGFILE      = "/var/log/kea-unbound.log"
 DEFAULT_UNBOUND_CONF = "/var/unbound/unbound.conf"
 DEFAULT_HOST_ENTRIES = "/var/unbound/host_entries.conf"
 UNBOUND_CONTROL      = "/usr/local/sbin/unbound-control"
+DRILL                = "/usr/local/bin/drill"
 LOG_PREFIX           = "[kea-unbound-ddns]"
 
 # ── Argument parsing ──────────────────────────────────────────────────────────
@@ -242,51 +243,53 @@ def is_static_entry(name: str, rdtype: str, logger: logging.Logger,
 
     return False
 
-def query_unbound(name: str, rdtype: str, logger: logging.Logger) -> list[str]:
+def query_unbound(name: str, record_type: str, logger: logging.Logger) -> list[str]:
     """
-    Query Unbound via unbound-control lookup for existing records of a given
-    type for a name. Returns a list of rdata strings (e.g. ['10.0.0.1']).
-    Used to preserve dual-stack records when removing one address family.
+    Query Unbound's DNS interface for existing records of record_type for
+    name. Returns a list of IP address strings (e.g. ['10.0.0.1']).
+
+    Used exclusively for dual-stack preservation: before removing a name
+    (which wipes ALL records for it), we query for the other address family
+    so we can restore it afterward.
+
+    Uses drill against 127.0.0.1 — this queries Unbound's live DNS interface
+    and returns whatever Unbound would answer, whether from local data or
+    cache. This is more correct than unbound-control cache_lookup (which
+    misses local_data entries) or list_local_data (which dumps everything).
 
     IMPORTANT — timeout behaviour and data loss risk:
     unbound-control local_data_remove removes ALL records for a name, not
-    just one type. Before deleting an A or AAAA record we query for the
-    other family so we can restore it afterward. If this query times out
-    or fails, we return an empty list and the delete proceeds — meaning
-    the other family's record will be silently wiped.
-
-    This is an acceptable trade-off in normal operation since Unbound
-    should respond to local control commands in milliseconds. However,
-    in the rare case where Unbound is under heavy load and the lookup
-    exceeds the 5-second timeout, a valid AAAA record could be lost when
-    deleting an A record (or vice versa). The record will be restored the
-    next time kea-dhcp-ddns sends an update for that lease — typically
-    on the next renewal.
-
-    A longer timeout increases the window during which kea-dhcp-ddns is
-    blocked waiting for a response. 5 seconds is a pragmatic balance.
+    just one type. If this query times out or fails, we return an empty
+    list and the delete proceeds — meaning the other family's record will
+    be silently wiped. In normal operation Unbound responds in milliseconds
+    so this is unlikely. If it does occur, the record will be restored on
+    the next kea-dhcp-ddns update for that lease (typically next renewal).
+    A longer timeout would increase the window during which kea-dhcp-ddns
+    is blocked waiting for a response — 5 seconds is a pragmatic balance.
     """
     try:
+        # drill -Q suppresses everything except answer RRs
+        # -t specifies record type, @127.0.0.1 queries local Unbound
         result = subprocess.run(
-            [UNBOUND_CONTROL, "lookup", name],
+            [DRILL, "-Q", "-t", record_type, name, "@127.0.0.1"],
             capture_output=True, text=True, timeout=5
         )
         records = []
         for line in result.stdout.splitlines():
-            # unbound-control lookup output: "name TTL class type rdata"
-            parts = line.split()
-            if len(parts) >= 5 and parts[3] == rdtype:
-                ip = parts[4]
-                try:
-                    ipaddress.ip_address(ip)
-                    records.append(ip)
-                except ValueError:
-                    logger.warning(
-                        "Unexpected non-IP value in unbound-control lookup output: %r", ip
-                    )
+            line = line.strip()
+            if not line or line.startswith(";"):
+                continue
+            # drill -Q output: one IP per line
+            try:
+                ipaddress.ip_address(line)
+                records.append(line)
+            except ValueError:
+                logger.warning(
+                    "Unexpected non-IP value in drill output: %r", line
+                )
         return records
     except Exception as e:
-        logger.debug("unbound-control lookup %s %s failed: %s", name, rdtype, e)
+        logger.debug("drill query %s %s failed: %s", name, record_type, e)
         return []
 
 # ── Update processing ─────────────────────────────────────────────────────────
