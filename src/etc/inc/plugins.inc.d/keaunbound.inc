@@ -207,9 +207,23 @@ function keaunbound_lease_sync($verbose = false)
 function keaunbound_start_do($verbose = false)
 {
     /*
-     * TODO: Start the kea-unbound-ddns.py daemon via configd.
-     * Must run after Unbound (priority 1) and before Kea (priority 3)
-     * so the stub is ready when Kea replays leases on startup.
+     * Start the kea-unbound-ddns.py daemon via configd.
+     * Registered on the bootup hook at priority 2, which ensures we start
+     * after Unbound (priority 1) and before Kea (priority 3) so the stub
+     * is ready to receive DNS UPDATE packets when Kea replays its lease
+     * database on startup.
+     *
+     * configd_run() is non-blocking — it sends the action and returns
+     * immediately without waiting for the daemon to be fully up. This is
+     * correct since daemon(8) forks immediately and the action completes.
      */
-    service_log("KeaUnbound: daemon start not yet implemented.\n", $verbose);
+    $cfg = new \OPNsense\KeaUnbound\General();
+    if (empty((string)$cfg->enabled)) {
+        service_log("KeaUnbound: disabled — skipping daemon start.\n", $verbose);
+        return;
+    }
+
+    service_log('KeaUnbound: starting daemon...', $verbose);
+    configd_run('keaunbound start');
+    service_log("done.\n", $verbose);
 }
