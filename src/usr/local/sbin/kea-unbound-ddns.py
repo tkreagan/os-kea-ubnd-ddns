@@ -127,11 +127,8 @@ HANDLED_TYPES = {"A", "AAAA", "PTR"}
 OTHER_FAMILY = {"A": "AAAA", "AAAA": "A"}
 
 # Files containing statically-owned Unbound records that we must not touch.
-# host_entries.conf contains both manual host overrides and DHCP static
-# mappings written by OPNsense — both are out of our jurisdiction.
-# dhcpleases.conf contains dynamic lease entries written by the legacy ISC
-# DHCP watcher — we skip that file since we don't own those entries either,
-# but we also never conflict with it since Kea doesn't use it.
+# host_entries.conf contains both manual host overrides and OPNsense-managed
+# static DHCP mappings — both are out of our jurisdiction.
 STATIC_ENTRY_FILES = [
     "/var/unbound/host_entries.conf",
 ]
