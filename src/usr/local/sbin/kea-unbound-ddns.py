@@ -8,8 +8,7 @@ and translates them into unbound-control local_data / local_data_remove calls.
 All other DNS opcodes are ignored. TSIG authentication is supported optionally.
 
 Usage:
-    kea-unbound-ddns.py [--port PORT] [--logfile FILE]
-                        [--unbound-conf FILE] [--host-entries FILE]
+    kea-unbound-ddns.py [--port PORT] [--unbound-conf FILE] [--host-entries FILE]
                         [--tsig-key NAME:SECRET] [--dry-run] [--verbose]
 
 PID management is handled by daemon(8) which launches this script.
@@ -24,6 +23,7 @@ import signal
 import socket
 import subprocess
 import sys
+import syslog
 
 _DNSPYTHON_MIN = (2, 8)
 
@@ -55,8 +55,8 @@ except ImportError:
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 DEFAULT_PORT         = 53535
-DEFAULT_LOGFILE      = "/var/log/kea-unbound.log"
 DEFAULT_UNBOUND_CONF = "/var/unbound/unbound.conf"
+SYSLOG_IDENT        = "kea-unbound-ddns"
 # /var/unbound/host_entries.conf is written by OPNsense and contains:
 #   1. Manual host overrides configured in Services → Unbound DNS → Host Overrides
 #   2. Static DHCP reservation hostnames, IF "Register DHCP Static Mappings"
@@ -73,8 +73,6 @@ def parse_args():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--port",         type=int, default=DEFAULT_PORT,
                    help=f"UDP port to listen on (default: {DEFAULT_PORT})")
-    p.add_argument("--logfile",      default=DEFAULT_LOGFILE,
-                   help=f"Log file path (default: {DEFAULT_LOGFILE})")
     p.add_argument("--unbound-conf", default=DEFAULT_UNBOUND_CONF,
                    help=f"Unbound config file (default: {DEFAULT_UNBOUND_CONF})")
     p.add_argument("--host-entries", default=DEFAULT_HOST_ENTRIES,
@@ -88,22 +86,48 @@ def parse_args():
     return p.parse_args()
 
 # ── Logging ───────────────────────────────────────────────────────────────────
-def setup_logging(logfile: str, verbose: bool) -> logging.Logger:
+#
+# Logs go to syslog using LOG_DAEMON facility — the standard facility for
+# system daemons. OPNsense's log viewer shows entries from registered syslog
+# facilities; keaunbound_syslog() in keaunbound.inc registers 'kea-unbound-ddns'
+# so these logs appear in the UI alongside Kea and Unbound logs.
+#
+# In verbose mode, messages also go to stderr for manual testing.
+# The syslog module is used directly (as per OPNsense convention) rather than
+# logging.handlers.SysLogHandler.
+
+_SYSLOG_PRIORITY = {
+    logging.DEBUG:    syslog.LOG_DEBUG,
+    logging.INFO:     syslog.LOG_INFO,
+    logging.WARNING:  syslog.LOG_WARNING,
+    logging.ERROR:    syslog.LOG_ERR,
+    logging.CRITICAL: syslog.LOG_CRIT,
+}
+
+class SyslogHandler(logging.Handler):
+    """logging.Handler that writes to syslog via the syslog module."""
+    def emit(self, record: logging.LogRecord):
+        priority = _SYSLOG_PRIORITY.get(record.levelno, syslog.LOG_INFO)
+        syslog.syslog(priority, self.format(record))
+
+def setup_logging(verbose: bool) -> logging.Logger:
+    syslog.openlog(SYSLOG_IDENT, facility=syslog.LOG_DAEMON)
+
     logger = logging.getLogger("kea-unbound-ddns")
     logger.setLevel(logging.DEBUG if verbose else logging.INFO)
-    fmt = logging.Formatter("%(asctime)s " + LOG_PREFIX + " [%(levelname)s] %(message)s",
-                            datefmt="%Y-%m-%d %H:%M:%S")
-    # File handler
-    try:
-        fh = logging.FileHandler(logfile)
-        fh.setFormatter(fmt)
-        logger.addHandler(fh)
-    except OSError as e:
-        print(f"WARNING: cannot open logfile {logfile}: {e}", file=sys.stderr)
-    # Stderr handler
-    sh = logging.StreamHandler(sys.stderr)
+    fmt = logging.Formatter(LOG_PREFIX + " [%(levelname)s] %(message)s")
+
+    # Syslog handler — always active
+    sh = SyslogHandler()
     sh.setFormatter(fmt)
     logger.addHandler(sh)
+
+    # Stderr handler — only in verbose mode, useful for manual testing
+    if verbose:
+        se = logging.StreamHandler(sys.stderr)
+        se.setFormatter(fmt)
+        logger.addHandler(se)
+
     return logger
 
 # ── unbound-control wrapper ───────────────────────────────────────────────────
@@ -496,7 +520,7 @@ def handle_signal(signum, frame):
 # ── Main loop ─────────────────────────────────────────────────────────────────
 def main():
     args = parse_args()
-    logger = setup_logging(args.logfile, args.verbose)
+    logger = setup_logging(args.verbose)
     keyring = parse_tsig_key(args.tsig_key)
 
     # Register signal handlers for graceful shutdown
@@ -515,7 +539,7 @@ def main():
 
     static_files = [args.host_entries]
 
-    logger.info("Listening on 127.0.0.1:%d (dry_run=%s tsig=%s host_entries=%s)",
+    logger.info("Listening on 127.0.0.1:%d dry_run=%s tsig=%s host_entries=%s",
                 args.port, args.dry_run, "yes" if keyring else "no", args.host_entries)
 
     if args.dry_run:

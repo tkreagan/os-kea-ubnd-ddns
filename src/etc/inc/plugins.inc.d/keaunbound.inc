@@ -102,6 +102,13 @@
  *       sync mode. Could be scheduled weekly via OPNsense cron or scheduled tasks.
  */
 
+function keaunbound_syslog()
+{
+    return ['kea-unbound-ddns' => ['facility' => [
+        'kea-unbound-ddns',
+    ]]];
+}
+
 function keaunbound_services()
 {
     $services = [];
