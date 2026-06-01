@@ -146,12 +146,6 @@ HANDLED_TYPES = {"A", "AAAA", "PTR"}
 # The "other" address family for dual-stack preservation
 OTHER_FAMILY = {"A": "AAAA", "AAAA": "A"}
 
-# Default list of files containing statically-owned Unbound records.
-# Overridden at runtime via --host-entries.
-STATIC_ENTRY_FILES = [
-    DEFAULT_HOST_ENTRIES,
-]
-
 # Hostname sanity checks — names that are technically valid DNS but
 # meaningless or dangerous for our purposes.
 _NONSENSE_NAMES = {
