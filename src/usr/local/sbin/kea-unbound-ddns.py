@@ -56,6 +56,13 @@ DEFAULT_PORT         = 53535
 DEFAULT_PIDFILE      = "/var/run/kea-unbound-ddns.pid"
 DEFAULT_LOGFILE      = "/var/log/kea-unbound.log"
 DEFAULT_UNBOUND_CONF = "/var/unbound/unbound.conf"
+# /var/unbound/host_entries.conf is written by OPNsense and contains:
+#   1. Manual host overrides configured in Services → Unbound DNS → Host Overrides
+#   2. Static DHCP reservation hostnames, IF "Register DHCP Static Mappings"
+#      is enabled in Services → Unbound DNS → General (regdhcpstatic=1)
+# Both categories are written to this single file by unbound_add_host_entries()
+# in unbound.inc and included into unbound.conf at startup.
+# We must not touch any record in this file — it is entirely OPNsense-managed.
 DEFAULT_HOST_ENTRIES = "/var/unbound/host_entries.conf"
 UNBOUND_CONTROL      = "/usr/local/sbin/unbound-control"
 LOG_PREFIX           = "[kea-unbound-ddns]"
@@ -201,10 +208,20 @@ def reverse_ptr(ip: str) -> str | None:
 def is_static_entry(name: str, rdtype: str, logger: logging.Logger,
                     static_files: list[str]) -> bool:
     """
-    Return True if name+type appears as a static entry in any of the
-    Unbound config files we don't own. Protects against clobbering manual
-    host overrides and OPNsense-managed static DHCP mappings on both add
-    and delete operations.
+    Return True if name+type appears in any Unbound config file we don't own,
+    meaning we must not add or remove it. Specifically guards against
+    clobbering manual host overrides configured in the Unbound UI.
+
+    Also protects static DHCP reservation hostnames in the case where
+    "Register DHCP Static Mappings" is enabled in Unbound — those end up
+    in host_entries.conf alongside manual overrides, and since OPNsense
+    already registered them there, we should step aside rather than create
+    a duplicate or conflict via kea-dhcp-ddns.
+
+    If "Register DHCP Static Mappings" is disabled, static reservation
+    hostnames will NOT be in host_entries.conf, so kea-dhcp-ddns UPDATE
+    packets for those reservations will pass through this guard and be
+    registered normally by us — which is the correct behavior.
 
     Checks for:
       - Forward records: local-data: "name ... IN TYPE ..."
