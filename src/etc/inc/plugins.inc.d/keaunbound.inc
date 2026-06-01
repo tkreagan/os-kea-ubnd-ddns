@@ -27,51 +27,56 @@
  */
 
 /*
- * keaunbound.inc — OPNsense plugin hooks for os-kea-unbound
+ * keaunbound.inc -- OPNsense plugin hooks for os-kea-unbound
  *
  * Hook registrations:
  *
- *   kea_sync (priority 2) — fires after Kea rewrites its config and restarts.
- *     We call unbound_add_host_entries() to rewrite host_entries.conf with
- *     the current Kea reservations. This fixes a core OPNsense limitation:
- *     host_entries.conf is normally only rewritten when Unbound reconfigures,
- *     not when Kea config changes. Without this, our is_static_entry() guard
- *     in kea-unbound-ddns.py can over-protect — blocking DELETE updates for
- *     reservations that no longer exist in Kea because the stale
- *     host_entries.conf still lists them.
+ *   kea_sync (priority 2) -- fires after Kea rewrites its config and restarts.
  *
- *     If regdhcpstatic is enabled in Unbound (Services → Unbound DNS →
- *     General → Register DHCP Static Mappings), we also need to reload
- *     Unbound so the updated static reservations become visible in DNS.
- *     However, reloading Unbound wipes all runtime local_data entries that
- *     kea-unbound-ddns.py injected for dynamic leases. We therefore trigger
- *     a lease DB sync after the reload to restore dynamic lease registrations
- *     from the Kea control agent REST API.
+ *     Step 1 (always): call unbound_add_host_entries() to rewrite
+ *     host_entries.conf. This fixes a core OPNsense limitation: normally
+ *     host_entries.conf is only rewritten when Unbound reconfigures, not
+ *     when Kea config changes. Without this, our is_static_entry() guard
+ *     in kea-unbound-ddns.py can over-protect -- blocking DELETE updates
+ *     for reservations removed from Kea because the stale host_entries.conf
+ *     still lists them.
  *
- *     Sequence when regdhcpstatic is enabled:
- *       1. unbound_add_host_entries() — rewrite host_entries.conf
- *       2. unbound_configure_do()     — reload Unbound (wipes local_data)
- *       3. keaunbound_lease_sync()    — restore dynamic leases from Kea DB
+ *     if regdhcpstatic is enabled (Services -> Unbound DNS -> General ->
+ *     Register DHCP Static Mappings):
+ *       Step 2: reload Unbound so updated static reservations become
+ *               visible in DNS. This wipes all runtime local_data entries
+ *               injected by kea-unbound-ddns.py for dynamic leases.
+ *       Step 3: lease DB sync to restore dynamic lease registrations
+ *               lost during the Unbound reload.
  *
- *     Sequence when regdhcpstatic is disabled:
- *       1. unbound_add_host_entries() — rewrite host_entries.conf only
- *       (no Unbound reload needed — dynamic local_data stays intact)
+ *     if regdhcpstatic is disabled (our plugin manages all DHCP DNS):
+ *       Step 2: reservation sync -- read static reservations directly from
+ *               Kea config and register them in Unbound immediately. This
+ *               ensures a newly added reservation (e.g. foo.bar.com ->
+ *               10.10.10.10) appears in DNS right away, before the device
+ *               has connected and received its lease.
+ *       No lease sync needed -- we did not reload Unbound, so dynamic
+ *       local_data from kea-unbound-ddns.py remains intact.
  *
- *   unbound_start — fires when Unbound starts or restarts (boot, manual
- *     reload, or post-regdhcpstatic reload above). Runs keaunbound_lease_sync()
- *     to populate Unbound with all currently active Kea leases. Without this,
- *     DNS is incomplete until each device renews its lease.
+ *   unbound_start -- fires when Unbound starts or restarts (boot, manual
+ *     reload, or after the regdhcpstatic reload above).
+ *       Step 1: reservation sync -- register all static reservations
+ *       Step 2: lease DB sync -- register all active dynamic leases
+ *     Together these fully repopulate Unbound from scratch without waiting
+ *     for devices to renew their leases.
  *
- *   bootup (priority 2) — ensures our daemon starts after Unbound (1) but
+ *   bootup (priority 2) -- ensures our daemon starts after Unbound (1) but
  *     before Kea (3), so the stub is ready to receive DNS UPDATE packets
  *     when Kea replays its lease database on startup.
  *
- * TODO: verify Unbound and Kea bootup priorities to confirm :2 is correct.
- * TODO: implement keaunbound_lease_sync() — queries kea-ctrl-agent REST API
+ * TODO: verify Unbound and Kea bootup hook priorities to confirm :2 is correct.
+ * TODO: implement keaunbound_reservation_sync() -- reads Kea config via
+ *       kea-ctrl-agent API and registers static reservations in Unbound.
+ * TODO: implement keaunbound_lease_sync() -- queries kea-ctrl-agent REST API
  *       for all active leases and registers them via unbound-control local_data.
- * TODO: implement keaunbound_services() — register daemon with OPNsense
- *       service manager so it appears in the Services status page.
- * TODO: implement keaunbound_syslog() — register log facility.
+ * TODO: implement keaunbound_start_do() -- start daemon via configd.
+ * TODO: implement keaunbound_services() -- register with OPNsense service manager.
+ * TODO: implement keaunbound_syslog() -- register log facility.
  * TODO: implement MVC model, controller, and UI view.
  */
 
@@ -79,7 +84,7 @@ function keaunbound_configure()
 {
     return [
         'kea_sync'      => ['keaunbound_on_kea_sync:2'],
-        'unbound_start' => ['keaunbound_lease_sync'],
+        'unbound_start' => ['keaunbound_on_unbound_start'],
         'bootup'        => ['keaunbound_start_do:2'],
     ];
 }
@@ -87,59 +92,95 @@ function keaunbound_configure()
 function keaunbound_on_kea_sync($verbose = false)
 {
     /*
-     * Step 1: Always rewrite host_entries.conf so our is_static_entry()
-     * guard has current data. This fixes the stale host_entries.conf
-     * problem — see hook registration comment above for details.
+     * Step 1 (always): rewrite host_entries.conf so our is_static_entry()
+     * guard has current data. See hook registration comment for details.
      */
     if (function_exists('unbound_add_host_entries')) {
         service_log('KeaUnbound: refreshing host_entries.conf...', $verbose);
         unbound_add_host_entries();
         service_log("done.\n", $verbose);
     } else {
-        service_log("KeaUnbound: unbound_add_host_entries() not available — skipping.\n", $verbose);
+        service_log("KeaUnbound: unbound_add_host_entries() not available -- skipping.\n", $verbose);
     }
 
-    /*
-     * Step 2: If regdhcpstatic is enabled, reload Unbound so updated static
-     * reservations are visible in DNS, then resync dynamic leases to restore
-     * what the reload wiped from runtime local_data.
-     *
-     * If regdhcpstatic is disabled, skip the reload — dynamic local_data
-     * entries from kea-unbound-ddns.py remain intact.
-     */
     $unbound = new \OPNsense\Unbound\Unbound();
     $regdhcpstatic = !empty((string)$unbound->general->regdhcpstatic);
 
     if ($regdhcpstatic) {
-        service_log('KeaUnbound: regdhcpstatic enabled — reloading Unbound...', $verbose);
+        /*
+         * regdhcpstatic is on -- OPNsense manages static reservation DNS.
+         * Step 2: reload Unbound to pick up updated static reservations.
+         *         This wipes all runtime local_data entries for dynamic leases.
+         * Step 3: resync dynamic leases to restore what the reload wiped.
+         */
+        service_log('KeaUnbound: regdhcpstatic enabled -- reloading Unbound...', $verbose);
         unbound_configure_do($verbose);
         service_log("done.\n", $verbose);
 
-        /*
-         * Step 3: Restore dynamic lease registrations lost during Unbound
-         * reload. TODO: implement keaunbound_lease_sync().
-         */
-        service_log('KeaUnbound: resyncing dynamic leases...', $verbose);
+        service_log('KeaUnbound: resyncing dynamic leases after reload...', $verbose);
         keaunbound_lease_sync($verbose);
         service_log("done.\n", $verbose);
+    } else {
+        /*
+         * regdhcpstatic is off -- our plugin manages all DHCP DNS.
+         * Step 2: reservation sync to register static reservations immediately
+         *         (e.g. foo.bar.com -> 10.10.10.10 appears in DNS now, before
+         *         the device has connected and received its lease).
+         * No lease sync needed -- dynamic local_data is intact since we did
+         * not reload Unbound.
+         */
+        service_log('KeaUnbound: syncing static reservations...', $verbose);
+        keaunbound_reservation_sync($verbose);
+        service_log("done.\n", $verbose);
     }
+}
+
+function keaunbound_on_unbound_start($verbose = false)
+{
+    /*
+     * Unbound just started (boot, manual reload, or post-regdhcpstatic reload).
+     * local_data is empty -- fully repopulate from Kea without waiting for
+     * lease renewals.
+     *
+     * Step 1: register all static reservations from Kea config.
+     * Step 2: register all active dynamic leases from Kea lease DB.
+     */
+    service_log('KeaUnbound: syncing reservations on Unbound start...', $verbose);
+    keaunbound_reservation_sync($verbose);
+    service_log("done.\n", $verbose);
+
+    service_log('KeaUnbound: syncing active leases on Unbound start...', $verbose);
+    keaunbound_lease_sync($verbose);
+    service_log("done.\n", $verbose);
+}
+
+function keaunbound_reservation_sync($verbose = false)
+{
+    /*
+     * TODO: Read static reservations from Kea config via kea-ctrl-agent
+     * REST API and register each one in Unbound via unbound-control local_data.
+     * This ensures reservations appear in DNS immediately when added to Kea,
+     * regardless of whether the device has connected and received a lease.
+     *
+     * Must respect is_static_entry() guard -- skip any reservation whose
+     * hostname already appears in host_entries.conf (i.e. regdhcpstatic is
+     * on and OPNsense has already registered it).
+     *
+     * Requires kea-ctrl-agent to be enabled (Services -> Kea DHCP ->
+     * Control Agent).
+     */
+    service_log("KeaUnbound: reservation sync not yet implemented.\n", $verbose);
 }
 
 function keaunbound_lease_sync($verbose = false)
 {
     /*
-     * TODO: Query the Kea control agent REST API (kea-ctrl-agent on
-     * 127.0.0.1:8000) for all currently active leases, then register
-     * each one via unbound-control local_data. This repopulates Unbound
-     * after a restart or reload without waiting for lease renewals.
+     * TODO: Query kea-ctrl-agent REST API for all currently active leases
+     * and register each one via unbound-control local_data. This restores
+     * dynamic lease registrations after an Unbound reload or restart.
      *
-     * Requires kea-ctrl-agent to be enabled (Services → Kea DHCP →
+     * Requires kea-ctrl-agent to be enabled (Services -> Kea DHCP ->
      * Control Agent).
-     *
-     * This function is called from two hooks:
-     *   - unbound_start: Unbound just started, local_data is empty
-     *   - keaunbound_on_kea_sync: Unbound was reloaded due to regdhcpstatic,
-     *     local_data was wiped and needs to be restored
      */
     service_log("KeaUnbound: lease sync not yet implemented.\n", $verbose);
 }
