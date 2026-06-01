@@ -2,6 +2,19 @@
     <Services>
         <KeaUnbound VisibleName="Kea Unbound" cssClass="fa fa-exchange fa-fw">
             <General order="10" VisibleName="Settings" url="/ui/keaunbound/index"/>
+            <!-- TODO: Status view — shows live registration state across all sources:
+                 - Kea static reservations (from kea-ctrl-agent API)
+                 - Kea active leases (from kea-ctrl-agent API)
+                 - Unbound host_entries.conf (OPNsense-managed, not our records)
+                 - Unbound local_data we injected (from list_local_data)
+                 Columns: hostname, IP, source, registered in Unbound, status.
+                 Flags potentially stale records (in local_data but not in Kea
+                 leases, reservations, or host_entries). Backed by the audit
+                 mode of kea-unbound-sync.py. Optional --clean action to remove
+                 stale records after confirmation.
+                 See keaunbound.inc TODO for audit script implementation details.
+            <Status order="50" VisibleName="Status" url="/ui/keaunbound/status"/>
+            -->
             <LogFile order="100" VisibleName="Log File" url="/ui/diagnostics/log/core/kea-unbound-ddns"/>
         </KeaUnbound>
     </Services>
