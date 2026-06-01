@@ -57,6 +57,7 @@ DEFAULT_PIDFILE      = "/var/run/kea-unbound-ddns.pid"
 DEFAULT_LOGFILE      = "/var/log/kea-unbound.log"
 DEFAULT_UNBOUND_CONF = "/var/unbound/unbound.conf"
 DEFAULT_HOST_ENTRIES = "/var/unbound/host_entries.conf"
+UNBOUND_CONTROL      = "/usr/local/sbin/unbound-control"
 LOG_PREFIX           = "[kea-unbound-ddns]"
 
 # ── Argument parsing ──────────────────────────────────────────────────────────
@@ -117,7 +118,7 @@ def remove_pidfile(path: str):
 # ── unbound-control wrapper ───────────────────────────────────────────────────
 def unbound_control(args: list[str], unbound_conf: str, dry_run: bool,
                     logger: logging.Logger) -> bool:
-    cmd = ["unbound-control", "-c", unbound_conf] + args
+    cmd = [UNBOUND_CONTROL, "-c", unbound_conf] + args
     logger.debug("unbound-control %s", " ".join(args))
     if dry_run:
         logger.info("[dry-run] would run: unbound-control %s", " ".join(args))
@@ -134,7 +135,7 @@ def unbound_control(args: list[str], unbound_conf: str, dry_run: bool,
         logger.error("unbound-control %s timed out", " ".join(args))
         return False
     except FileNotFoundError:
-        logger.error("unbound-control not found in PATH")
+        logger.error("%s not found — is Unbound installed?", UNBOUND_CONTROL)
         return False
 
 # ── DNS record helpers ────────────────────────────────────────────────────────
@@ -255,7 +256,7 @@ def query_unbound(name: str, rdtype: str, logger: logging.Logger) -> list[str]:
     """
     try:
         result = subprocess.run(
-            ["unbound-control", "lookup", name],
+            [UNBOUND_CONTROL, "lookup", name],
             capture_output=True, text=True, timeout=5
         )
         records = []
