@@ -8,15 +8,17 @@ and translates them into unbound-control local_data / local_data_remove calls.
 All other DNS opcodes are ignored. TSIG authentication is supported optionally.
 
 Usage:
-    kea-unbound-ddns.py [--port PORT] [--pidfile FILE] [--logfile FILE]
+    kea-unbound-ddns.py [--port PORT] [--logfile FILE]
                         [--unbound-conf FILE] [--host-entries FILE]
                         [--tsig-key NAME:SECRET] [--dry-run] [--verbose]
+
+PID management is handled by daemon(8) which launches this script.
+Do not run this script directly in production — use configd actions.
 """
 
 import argparse
 import ipaddress
 import logging
-import os
 import re
 import signal
 import socket
@@ -53,7 +55,6 @@ except ImportError:
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 DEFAULT_PORT         = 53535
-DEFAULT_PIDFILE      = "/var/run/kea-unbound-ddns.pid"
 DEFAULT_LOGFILE      = "/var/log/kea-unbound.log"
 DEFAULT_UNBOUND_CONF = "/var/unbound/unbound.conf"
 # /var/unbound/host_entries.conf is written by OPNsense and contains:
@@ -72,8 +73,6 @@ def parse_args():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--port",         type=int, default=DEFAULT_PORT,
                    help=f"UDP port to listen on (default: {DEFAULT_PORT})")
-    p.add_argument("--pidfile",      default=DEFAULT_PIDFILE,
-                   help=f"PID file path (default: {DEFAULT_PIDFILE})")
     p.add_argument("--logfile",      default=DEFAULT_LOGFILE,
                    help=f"Log file path (default: {DEFAULT_LOGFILE})")
     p.add_argument("--unbound-conf", default=DEFAULT_UNBOUND_CONF,
@@ -106,21 +105,6 @@ def setup_logging(logfile: str, verbose: bool) -> logging.Logger:
     sh.setFormatter(fmt)
     logger.addHandler(sh)
     return logger
-
-# ── PID file ──────────────────────────────────────────────────────────────────
-def write_pidfile(path: str):
-    try:
-        with open(path, "w") as f:
-            f.write(str(os.getpid()))
-    except OSError as e:
-        print(f"ERROR: cannot write pidfile {path}: {e}", file=sys.stderr)
-        sys.exit(1)
-
-def remove_pidfile(path: str):
-    try:
-        os.unlink(path)
-    except OSError:
-        pass
 
 # ── unbound-control wrapper ───────────────────────────────────────────────────
 def unbound_control(args: list[str], unbound_conf: str, dry_run: bool,
@@ -519,9 +503,6 @@ def main():
     signal.signal(signal.SIGTERM, handle_signal)
     signal.signal(signal.SIGINT, handle_signal)
 
-    # Write PID file
-    write_pidfile(args.pidfile)
-
     # Bind socket
     try:
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -530,7 +511,6 @@ def main():
         sock.bind(("127.0.0.1", args.port))
     except OSError as e:
         logger.error("Cannot bind to 127.0.0.1:%d — %s", args.port, e)
-        remove_pidfile(args.pidfile)
         sys.exit(1)
 
     static_files = [args.host_entries]
@@ -585,7 +565,6 @@ def main():
     # Shutdown
     logger.info("Shutting down")
     sock.close()
-    remove_pidfile(args.pidfile)
 
 if __name__ == "__main__":
     main()
