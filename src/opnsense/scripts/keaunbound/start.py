@@ -23,6 +23,7 @@ def get_config():
     cfg = {
         "enabled":                    "0",
         "port":                       "53535",
+        "enable_tsig":                "0",
         "tsig_key_name":              "",
         "tsig_key_secret":            "",
         "tsig_algorithm":             "HMAC-SHA256",
@@ -52,7 +53,16 @@ def main():
     # Build kea-unbound-ddns.py argument list
     script_args = [SCRIPT, "--port", cfg["port"]]
 
-    if cfg["tsig_key_name"] and cfg["tsig_key_secret"]:
+    # TSIG is gated solely on the enable_tsig switch. When enabled, the key name
+    # and secret are mandatory — fail closed (refuse to start) rather than
+    # silently listen unauthenticated. (The model also blocks saving this state,
+    # so this is a backstop.)
+    if cfg["enable_tsig"] == "1":
+        if not cfg["tsig_key_name"] or not cfg["tsig_key_secret"]:
+            print("ERROR: TSIG is enabled but key name/secret is missing — "
+                  "refusing to start. Set the TSIG key or disable TSIG.",
+                  file=sys.stderr)
+            sys.exit(1)
         script_args += [
             "--tsig-key",       f"{cfg['tsig_key_name']}:{cfg['tsig_key_secret']}",
             "--tsig-algorithm", cfg["tsig_algorithm"],

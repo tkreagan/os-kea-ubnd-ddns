@@ -6,21 +6,29 @@ Provides:
   - Kea control agent API queries (reservations, leases)
   - Unbound control wrapper
   - host_entries.conf parser
-  - Record parsing and cross-reference logic
+  - Stale/orphaned record detection (shared by audit and clean)
+  - Hostname sanity checks
   - Error handling for missing/unavailable services
   - Syslog logging
+
+Uses only the Python standard library (no third-party dependencies) so it runs
+on a stock OPNsense install without extra packages.
 """
+
+from __future__ import annotations
 
 import ipaddress
 import json
 import logging
 import logging.handlers
 import re
-import requests
 import subprocess
 import sys
+import time
+import urllib.error
+import urllib.request
 import xml.etree.ElementTree as ET
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Set, Tuple
 
 # Constants
 CONFIG_XML = "/conf/config.xml"
@@ -28,10 +36,22 @@ HOST_ENTRIES = "/var/unbound/host_entries.conf"
 UNBOUND_CONTROL = "/usr/local/sbin/unbound-control"
 SYSLOG_IDENT = "kea-unbound-sync"
 
+# Kea lease "state" enum: 0 = default/active (the only one we register),
+# 1 = declined, 2 = expired-reclaimed.
+LEASE_STATE_DEFAULT = 0
+
+# Valid hostname label characters per RFC 1123 (first label / hostname part)
+_LABEL_RE = re.compile(r'^[a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?$')
+
+# Names that are technically valid DNS but meaningless/dangerous for our use.
+_NONSENSE_NAMES = {"", ".", "localhost", "localdomain"}
+
+
 # Custom exception for Kea unavailable
 class KeaUnavailableError(Exception):
     """Raised when kea-ctrl-agent is not available or not responding."""
     pass
+
 
 def setup_logging(verbose: bool = False) -> logging.Logger:
     """Set up syslog logging with optional stderr for debugging."""
@@ -55,66 +75,98 @@ def setup_logging(verbose: bool = False) -> logging.Logger:
 
     return logger
 
+
 def get_kea_ctrl_config() -> Tuple[str, int]:
     """
-    Read kea-ctrl-agent config from OPNsense config.xml.
-    Returns (host, port). Defaults to 127.0.0.1:8000.
-    Raises KeaUnavailableError if kea-ctrl-agent is not enabled.
+    Read the Kea Control Agent endpoint from OPNsense config.xml.
+
+    Reads the real core model: //OPNsense/Kea/ctrl_agent/general with fields
+    enabled, http_host (default 127.0.0.1) and http_port (default 8000).
+    Returns (host, port). Raises KeaUnavailableError if the control agent is
+    not configured/enabled.
     """
     try:
         tree = ET.parse(CONFIG_XML)
         root = tree.getroot()
-        node = root.find("OPNsense/Kea/KeaCtrlAgent/general")
+        node = root.find("OPNsense/Kea/ctrl_agent/general")
 
         if node is None:
             raise KeaUnavailableError("Kea control agent config not found in config.xml")
 
         enabled = node.find("enabled")
-        if enabled is None or enabled.text != "1":
+        if enabled is None or (enabled.text or "").strip() != "1":
             raise KeaUnavailableError("Kea control agent is not enabled")
 
-        # Read host and port with defaults
-        host_node = node.find("server_ip")
+        host_node = node.find("http_host")
         host = host_node.text.strip() if host_node is not None and host_node.text else "127.0.0.1"
 
-        port_node = node.find("server_port")
+        port_node = node.find("http_port")
         port = int(port_node.text.strip()) if port_node is not None and port_node.text else 8000
 
         return host, port
     except ET.ParseError as e:
         raise KeaUnavailableError(f"Cannot parse config.xml: {e}")
+    except KeaUnavailableError:
+        raise
     except Exception as e:
         raise KeaUnavailableError(f"Error reading kea-ctrl-agent config: {e}")
+
 
 def query_kea_api(command: str, arguments: Optional[Dict] = None,
                   service: str = "dhcp4", timeout: float = 5.0) -> Dict:
     """
-    Query kea-ctrl-agent REST API.
-    Returns the response dict from Kea.
-    Raises KeaUnavailableError if ctrl-agent is unavailable/unresponsive.
+    Query the kea-ctrl-agent REST API using the standard library.
+
+    The Control Agent returns a JSON *list* of per-service response maps; this
+    normalizes to the single relevant map and returns it. Raises
+    KeaUnavailableError if the agent is unavailable/unresponsive or the command
+    fails.
     """
+    host, port = get_kea_ctrl_config()
+    url = f"http://{host}:{port}/"
+
+    payload: Dict = {"command": command, "service": [service]}
+    if arguments:
+        payload["arguments"] = arguments
+
+    data = json.dumps(payload).encode("utf-8")
+    req = urllib.request.Request(
+        url, data=data,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+
     try:
-        host, port = get_kea_ctrl_config()
-        url = f"http://{host}:{port}/"
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            body = resp.read()
+    except urllib.error.HTTPError as e:
+        raise KeaUnavailableError(f"Kea control agent HTTP {e.code}: {e.reason}")
+    except urllib.error.URLError as e:
+        # connection refused, DNS failure, or wrapped socket timeout
+        raise KeaUnavailableError(f"Kea control agent unreachable: {e.reason}")
+    except (TimeoutError, OSError) as e:
+        raise KeaUnavailableError(f"Kea control agent error: {e}")
 
-        payload = {"command": command, "service": [service]}
-        if arguments:
-            payload["arguments"] = arguments
+    try:
+        result = json.loads(body)
+    except json.JSONDecodeError as e:
+        raise KeaUnavailableError(f"Kea control agent returned invalid JSON: {e}")
 
-        resp = requests.post(url, json=payload, timeout=timeout)
-        resp.raise_for_status()
+    # Normalize the list-of-maps response to a single map.
+    if isinstance(result, list):
+        if not result:
+            raise KeaUnavailableError(f"Kea command '{command}' returned an empty response")
+        result = result[0]
+    if not isinstance(result, dict):
+        raise KeaUnavailableError(f"Kea command '{command}' returned an unexpected response")
 
-        data = resp.json()
-        if data.get("result") != 0:
-            raise KeaUnavailableError(f"Kea command '{command}' failed: {data.get('text', 'unknown error')}")
+    if result.get("result") != 0:
+        raise KeaUnavailableError(
+            f"Kea command '{command}' failed: {result.get('text', 'unknown error')}"
+        )
 
-        return data
-    except requests.exceptions.ConnectionError as e:
-        raise KeaUnavailableError(f"Kea control agent connection refused: {e}")
-    except requests.exceptions.Timeout:
-        raise KeaUnavailableError(f"Kea control agent timeout after {timeout}s")
-    except requests.exceptions.RequestException as e:
-        raise KeaUnavailableError(f"Kea control agent request failed: {e}")
+    return result
+
 
 def query_kea_reservations(service: str = "dhcp4") -> List[Dict]:
     """
@@ -122,67 +174,83 @@ def query_kea_reservations(service: str = "dhcp4") -> List[Dict]:
     Returns list of reservation dicts with keys: hostname, ip, ipv6
     Raises KeaUnavailableError if Kea is unavailable.
     """
-    try:
-        resp = query_kea_api("reservation-get-all", service=service)
-        reservations = []
+    resp = query_kea_api("reservation-get-all", service=service)
+    reservations = []
 
-        for reservation in resp.get("arguments", {}).get("reservations", []):
-            res_dict = {
-                "hostname": reservation.get("hostname", ""),
-                "ip": None,
-                "ipv6": None,
-            }
+    for reservation in resp.get("arguments", {}).get("reservations", []):
+        res_dict = {
+            "hostname": reservation.get("hostname", ""),
+            "ip": None,
+            "ipv6": None,
+        }
 
-            # Extract IPv4
-            if service == "dhcp4":
-                res_dict["ip"] = reservation.get("ipv4-address")
+        if service == "dhcp4":
+            res_dict["ip"] = reservation.get("ipv4-address")
+        if service == "dhcp6":
+            res_dict["ipv6"] = reservation.get("ipv6-address")
 
-            # Extract IPv6
-            if service == "dhcp6":
-                res_dict["ipv6"] = reservation.get("ipv6-address")
+        if res_dict["hostname"] and (res_dict["ip"] or res_dict["ipv6"]):
+            reservations.append(res_dict)
 
-            if res_dict["hostname"] and (res_dict["ip"] or res_dict["ipv6"]):
-                reservations.append(res_dict)
+    return reservations
 
-        return reservations
-    except KeaUnavailableError:
-        raise
 
 def query_kea_leases(service: str = "dhcp4") -> List[Dict]:
     """
-    Query all active leases from Kea.
+    Query active leases from Kea.
+
+    Only returns leases in the active (default) state with a future expiry;
+    declined and expired-reclaimed leases are skipped so we never publish DNS
+    for an address a client no longer holds.
+
     Returns list of lease dicts with keys: hostname, ip, ipv6, expires
-    Raises KeaUnavailableError if Kea is unavailable.
+    (expires is an absolute unix timestamp). Raises KeaUnavailableError if Kea
+    is unavailable.
     """
-    try:
-        resp = query_kea_api("lease-get-all", service=service)
-        leases = []
+    now = int(time.time())
+    resp = query_kea_api("lease-get-all", service=service)
+    leases = []
 
-        for lease in resp.get("arguments", {}).get("leases", []):
-            # Only include leases with valid expiration (not expired)
-            expires = lease.get("expire", 0)
-            if expires == 0 or expires == -1:  # 0 or -1 means infinite/never expires
-                expires = 86400  # Default to 1 day for infinite leases
+    for lease in resp.get("arguments", {}).get("leases", []):
+        # Skip non-active leases (declined / expired-reclaimed).
+        try:
+            state = int(lease.get("state", LEASE_STATE_DEFAULT))
+        except (TypeError, ValueError):
+            state = LEASE_STATE_DEFAULT
+        if state != LEASE_STATE_DEFAULT:
+            continue
 
-            lease_dict = {
-                "hostname": lease.get("hostname", ""),
-                "ip": None,
-                "ipv6": None,
-                "expires": expires,
-            }
+        # "expire" is an absolute unix timestamp. 0/-1 are sometimes used to
+        # mean "infinite"; map those to a long horizon. Skip already-expired.
+        expire = lease.get("expire", 0)
+        if expire in (0, -1, None):
+            expires = now + 86400
+        else:
+            try:
+                expire = int(expire)
+            except (TypeError, ValueError):
+                continue
+            if expire <= now:
+                continue
+            expires = expire
 
-            if service == "dhcp4":
-                lease_dict["ip"] = lease.get("ip-address")
+        lease_dict = {
+            "hostname": lease.get("hostname", ""),
+            "ip": None,
+            "ipv6": None,
+            "expires": expires,
+        }
 
-            if service == "dhcp6":
-                lease_dict["ipv6"] = lease.get("ip-address")
+        if service == "dhcp4":
+            lease_dict["ip"] = lease.get("ip-address")
+        if service == "dhcp6":
+            lease_dict["ipv6"] = lease.get("ip-address")
 
-            if lease_dict["hostname"] and (lease_dict["ip"] or lease_dict["ipv6"]):
-                leases.append(lease_dict)
+        if lease_dict["hostname"] and (lease_dict["ip"] or lease_dict["ipv6"]):
+            leases.append(lease_dict)
 
-        return leases
-    except KeaUnavailableError:
-        raise
+    return leases
+
 
 def read_host_entries() -> Dict[str, List[str]]:
     """
@@ -190,7 +258,7 @@ def read_host_entries() -> Dict[str, List[str]]:
     Each entry is a raw line from the config (local-data or local-data-ptr).
     Returns empty dict if file doesn't exist.
     """
-    entries = {}
+    entries: Dict[str, List[str]] = {}
 
     try:
         with open(HOST_ENTRIES) as f:
@@ -199,25 +267,19 @@ def read_host_entries() -> Dict[str, List[str]]:
                 if not line or line.startswith("#"):
                     continue
 
-                # Extract the name from local-data or local-data-ptr
                 if line.startswith("local-data:"):
                     # Format: local-data: "name TTL IN TYPE rdata"
                     match = re.search(r'local-data:\s+"([^"\s]+)', line)
                     if match:
                         name = match.group(1).rstrip(".")
-                        if name not in entries:
-                            entries[name] = []
-                        entries[name].append(line)
+                        entries.setdefault(name, []).append(line)
 
                 elif line.startswith("local-data-ptr:"):
-                    # Format: local-data-ptr: "ip rdata"
-                    # For PTR, the "name" is the IP address
+                    # Format: local-data-ptr: "ip rdata"; the "name" is the IP
                     match = re.search(r'local-data-ptr:\s+"([^\s"]+)', line)
                     if match:
                         ip = match.group(1)
-                        if ip not in entries:
-                            entries[ip] = []
-                        entries[ip].append(line)
+                        entries.setdefault(ip, []).append(line)
     except FileNotFoundError:
         pass
     except Exception as e:
@@ -225,16 +287,50 @@ def read_host_entries() -> Dict[str, List[str]]:
 
     return entries
 
+
 def reverse_ptr(ip: str) -> Optional[str]:
     """
-    Return the PTR name for an IP address.
-    Works for both IPv4 (in-addr.arpa) and IPv6 (ip6.arpa).
+    Return the PTR name for an IP address (IPv4 in-addr.arpa or IPv6 ip6.arpa).
     Returns None if IP is invalid.
     """
     try:
         return str(ipaddress.ip_address(ip).reverse_pointer)
     except ValueError:
         return None
+
+
+def is_ptr_name(name: str) -> bool:
+    """True if name is a reverse-DNS owner name."""
+    return name.endswith(".in-addr.arpa") or name.endswith(".ip6.arpa")
+
+
+def is_sane_name(name: str, logger: Optional[logging.Logger] = None) -> bool:
+    """
+    Return True if name is a plausible hostname we should register.
+
+    Rejects empty strings, the DNS root, reserved names, names whose first
+    label contains invalid characters, and all-numeric names (IPs mistaken for
+    hostnames). Mirrors the daemon's check so the sync path applies the same
+    hygiene as the live listener.
+    """
+    if not name or name in _NONSENSE_NAMES:
+        if logger:
+            logger.warning("Rejecting nonsense name: %r", name)
+        return False
+
+    first_label = name.split(".")[0]
+    if not first_label or not _LABEL_RE.match(first_label):
+        if logger:
+            logger.warning("Rejecting name with invalid first label: %r", name)
+        return False
+
+    if all(part.isdigit() for part in name.split(".")):
+        if logger:
+            logger.warning("Rejecting all-numeric name (looks like an IP): %r", name)
+        return False
+
+    return True
+
 
 def unbound_control(args: List[str], timeout: float = 10.0) -> bool:
     """
@@ -252,12 +348,13 @@ def unbound_control(args: List[str], timeout: float = 10.0) -> bool:
         logging.getLogger(SYSLOG_IDENT).error(f"unbound-control failed: {e}")
         return False
 
+
 def unbound_list_local_data() -> Dict[str, List[str]]:
     """
     Query Unbound's local_data store via list_local_data.
     Returns dict of {name: [entries]} for all A/AAAA/PTR records.
     """
-    local_data = {}
+    local_data: Dict[str, List[str]] = {}
 
     try:
         result = subprocess.run(
@@ -276,17 +373,101 @@ def unbound_list_local_data() -> Dict[str, List[str]]:
             name = parts[0].rstrip(".")
             rdtype = parts[3]
 
-            # Only track A, AAAA, PTR
             if rdtype in ("A", "AAAA", "PTR"):
-                if name not in local_data:
-                    local_data[name] = []
-                local_data[name].append(line)
+                local_data.setdefault(name, []).append(line)
 
     except Exception as e:
         logging.getLogger(SYSLOG_IDENT).warning(f"Failed to query list_local_data: {e}")
 
     return local_data
 
+
 def is_in_host_entries(name: str, host_entries: Dict[str, List[str]]) -> bool:
     """Check if name appears in host_entries.conf."""
     return name in host_entries
+
+
+def _forward_ips(unbound_data: Dict[str, List[str]]) -> Dict[str, Set[str]]:
+    """Map each forward (non-PTR) owner name to the set of its A/AAAA IPs."""
+    forward_ips: Dict[str, Set[str]] = {}
+    for name, lines in unbound_data.items():
+        if is_ptr_name(name):
+            continue
+        ips: Set[str] = set()
+        for line in lines:
+            parts = line.split()
+            if len(parts) >= 5 and parts[3] in ("A", "AAAA"):
+                ips.add(parts[4])
+        if ips:
+            forward_ips[name] = ips
+    return forward_ips
+
+
+def find_stale_records(unbound_data: Dict[str, List[str]], kea_ips: Set[str],
+                       host_entries: Dict[str, List[str]]) -> Tuple[Set[str], Set[str]]:
+    """
+    Single source of truth for what cleanup removes — used by both the audit
+    (to show the preview) and the clean script (to act). Returns
+    (stale_names, orphaned_ptrs):
+
+      stale_names   -- forward (A/AAAA) owner names whose every IP is absent
+                       from Kea and which are not OPNsense-managed.
+      orphaned_ptrs -- PTR owner names not backed by a *surviving* forward
+                       record (i.e. no forward maps to them once stale forwards
+                       are removed), and not OPNsense-managed.
+
+    Computing orphans against surviving forwards means a PTR whose only forward
+    is itself stale is correctly flagged for removal alongside it, while a PTR
+    backed by a live record is preserved.
+    """
+    forward_ips = _forward_ips(unbound_data)
+
+    # Stale forwards: no IP backed by Kea, not OPNsense-managed.
+    stale_names: Set[str] = set()
+    for name, ips in forward_ips.items():
+        if is_in_host_entries(name, host_entries):
+            continue
+        if not (ips & kea_ips):
+            stale_names.add(name)
+
+    # PTR names that a surviving (kept) forward still points to.
+    surviving_ptr_names: Set[str] = set()
+    for name, ips in forward_ips.items():
+        if name in stale_names:
+            continue
+        for ip in ips:
+            ptr = reverse_ptr(ip)
+            if ptr:
+                surviving_ptr_names.add(ptr)
+
+    orphaned_ptrs: Set[str] = set()
+    for name in unbound_data:
+        if not is_ptr_name(name):
+            continue
+        if is_in_host_entries(name, host_entries):
+            continue
+        if name not in surviving_ptr_names:
+            orphaned_ptrs.add(name)
+
+    return stale_names, orphaned_ptrs
+
+
+def collect_kea_ips(logger: Optional[logging.Logger] = None) -> Set[str]:
+    """
+    Collect every IP Kea knows about (reservations + active leases, v4 and v6).
+    Raises KeaUnavailableError if Kea cannot be reached — callers that clean
+    records must not proceed without this data.
+    """
+    kea_ips: Set[str] = set()
+    for service in ("dhcp4", "dhcp6"):
+        for res in query_kea_reservations(service=service):
+            if res["ip"]:
+                kea_ips.add(res["ip"])
+            if res["ipv6"]:
+                kea_ips.add(res["ipv6"])
+        for lease in query_kea_leases(service=service):
+            if lease["ip"]:
+                kea_ips.add(lease["ip"])
+            if lease["ipv6"]:
+                kea_ips.add(lease["ipv6"])
+    return kea_ips

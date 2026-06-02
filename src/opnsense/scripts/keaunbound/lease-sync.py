@@ -32,6 +32,7 @@ from lib.keaunbound_sync import (
     reverse_ptr,
     unbound_control,
     is_in_host_entries,
+    is_sane_name,
     setup_logging,
 )
 
@@ -65,6 +66,11 @@ def sync_leases(dry_run: bool = False, verbose: bool = False) -> int:
                 expires = lease["expires"]
 
                 if not hostname or not ip:
+                    continue
+
+                # Skip implausible hostnames (same hygiene as the live listener)
+                if not is_sane_name(hostname, logger):
+                    skipped += 1
                     continue
 
                 # Skip if in host_entries.conf (OPNsense manages it)

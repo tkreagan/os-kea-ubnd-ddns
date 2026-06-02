@@ -16,6 +16,8 @@ PID management is handled by daemon(8) which launches this script.
 Do not run this script directly in production — use configd actions.
 """
 
+from __future__ import annotations
+
 import argparse
 import ipaddress
 import logging
@@ -30,6 +32,8 @@ _DNSPYTHON_MIN = (2, 8)
 
 try:
     import dns.message
+    import dns.exception
+    import dns.name
     import dns.opcode
     import dns.rcode
     import dns.rdataclass
@@ -42,14 +46,14 @@ try:
         print(
             f"ERROR: dnspython {dns.version.version} is too old — "
             f"{_DNSPYTHON_MIN[0]}.{_DNSPYTHON_MIN[1]}+ required. "
-            f"Upgrade with: pkg upgrade py313-dnspython",
+            f"Upgrade with: pkg upgrade py{sys.version_info.major}{sys.version_info.minor}-dnspython",
             file=sys.stderr
         )
         sys.exit(1)
 except ImportError:
     print(
         "ERROR: dnspython is not installed. "
-        "Install with: pkg install py313-dnspython",
+        f"Install with: pkg install py{sys.version_info.major}{sys.version_info.minor}-dnspython",
         file=sys.stderr
     )
     sys.exit(1)
@@ -278,10 +282,10 @@ def is_static_entry(name: str, rdtype: str, logger: logging.Logger,
     return False
 
 def query_unbound(name: str, record_type: str, logger: logging.Logger,
-                  unbound_conf: str = DEFAULT_UNBOUND_CONF) -> list[str]:
+                  unbound_conf: str = DEFAULT_UNBOUND_CONF) -> list[tuple[str, int]]:
     """
     Query Unbound's local data store for records of record_type for name.
-    Returns a list of IP address strings (e.g. ['10.0.0.1']).
+    Returns a list of (ip, ttl) tuples (e.g. [('10.0.0.1', 3600)]).
 
     Used exclusively for dual-stack preservation: before removing a name
     (which wipes ALL records for it via local_data_remove), we query for
@@ -323,11 +327,16 @@ def query_unbound(name: str, record_type: str, logger: logging.Logger,
                 ip = parts[4]
                 try:
                     ipaddress.ip_address(ip)
-                    records.append(ip)
                 except ValueError:
                     logger.warning(
                         "Unexpected non-IP value in list_local_data output: %r", ip
                     )
+                    continue
+                try:
+                    ttl = int(parts[1])
+                except ValueError:
+                    ttl = 3600
+                records.append((ip, ttl))
         return records
     except Exception as e:
         logger.debug("list_local_data query for %s %s failed: %s",
@@ -404,21 +413,16 @@ def process_update(msg: dns.message.Message, unbound_conf: str,
             if rdtype in ("A", "AAAA"):
                 other_type = OTHER_FAMILY[rdtype]
 
-                # Preserve the other address family before removing the name.
-                # local_data_remove wipes ALL records for the name, so we
-                # must re-add any surviving family record afterward.
+                # Preserve the other address family (with its TTL) before
+                # removing the name. local_data_remove wipes ALL records for the
+                # name, so we must re-add any surviving family record afterward.
                 preserved = query_unbound(name, other_type, logger, unbound_conf)
-                preserved_ptrs = [
-                    (ip, ptr)
-                    for ip in preserved
-                    for ptr in [reverse_ptr(ip)]
-                    if ptr
-                ]
 
                 # Find PTR(s) for the records being removed so we can clean
                 # them up. For delete forms 1&2 the rrset has no rdata, so
                 # query Unbound for the current value before removing.
-                current_ips = [str(rr) for rr in rrset] or query_unbound(name, rdtype, logger, unbound_conf)
+                current_ips = [str(rr) for rr in rrset] or \
+                    [ip for ip, _ttl in query_unbound(name, rdtype, logger, unbound_conf)]
                 current_ptrs = [p for p in (reverse_ptr(ip) for ip in current_ips) if p]
 
                 logger.info("Remove: %s %s (preserving %d %s record(s))",
@@ -432,14 +436,16 @@ def process_update(msg: dns.message.Message, unbound_conf: str,
                             logger.info("Remove PTR: %s", ptr)
                             unbound_control(["local_data_remove", ptr],
                                             unbound_conf, dry_run, logger)
-                    # Re-add preserved other-family forward and PTR records
-                    for ip, ptr in preserved_ptrs:
-                        logger.info("Restore %s: %s -> %s", other_type, name, ip)
-                        unbound_control(["local_data", f"{name} IN {other_type} {ip}"],
+                    # Re-add preserved other-family forward and PTR records,
+                    # carrying the original TTL so dynamic leases keep expiring.
+                    for ip, ttl in preserved:
+                        ptr = reverse_ptr(ip)
+                        logger.info("Restore %s: %s -> %s (TTL %ds)", other_type, name, ip, ttl)
+                        unbound_control(["local_data", f"{name} {ttl} IN {other_type} {ip}"],
                                         unbound_conf, dry_run, logger)
-                        if not is_static_entry(ptr, "PTR", logger, static_files):
+                        if ptr and not is_static_entry(ptr, "PTR", logger, static_files):
                             logger.info("Restore PTR: %s -> %s", ptr, name)
-                            unbound_control(["local_data", f"{ptr} IN PTR {name}."],
+                            unbound_control(["local_data", f"{ptr} {ttl} IN PTR {name}."],
                                             unbound_conf, dry_run, logger)
                     removed += 1
                 else:
@@ -587,6 +593,17 @@ def main():
                 msg = dns.message.from_wire(data)
         except dns.exception.DNSException as e:
             logger.warning("Failed to parse DNS message from %s: %s", addr, e)
+            continue
+
+        # Enforce TSIG when a key is configured: an unsigned packet must be
+        # refused, otherwise TSIG provides no authentication. (A signed packet
+        # with a wrong/unknown key already raised above and was dropped.)
+        if keyring and not msg.had_tsig:
+            logger.warning("Rejecting unsigned UPDATE from %s — TSIG required", addr)
+            try:
+                sock.sendto(build_response(msg, dns.rcode.REFUSED), addr)
+            except OSError as e:
+                logger.error("Failed to send REFUSED to %s: %s", addr, e)
             continue
 
         # Only handle UPDATE (opcode 5) — drop everything else silently

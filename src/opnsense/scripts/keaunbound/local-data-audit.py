@@ -6,10 +6,9 @@ Compares Unbound's local_data against Kea reservations, Kea leases, and
 host_entries.conf to identify what's registered, what's stale, and what's
 orphaned.
 
-Generates a report suitable for:
-  - Status view API (--report-json) to display registration state
-  - Manual auditing (--human) for human-readable output
-  - Status flags: OK, missing-PTR, stale, orphaned-PTR, static
+Stale/orphan detection is delegated to keaunbound_sync.find_stale_records(),
+the same function the cleanup script uses — so the "stale" rows and orphaned
+PTRs shown here are exactly what a cleanup would remove.
 
 Output structure (JSON):
   {
@@ -21,17 +20,13 @@ Output structure (JSON):
         "ip": str,
         "type": "A|AAAA",
         "ptr_registered": bool,
-        "source": "reservation|lease|unbound_local_data",
+        "source": "reservation|lease|unbound_local_data|static",
         "in_unbound": bool,
-        "status": "ok|missing-PTR|stale|orphaned-PTR|static"
+        "status": "ok|missing-PTR|stale|orphaned-PTR|static|unknown"
       }
     ],
     "orphaned_ptrs": [
-      {
-        "ptr_name": str,
-        "data": str,
-        "status": "orphaned-PTR"
-      }
+      {"ptr_name": str, "data": str, "status": "orphaned-PTR"}
     ]
   }
 
@@ -42,6 +37,7 @@ Usage:
 """
 
 import argparse
+import ipaddress
 import json
 import sys
 
@@ -55,9 +51,34 @@ from lib.keaunbound_sync import (
     read_host_entries,
     reverse_ptr,
     unbound_list_local_data,
-    is_in_host_entries,
+    is_ptr_name,
+    find_stale_records,
     setup_logging,
 )
+
+
+def _forward_ips_from_lines(lines):
+    """Extract A/AAAA IPs from a list of 'name TTL IN TYPE rdata' lines."""
+    ips = set()
+    for line in lines:
+        parts = line.split()
+        if len(parts) >= 5 and parts[3] in ("A", "AAAA"):
+            ips.add(parts[4])
+    return ips
+
+
+def _host_entry_ips(lines):
+    """Extract A/AAAA IPs from host_entries.conf local-data lines for a name."""
+    ips = set()
+    for line in lines:
+        if "local-data:" not in line:
+            continue
+        parts = line.split()
+        for i, p in enumerate(parts):
+            if p.upper() in ("A", "AAAA") and i + 1 < len(parts):
+                ips.add(parts[i + 1])
+    return ips
+
 
 def audit_local_data(report_json: bool = False, verbose: bool = False) -> int:
     """
@@ -74,16 +95,13 @@ def audit_local_data(report_json: bool = False, verbose: bool = False) -> int:
         "orphaned_ptrs": [],
     }
 
-    # Read static sources
     host_entries = read_host_entries()
     unbound_data = unbound_list_local_data()
 
-    # Try to read dynamic sources from Kea
     kea_reservations = []
     kea_leases = []
-
     try:
-        for service in ["dhcp4", "dhcp6"]:
+        for service in ("dhcp4", "dhcp6"):
             kea_reservations.extend(query_kea_reservations(service=service))
             kea_leases.extend(query_kea_leases(service=service))
     except KeaUnavailableError as e:
@@ -91,106 +109,83 @@ def audit_local_data(report_json: bool = False, verbose: bool = False) -> int:
         result["kea_error"] = str(e)
         logger.warning(f"Kea unavailable: {e}")
 
-    # Build combined set of all hostnames we know about
-    all_hostnames = set()
-
+    # IP indexes per hostname, by source
+    kea_ips = set()
+    res_ips_by_host = {}
+    lease_ips_by_host = {}
     for res in kea_reservations:
-        if res["hostname"]:
-            all_hostnames.add(res["hostname"])
-
+        for ip in (res["ip"], res["ipv6"]):
+            if ip:
+                kea_ips.add(ip)
+                res_ips_by_host.setdefault(res["hostname"], set()).add(ip)
     for lease in kea_leases:
-        if lease["hostname"]:
-            all_hostnames.add(lease["hostname"])
+        for ip in (lease["ip"], lease["ipv6"]):
+            if ip:
+                kea_ips.add(ip)
+                lease_ips_by_host.setdefault(lease["hostname"], set()).add(ip)
 
-    for name in unbound_data:
-        all_hostnames.add(name)
+    unbound_ips_by_host = {}
+    for name, lines in unbound_data.items():
+        if is_ptr_name(name):
+            continue
+        ips = _forward_ips_from_lines(lines)
+        if ips:
+            unbound_ips_by_host[name] = ips
 
-    for name in host_entries:
-        all_hostnames.add(name)
+    host_ips_by_host = {}
+    for name, lines in host_entries.items():
+        ips = _host_entry_ips(lines)
+        if ips:
+            host_ips_by_host[name] = ips
 
-    # Process each hostname
+    unbound_ptr_names = {n for n in unbound_data if is_ptr_name(n)}
+
+    # Authoritative stale/orphan set — only meaningful with complete Kea data.
+    stale_names = set()
+    orphaned_ptr_names = set()
+    if result["complete"]:
+        stale_names, orphaned_ptr_names = find_stale_records(unbound_data, kea_ips, host_entries)
+
+    all_hostnames = (set(res_ips_by_host) | set(lease_ips_by_host)
+                     | set(unbound_ips_by_host) | set(host_ips_by_host))
+
     for hostname in sorted(all_hostnames):
-        # Find IP(s) for this hostname from all sources
-        ips_from_reservation = set()
-        ips_from_lease = set()
-        ips_from_unbound = set()
-        ips_from_host_entries = set()
+        res_ips = res_ips_by_host.get(hostname, set())
+        lease_ips = lease_ips_by_host.get(hostname, set())
+        ub_ips = unbound_ips_by_host.get(hostname, set())
+        he_ips = host_ips_by_host.get(hostname, set())
 
-        for res in kea_reservations:
-            if res["hostname"] == hostname:
-                if res["ip"]:
-                    ips_from_reservation.add(res["ip"])
-                if res["ipv6"]:
-                    ips_from_reservation.add(res["ipv6"])
-
-        for lease in kea_leases:
-            if lease["hostname"] == hostname:
-                if lease["ip"]:
-                    ips_from_lease.add(lease["ip"])
-                if lease["ipv6"]:
-                    ips_from_lease.add(lease["ipv6"])
-
-        # Extract IPs from unbound_data for this hostname
-        if hostname in unbound_data:
-            for line in unbound_data[hostname]:
-                parts = line.split()
-                if len(parts) >= 5:
-                    rdtype = parts[3]
-                    if rdtype in ("A", "AAAA"):
-                        ips_from_unbound.add(parts[4])
-
-        # Extract IPs from host_entries for this hostname
-        if hostname in host_entries:
-            for line in host_entries[hostname]:
-                parts = line.split()
-                if "local-data:" in line and len(parts) >= 5:
-                    rdtype_idx = None
-                    for i, p in enumerate(parts):
-                        if p.upper() == "A" or p.upper() == "AAAA":
-                            rdtype_idx = i
-                            break
-                    if rdtype_idx and rdtype_idx + 1 < len(parts):
-                        ips_from_host_entries.add(parts[rdtype_idx + 1])
-
-        # Combine all IPs
-        all_ips = ips_from_reservation | ips_from_lease | ips_from_unbound | ips_from_host_entries
-
-        # Process each IP for this hostname
-        for ip in sorted(all_ips):
-            # Determine source
-            if ip in ips_from_host_entries:
-                source = "static"
-                status = "static"
-            elif ip in ips_from_reservation:
-                source = "reservation"
-                status = "ok"
-            elif ip in ips_from_lease:
-                source = "lease"
-                status = "ok"
-            elif ip in ips_from_unbound:
+        for ip in sorted(res_ips | lease_ips | ub_ips | he_ips):
+            if ip in he_ips:
+                source, status = "static", "static"
+            elif ip in res_ips:
+                source, status = "reservation", "ok"
+            elif ip in lease_ips:
+                source, status = "lease", "ok"
+            elif ip in ub_ips:
                 source = "unbound_local_data"
-                status = "stale"  # In unbound but not in any source
+                if not result["complete"]:
+                    status = "unknown"  # cannot judge staleness without Kea
+                elif hostname in stale_names:
+                    status = "stale"
+                else:
+                    status = "ok"
             else:
                 continue
 
-            # Determine if in Unbound
-            in_unbound = ip in ips_from_unbound
-
-            # Check PTR
+            in_unbound = ip in ub_ips
             ptr_name = reverse_ptr(ip)
-            ptr_registered = False
+            ptr_registered = bool(ptr_name and ptr_name in unbound_ptr_names)
 
-            if ptr_name and ptr_name in unbound_data:
-                ptr_registered = True
-
-            # Update status if missing PTR
             if status == "ok" and not ptr_registered:
                 status = "missing-PTR"
 
-            # Determine record type
-            record_type = "A" if "." in ip else "AAAA"
+            try:
+                record_type = "A" if ipaddress.ip_address(ip).version == 4 else "AAAA"
+            except ValueError:
+                record_type = "A"
 
-            record = {
+            result["records"].append({
                 "hostname": hostname,
                 "ip": ip,
                 "type": record_type,
@@ -198,57 +193,32 @@ def audit_local_data(report_json: bool = False, verbose: bool = False) -> int:
                 "source": source,
                 "in_unbound": in_unbound,
                 "status": status,
-            }
+            })
 
-            result["records"].append(record)
+    for ptr_name in sorted(orphaned_ptr_names):
+        lines = unbound_data.get(ptr_name, [])
+        result["orphaned_ptrs"].append({
+            "ptr_name": ptr_name,
+            "data": lines[0] if lines else "",
+            "status": "orphaned-PTR",
+        })
 
-    # Find orphaned PTRs (PTRs in unbound_data with no corresponding forward record)
-    unbound_forward_ips = set()
-    for records in [r["ip"] for r in result["records"] if r["in_unbound"]]:
-        unbound_forward_ips.add(records)
-
-    for ptr_name in sorted(unbound_data.keys()):
-        if ptr_name.endswith(".in-addr.arpa") or ptr_name.endswith(".ip6.arpa"):
-            # This is a PTR record
-            for line in unbound_data[ptr_name]:
-                # Check if we have a corresponding forward record
-                parts = line.split()
-                if len(parts) >= 5 and parts[3] == "PTR":
-                    # Extract the IP from the PTR name
-                    try:
-                        # Convert PTR name back to IP
-                        # This is tricky; we'd need to reverse the PTR conversion
-                        # For now, if we have a PTR with no matching A/AAAA, flag it
-                        has_forward = any(r["ptr_registered"] and r["ptr_name"] == ptr_name
-                                         for r in result["records"] if "ptr_name" in r)
-
-                        if not has_forward:
-                            orphaned = {
-                                "ptr_name": ptr_name,
-                                "data": line,
-                                "status": "orphaned-PTR",
-                            }
-                            result["orphaned_ptrs"].append(orphaned)
-                    except Exception:
-                        pass
-
-    # Output
     if report_json:
         print(json.dumps(result, indent=2))
     else:
-        # Human-readable output
         print("Local Data Audit Report")
         print("=" * 80)
-        print(f"Kea Available: {'Yes' if result['complete'] else f'No ({result[\"kea_error\"]})'}")
+        if result["complete"]:
+            print("Kea Available: Yes")
+        else:
+            print(f"Kea Available: No ({result['kea_error']})")
         print(f"Total Records: {len(result['records'])}")
         print(f"Orphaned PTRs: {len(result['orphaned_ptrs'])}")
         print()
 
         status_counts = {}
         for record in result["records"]:
-            status = record["status"]
-            status_counts[status] = status_counts.get(status, 0) + 1
-
+            status_counts[record["status"]] = status_counts.get(record["status"], 0) + 1
         for status, count in sorted(status_counts.items()):
             print(f"  {status}: {count}")
 
@@ -256,13 +226,13 @@ def audit_local_data(report_json: bool = False, verbose: bool = False) -> int:
             print()
             print("Records by Status:")
             print("-" * 80)
-            for status_filter in ["ok", "missing-PTR", "stale", "static"]:
+            for status_filter in ["ok", "missing-PTR", "stale", "unknown", "static"]:
                 filtered = [r for r in result["records"] if r["status"] == status_filter]
                 if filtered:
                     print(f"\n{status_filter.upper()}:")
                     for r in filtered:
-                        ptr_marker = " ✓ PTR" if r["ptr_registered"] else " ✗ NO PTR"
-                        print(f"  {r['hostname']:30} {r['ip']:20} {r['source']:15}{ptr_marker}")
+                        ptr_marker = " +PTR" if r["ptr_registered"] else " -no PTR"
+                        print(f"  {r['hostname']:30} {r['ip']:20} {r['source']:18}{ptr_marker}")
 
         if result["orphaned_ptrs"]:
             print()
@@ -273,6 +243,7 @@ def audit_local_data(report_json: bool = False, verbose: bool = False) -> int:
 
     logger.info("Audit complete")
     return 0
+
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
@@ -289,6 +260,7 @@ def main():
         args.human = True
 
     return audit_local_data(report_json=args.report_json, verbose=args.verbose)
+
 
 if __name__ == "__main__":
     sys.exit(main())
