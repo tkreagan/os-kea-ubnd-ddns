@@ -181,13 +181,48 @@ def query_kea_api(command: str, arguments: Optional[Dict] = None,
     return result
 
 
+def get_system_domain() -> str:
+    """Read the OPNsense system domain (//system/domain). Empty if unset."""
+    try:
+        node = ET.parse(CONFIG_XML).getroot().find("system/domain")
+        return (node.text or "").strip() if node is not None else ""
+    except Exception:
+        return ""
+
+
+def qualify_hostname(hostname: str, suffix: str) -> str:
+    """
+    Return an FQDN for a (possibly bare) hostname so the sync path produces the
+    same names as the live kea-dhcp-ddns path. A name that already contains a dot
+    is treated as already-qualified and returned as-is; a bare name gets the
+    suffix appended; with no suffix the bare name is kept.
+    """
+    hostname = (hostname or "").rstrip(".")
+    if not hostname or "." in hostname:
+        return hostname
+    suffix = (suffix or "").strip(".")
+    return f"{hostname}.{suffix}" if suffix else hostname
+
+
 def _iter_kea_subnets(dhcp_config: Dict, subnet_key: str):
-    """Yield every subnet map, including those nested under shared-networks."""
+    """
+    Yield (subnet, inherited_suffix) for every subnet, where inherited_suffix is
+    the parent shared-network's ddns-qualifying-suffix ('' for top-level subnets).
+    """
     for subnet in dhcp_config.get(subnet_key, []):
-        yield subnet
+        yield subnet, ""
     for shared in dhcp_config.get("shared-networks", []):
+        net_suffix = shared.get("ddns-qualifying-suffix", "") or ""
         for subnet in shared.get(subnet_key, []):
-            yield subnet
+            yield subnet, net_suffix
+
+
+def _effective_suffix(subnet: Dict, net_suffix: str, global_suffix: str,
+                      system_domain: str) -> str:
+    """Resolve a subnet's qualifying suffix: subnet -> shared-network -> global
+    -> system domain -> '' (bare)."""
+    return ((subnet.get("ddns-qualifying-suffix") or "")
+            or net_suffix or global_suffix or system_domain or "")
 
 
 def query_kea_reservations(service: str = "dhcp4") -> List[Dict]:
@@ -207,12 +242,18 @@ def query_kea_reservations(service: str = "dhcp4") -> List[Dict]:
 
     resp = query_kea_api("config-get", service=service)
     dhcp_config = resp.get("arguments", {}).get(root_key, {})
+    global_suffix = dhcp_config.get("ddns-qualifying-suffix", "") or ""
+    system_domain = get_system_domain()
 
     reservations = []
-    # Subnet-level reservations (incl. shared-networks), plus any global ones.
-    for source in list(_iter_kea_subnets(dhcp_config, subnet_key)) + [dhcp_config]:
+    # Per-subnet reservations (incl. shared-networks), each qualified with that
+    # subnet's effective DDNS suffix; then any global reservations.
+    sources = [(subnet, _effective_suffix(subnet, net_suffix, global_suffix, system_domain))
+               for subnet, net_suffix in _iter_kea_subnets(dhcp_config, subnet_key)]
+    sources.append((dhcp_config, global_suffix or system_domain or ""))
+    for source, suffix in sources:
         for res in source.get("reservations", []):
-            hostname = (res.get("hostname") or "").rstrip(".")
+            hostname = qualify_hostname(res.get("hostname", ""), suffix)
             res_dict = {"hostname": hostname, "ip": None, "ipv6": None}
             if is_v4:
                 res_dict["ip"] = res.get("ip-address")
@@ -238,7 +279,24 @@ def query_kea_leases(service: str = "dhcp4") -> List[Dict]:
     is unavailable.
     """
     now = int(time.time())
-    command = "lease4-get-all" if service == "dhcp4" else "lease6-get-all"
+    is_v4 = service == "dhcp4"
+    root_key = "Dhcp4" if is_v4 else "Dhcp6"
+    subnet_key = "subnet4" if is_v4 else "subnet6"
+
+    # Build a subnet-id -> qualifying-suffix map from the running config so each
+    # lease is named the same way the live kea-dhcp-ddns path would name it.
+    cfg = query_kea_api("config-get", service=service)
+    dhcp_config = cfg.get("arguments", {}).get(root_key, {})
+    global_suffix = dhcp_config.get("ddns-qualifying-suffix", "") or ""
+    system_domain = get_system_domain()
+    suffix_by_subnet = {}
+    for subnet, net_suffix in _iter_kea_subnets(dhcp_config, subnet_key):
+        sid = subnet.get("id")
+        if sid is not None:
+            suffix_by_subnet[sid] = _effective_suffix(subnet, net_suffix, global_suffix, system_domain)
+    default_suffix = global_suffix or system_domain or ""
+
+    command = "lease4-get-all" if is_v4 else "lease6-get-all"
     resp = query_kea_api(command, service=service)
     leases = []
 
@@ -265,8 +323,9 @@ def query_kea_leases(service: str = "dhcp4") -> List[Dict]:
                 continue
             expires = expire
 
+        suffix = suffix_by_subnet.get(lease.get("subnet-id"), default_suffix)
         lease_dict = {
-            "hostname": (lease.get("hostname") or "").rstrip("."),
+            "hostname": qualify_hostname(lease.get("hostname", ""), suffix),
             "ip": None,
             "ipv6": None,
             "expires": expires,
