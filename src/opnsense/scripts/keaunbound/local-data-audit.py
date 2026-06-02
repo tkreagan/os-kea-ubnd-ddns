@@ -101,6 +101,7 @@ def audit_local_data(report_json: bool = False, verbose: bool = False) -> int:
 
     kea_reservations = []
     kea_leases = []
+    any_service_ok = False
     for service in ("dhcp4", "dhcp6"):
         try:
             reservations = query_kea_reservations(service=service)
@@ -114,6 +115,7 @@ def audit_local_data(report_json: bool = False, verbose: bool = False) -> int:
             result["kea_error"] = str(e)
             logger.warning(f"Kea unavailable: {e}")
             break
+        any_service_ok = True
         kea_reservations.extend(reservations)
         try:
             kea_leases.extend(query_kea_leases(service=service))
@@ -129,6 +131,12 @@ def audit_local_data(report_json: bool = False, verbose: bool = False) -> int:
             result["kea_error"] = str(e)
             logger.warning(f"Kea unavailable: {e}")
             break
+
+    # If no service responded at all, we have no Kea data — mark incomplete so
+    # the Clean button stays disabled (cleanup needs authoritative Kea data).
+    if not any_service_ok and result["complete"]:
+        result["complete"] = False
+        result["kea_error"] = result["kea_error"] or "No Kea service (dhcp4/dhcp6) responded"
 
     # IP indexes per hostname, by source
     kea_ips = set()

@@ -114,8 +114,10 @@ class KcaConfigController extends ApiControllerBase
 
         // Query Kea control agent
         $url = "http://{$kea_host}:{$kea_port}/";
+        // config-get returns the running daemon config under arguments.Dhcp4/Dhcp6
+        // (there is no '{daemon}-get-config' command on Kea).
         $command = [
-            'command' => "{$daemon}-get-config",
+            'command' => 'config-get',
             'service' => [$daemon]
         ];
 

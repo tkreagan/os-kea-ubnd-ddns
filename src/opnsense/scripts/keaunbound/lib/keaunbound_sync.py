@@ -200,18 +200,19 @@ def query_kea_reservations(service: str = "dhcp4") -> List[Dict]:
     dicts with keys: hostname, ip, ipv6.
     """
     is_v4 = service == "dhcp4"
-    command = "dhcp4-get-config" if is_v4 else "dhcp6-get-config"
+    # config-get returns the running daemon config under arguments.Dhcp4/Dhcp6.
+    # (There is no 'dhcp4-get-config' command on Kea.)
     root_key = "Dhcp4" if is_v4 else "Dhcp6"
     subnet_key = "subnet4" if is_v4 else "subnet6"
 
-    resp = query_kea_api(command, service=service)
+    resp = query_kea_api("config-get", service=service)
     dhcp_config = resp.get("arguments", {}).get(root_key, {})
 
     reservations = []
     # Subnet-level reservations (incl. shared-networks), plus any global ones.
     for source in list(_iter_kea_subnets(dhcp_config, subnet_key)) + [dhcp_config]:
         for res in source.get("reservations", []):
-            hostname = res.get("hostname", "")
+            hostname = (res.get("hostname") or "").rstrip(".")
             res_dict = {"hostname": hostname, "ip": None, "ipv6": None}
             if is_v4:
                 res_dict["ip"] = res.get("ip-address")
@@ -265,7 +266,7 @@ def query_kea_leases(service: str = "dhcp4") -> List[Dict]:
             expires = expire
 
         lease_dict = {
-            "hostname": lease.get("hostname", ""),
+            "hostname": (lease.get("hostname") or "").rstrip("."),
             "ip": None,
             "ipv6": None,
             "expires": expires,
