@@ -69,4 +69,13 @@
     {{ partial("layout_partials/base_form", ['fields': formGeneralSettings, 'id': 'frm_generalsettings']) }}
 </div>
 
+<div class="content-box" style="padding: 10px 20px;">
+    <button id="sync_static_now" class="btn btn-default" type="button">
+        <i class="fa fa-refresh"></i> {{ lang._('Sync Static Reservations Now') }}
+    </button>
+    <button id="sync_dynamic_now" class="btn btn-default" type="button" style="margin-left: 8px;">
+        <i class="fa fa-refresh"></i> {{ lang._('Sync Dynamic Leases Now') }}
+    </button>
+</div>
+
 {{ partial('layout_partials/base_apply_button', {'data_endpoint': '/api/keaunbound/general/reconfigure', 'data_service_widget': 'keaunbound'}) }}

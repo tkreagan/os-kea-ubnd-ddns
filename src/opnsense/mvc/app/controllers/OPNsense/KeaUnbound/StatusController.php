@@ -30,7 +30,7 @@ namespace OPNsense\KeaUnbound;
 
 class StatusController extends \OPNsense\Base\IndexController
 {
-    public function statusAction()
+    public function indexAction()
     {
         $this->view->pick('OPNsense/KeaUnbound/status');
     }

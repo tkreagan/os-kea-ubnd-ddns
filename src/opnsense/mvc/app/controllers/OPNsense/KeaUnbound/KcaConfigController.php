@@ -30,7 +30,7 @@ namespace OPNsense\KeaUnbound;
 
 class KcaConfigController extends \OPNsense\Base\IndexController
 {
-    public function kcaconfigAction()
+    public function indexAction()
     {
         $this->view->pick('OPNsense/KeaUnbound/kcaconfig');
     }
