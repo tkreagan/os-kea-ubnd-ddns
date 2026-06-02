@@ -31,7 +31,7 @@ def get_config():
     try:
         tree = ET.parse(CONFIG_XML)
         root = tree.getroot()
-        node = root.find("KeaUnbound/general")
+        node = root.find("OPNsense/KeaUnbound/general")
         if node is not None:
             for key in cfg:
                 child = node.find(key)
