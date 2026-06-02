@@ -140,12 +140,18 @@ class KcaconfigController extends ApiControllerBase
      * Build a lookup map from domain name (normalised, no trailing dot) to its
      * full domain config, read directly from kea-dhcp-ddns.conf.
      *
-     * Kea's Control Agent cannot forward commands to the d2 daemon unless d2
-     * has a control-socket configured — which OPNsense does not generate.
-     * Reading the config file directly is simpler and always works.
+     * TODO: revert to querying d2 via the Control Agent once OPNsense fixes
+     * the missing control-socket bug (filed at github.com/opnsense/core/issues).
+     * The correct approach is:
+     *   $d2_args = $this->keaQuery('d2');
+     *   $domains = $d2_args['DhcpDdns']['forward-ddns']['ddns-domains'] ?? [];
+     * This is blocked because OPNsense generates kea-ctrl-agent.conf with a d2
+     * socket entry (/var/run/kea/kea-ddns-ctrl-socket) but does not generate a
+     * matching control-socket section in kea-dhcp-ddns.conf, so the socket is
+     * never created and the Control Agent returns "No such file or directory".
      *
      * Returns [map, d2_ok]: map is name→domain, d2_ok is true if the file
-     * was readable and parseable (daemon is configured, even if not queryable).
+     * was readable and parseable.
      */
     private function buildDomainMap()
     {
