@@ -34,6 +34,7 @@ from typing import Dict, List, Optional, Set, Tuple
 CONFIG_XML = "/conf/config.xml"
 HOST_ENTRIES = "/var/unbound/host_entries.conf"
 UNBOUND_CONTROL = "/usr/local/sbin/unbound-control"
+UNBOUND_CONF = "/var/unbound/unbound.conf"
 SYSLOG_IDENT = "kea-unbound-sync"
 
 # Kea lease "state" enum: 0 = default/active (the only one we register),
@@ -425,9 +426,11 @@ def is_sane_name(name: str, logger: Optional[logging.Logger] = None) -> bool:
 def unbound_control(args: List[str], timeout: float = 10.0) -> bool:
     """
     Call unbound-control with given arguments.
+    Always passes -c UNBOUND_CONF so the remote-control socket is found even
+    when the caller's environment doesn't have the default config in scope.
     Returns True on success, False on failure.
     """
-    cmd = [UNBOUND_CONTROL] + args
+    cmd = [UNBOUND_CONTROL, "-c", UNBOUND_CONF] + args
     try:
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
         return result.returncode == 0
@@ -448,7 +451,7 @@ def unbound_list_local_data() -> Dict[str, List[str]]:
 
     try:
         result = subprocess.run(
-            [UNBOUND_CONTROL, "list_local_data"],
+            [UNBOUND_CONTROL, "-c", UNBOUND_CONF, "list_local_data"],
             capture_output=True, text=True, timeout=10.0
         )
         if result.returncode != 0:
