@@ -148,7 +148,70 @@ function renderKeaConfig(data) {
     html += subnetPanel('IPv4 Subnets', v4);
     html += subnetPanel('IPv6 Subnets', v6);
 
+    // ── Contextual fix instructions ───────────────────────────────────────────
+    if (problems > 0) {
+        html += fixGuide(wrong > 0, tsig > 0, no_ddns > 0, data.our_listener);
+    }
+
     $("#configContent").html(html);
+}
+
+function fixGuide(hasWrong, hasTsig, hasNoDdns, listener) {
+    const port = listener ? listener.port : 53535;
+    let html = '<div class="panel panel-default" style="margin-top:8px;">' +
+               '<div class="panel-heading" style="cursor:pointer;" onclick="$(\'#fixGuideBody\').toggle();">' +
+               '<h4 class="panel-title"><i class="fa fa-wrench"></i> How to fix &nbsp;' +
+               '<small class="text-muted">(click to expand)</small></h4></div>' +
+               '<div id="fixGuideBody" style="display:none;">' +
+               '<div class="panel-body">';
+
+    html += '<p class="text-muted">All changes are made in <strong>Services → Kea DHCP → Kea DHCPv4 → Subnets</strong>. ' +
+            'Edit the subnet, scroll to the <strong>Dynamic DNS</strong> section, and click <strong>Advanced</strong> ' +
+            'to reveal the port and TSIG fields. Apply after saving.</p>';
+
+    if (hasNoDdns) {
+        html += '<h5><span class="label label-default">No DDNS</span> &nbsp;Enable DDNS for this subnet</h5>' +
+                '<ol>' +
+                '<li>Set <strong>DNS forward zone</strong> to your domain (e.g. <code>plhm.rgn.cm</code>)</li>' +
+                '<li>Set <strong>DNS qualifying suffix</strong> to the same value</li>' +
+                '<li>Optionally set <strong>DNS reverse zone</strong> (e.g. <code>1.10.10.in-addr.arpa.</code>)</li>' +
+                '<li>Click <strong>Advanced</strong></li>' +
+                '<li>Set <strong>DNS server address</strong> to <code>127.0.0.1</code></li>' +
+                '<li>Set <strong>DNS server port</strong> to <code>' + port + '</code></li>' +
+                '<li>Check <strong>Override no update</strong> and <strong>Override client update</strong> (recommended)</li>' +
+                '<li>Save and Apply</li>' +
+                '</ol>';
+    }
+
+    if (hasWrong) {
+        html += '<h5><span class="label label-warning">Other Target</span> &nbsp;Point this subnet at this plugin</h5>' +
+                '<ol>' +
+                '<li>Click <strong>Advanced</strong> in the Dynamic DNS section</li>' +
+                '<li>Set <strong>DNS server address</strong> to <code>127.0.0.1</code></li>' +
+                '<li>Set <strong>DNS server port</strong> to <code>' + port + '</code></li>' +
+                '<li>Save and Apply</li>' +
+                '</ol>' +
+                '<p class="text-muted">Note: if this subnet intentionally sends DDNS updates elsewhere, ' +
+                'no change is needed — the amber status is informational only.</p>';
+    }
+
+    if (hasTsig) {
+        html += '<h5><span class="label label-danger">TSIG Mismatch</span> &nbsp;Fix TSIG authentication</h5>' +
+                '<p>Both sides must agree on TSIG — either both enabled with matching key, or both disabled.</p>' +
+                '<strong>To enable TSIG on this subnet:</strong>' +
+                '<ol>' +
+                '<li>Click <strong>Advanced</strong> in the Dynamic DNS section</li>' +
+                '<li>Set <strong>TSIG key name</strong> to match the plugin\'s key name (Settings tab)</li>' +
+                '<li>Set <strong>TSIG secret</strong> to the same base64-encoded secret</li>' +
+                '<li>Set <strong>TSIG algorithm</strong> to match (e.g. HMAC-SHA256)</li>' +
+                '<li>Save and Apply</li>' +
+                '</ol>' +
+                '<strong>To disable TSIG instead:</strong> go to the Kea Unbound Settings tab and uncheck ' +
+                '<em>Enable TSIG authentication</em>, then Apply.';
+    }
+
+    html += '</div></div></div>';
+    return html;
 }
 
 function subnetPanel(title, subnets) {
