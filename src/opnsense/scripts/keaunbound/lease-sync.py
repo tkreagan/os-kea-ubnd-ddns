@@ -27,6 +27,7 @@ sys.path.insert(0, "/usr/local/opnsense/scripts/keaunbound")
 
 from lib.keaunbound_sync import (
     KeaUnavailableError,
+    KeaServiceUnavailableError,
     query_kea_leases,
     read_host_entries,
     reverse_ptr,
@@ -55,6 +56,9 @@ def sync_leases(dry_run: bool = False, verbose: bool = False) -> int:
         for service in ["dhcp4", "dhcp6"]:
             try:
                 leases = query_kea_leases(service=service)
+            except KeaServiceUnavailableError as e:
+                logger.info(f"Skipping {service}: {e}")
+                continue
             except KeaUnavailableError as e:
                 logger.warning(f"Kea unavailable for {service}: {e}")
                 errors += 1

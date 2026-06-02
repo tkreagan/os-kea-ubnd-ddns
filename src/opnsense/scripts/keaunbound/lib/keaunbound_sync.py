@@ -53,6 +53,14 @@ class KeaUnavailableError(Exception):
     pass
 
 
+class KeaServiceUnavailableError(KeaUnavailableError):
+    """Raised when the control agent is reachable but a specific service
+    (dhcp4/dhcp6) is offline or a command failed for it. Subclass of
+    KeaUnavailableError so existing handlers still catch it, while callers that
+    want per-service tolerance can catch this and skip just that service."""
+    pass
+
+
 def setup_logging(verbose: bool = False) -> logging.Logger:
     """Set up syslog logging with optional stderr for debugging."""
     logger = logging.getLogger(SYSLOG_IDENT)
@@ -160,37 +168,58 @@ def query_kea_api(command: str, arguments: Optional[Dict] = None,
     if not isinstance(result, dict):
         raise KeaUnavailableError(f"Kea command '{command}' returned an unexpected response")
 
-    if result.get("result") != 0:
-        raise KeaUnavailableError(
+    # Kea result codes: 0=success, 1=error, 2=unsupported, 3=empty (success,
+    # no data). Treat EMPTY as success; command-level failures are per-service.
+    rc = result.get("result")
+    if rc == 3:
+        return result
+    if rc != 0:
+        raise KeaServiceUnavailableError(
             f"Kea command '{command}' failed: {result.get('text', 'unknown error')}"
         )
 
     return result
 
 
+def _iter_kea_subnets(dhcp_config: Dict, subnet_key: str):
+    """Yield every subnet map, including those nested under shared-networks."""
+    for subnet in dhcp_config.get(subnet_key, []):
+        yield subnet
+    for shared in dhcp_config.get("shared-networks", []):
+        for subnet in shared.get(subnet_key, []):
+            yield subnet
+
+
 def query_kea_reservations(service: str = "dhcp4") -> List[Dict]:
     """
-    Query all static reservations from Kea.
-    Returns list of reservation dicts with keys: hostname, ip, ipv6
-    Raises KeaUnavailableError if Kea is unavailable.
+    Read static reservations from the running Kea configuration.
+
+    OPNsense stores reservations in the config (subnet[].reservations[]), not a
+    host-database backend, so we read them via {service}-get-config rather than
+    reservation-get-all (which needs host_cmds + a host DB). Returns a list of
+    dicts with keys: hostname, ip, ipv6.
     """
-    resp = query_kea_api("reservation-get-all", service=service)
+    is_v4 = service == "dhcp4"
+    command = "dhcp4-get-config" if is_v4 else "dhcp6-get-config"
+    root_key = "Dhcp4" if is_v4 else "Dhcp6"
+    subnet_key = "subnet4" if is_v4 else "subnet6"
+
+    resp = query_kea_api(command, service=service)
+    dhcp_config = resp.get("arguments", {}).get(root_key, {})
+
     reservations = []
-
-    for reservation in resp.get("arguments", {}).get("reservations", []):
-        res_dict = {
-            "hostname": reservation.get("hostname", ""),
-            "ip": None,
-            "ipv6": None,
-        }
-
-        if service == "dhcp4":
-            res_dict["ip"] = reservation.get("ipv4-address")
-        if service == "dhcp6":
-            res_dict["ipv6"] = reservation.get("ipv6-address")
-
-        if res_dict["hostname"] and (res_dict["ip"] or res_dict["ipv6"]):
-            reservations.append(res_dict)
+    # Subnet-level reservations (incl. shared-networks), plus any global ones.
+    for source in list(_iter_kea_subnets(dhcp_config, subnet_key)) + [dhcp_config]:
+        for res in source.get("reservations", []):
+            hostname = res.get("hostname", "")
+            res_dict = {"hostname": hostname, "ip": None, "ipv6": None}
+            if is_v4:
+                res_dict["ip"] = res.get("ip-address")
+            else:
+                addrs = res.get("ip-addresses") or []
+                res_dict["ipv6"] = addrs[0] if addrs else None
+            if hostname and (res_dict["ip"] or res_dict["ipv6"]):
+                reservations.append(res_dict)
 
     return reservations
 
@@ -208,7 +237,8 @@ def query_kea_leases(service: str = "dhcp4") -> List[Dict]:
     is unavailable.
     """
     now = int(time.time())
-    resp = query_kea_api("lease-get-all", service=service)
+    command = "lease4-get-all" if service == "dhcp4" else "lease6-get-all"
+    resp = query_kea_api(command, service=service)
     leases = []
 
     for lease in resp.get("arguments", {}).get("leases", []):
@@ -459,15 +489,29 @@ def collect_kea_ips(logger: Optional[logging.Logger] = None) -> Set[str]:
     records must not proceed without this data.
     """
     kea_ips: Set[str] = set()
+    any_ok = False
     for service in ("dhcp4", "dhcp6"):
-        for res in query_kea_reservations(service=service):
+        try:
+            reservations = query_kea_reservations(service=service)
+        except KeaServiceUnavailableError as e:
+            if logger:
+                logger.info(f"Skipping {service} (offline/unavailable): {e}")
+            continue
+        # Service responded — leases must be readable to clean safely. If they
+        # are not, the error propagates so the caller aborts rather than
+        # deleting live lease records it cannot see.
+        leases = query_kea_leases(service=service)
+        any_ok = True
+        for res in reservations:
             if res["ip"]:
                 kea_ips.add(res["ip"])
             if res["ipv6"]:
                 kea_ips.add(res["ipv6"])
-        for lease in query_kea_leases(service=service):
+        for lease in leases:
             if lease["ip"]:
                 kea_ips.add(lease["ip"])
             if lease["ipv6"]:
                 kea_ips.add(lease["ipv6"])
+    if not any_ok:
+        raise KeaUnavailableError("No Kea service (dhcp4/dhcp6) responded")
     return kea_ips

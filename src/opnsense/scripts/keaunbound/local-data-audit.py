@@ -46,6 +46,7 @@ sys.path.insert(0, "/usr/local/opnsense/scripts/keaunbound")
 
 from lib.keaunbound_sync import (
     KeaUnavailableError,
+    KeaServiceUnavailableError,
     query_kea_reservations,
     query_kea_leases,
     read_host_entries,
@@ -76,7 +77,7 @@ def _host_entry_ips(lines):
         parts = line.split()
         for i, p in enumerate(parts):
             if p.upper() in ("A", "AAAA") and i + 1 < len(parts):
-                ips.add(parts[i + 1])
+                ips.add(parts[i + 1].strip('"'))
     return ips
 
 
@@ -100,14 +101,34 @@ def audit_local_data(report_json: bool = False, verbose: bool = False) -> int:
 
     kea_reservations = []
     kea_leases = []
-    try:
-        for service in ("dhcp4", "dhcp6"):
-            kea_reservations.extend(query_kea_reservations(service=service))
+    for service in ("dhcp4", "dhcp6"):
+        try:
+            reservations = query_kea_reservations(service=service)
+        except KeaServiceUnavailableError as e:
+            # Service offline / config unreadable (e.g. dhcp6 not running) — skip.
+            logger.info(f"Skipping {service}: {e}")
+            continue
+        except KeaUnavailableError as e:
+            # Control agent unreachable — cannot complete the audit.
+            result["complete"] = False
+            result["kea_error"] = str(e)
+            logger.warning(f"Kea unavailable: {e}")
+            break
+        kea_reservations.extend(reservations)
+        try:
             kea_leases.extend(query_kea_leases(service=service))
-    except KeaUnavailableError as e:
-        result["complete"] = False
-        result["kea_error"] = str(e)
-        logger.warning(f"Kea unavailable: {e}")
+        except KeaServiceUnavailableError as e:
+            # Service is up but leases can't be read (e.g. lease_cmds missing).
+            # Mark incomplete so cleanup stays disabled — deleting without lease
+            # data would wrongly remove live lease records.
+            result["complete"] = False
+            result["kea_error"] = f"Active leases unavailable for {service}: {e}"
+            logger.warning(result["kea_error"])
+        except KeaUnavailableError as e:
+            result["complete"] = False
+            result["kea_error"] = str(e)
+            logger.warning(f"Kea unavailable: {e}")
+            break
 
     # IP indexes per hostname, by source
     kea_ips = set()
