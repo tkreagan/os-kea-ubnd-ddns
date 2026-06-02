@@ -49,6 +49,19 @@ def main():
         print("kea-unbound-ddns is disabled — not starting.", file=sys.stderr)
         sys.exit(0)
 
+    # Remove a stale pidfile before handing off to daemon(8). daemon(8) treats
+    # an existing pidfile whose PID is no longer running as an error on some
+    # FreeBSD versions, causing "Execute error" from configd.
+    if os.path.exists(PIDFILE):
+        try:
+            with open(PIDFILE) as pf:
+                pid = int(pf.read().strip())
+            os.kill(pid, 0)  # signal 0: check existence only
+        except (ProcessLookupError, ValueError):
+            os.unlink(PIDFILE)  # process gone — safe to remove
+        except OSError:
+            pass  # process exists (EPERM or similar) — leave pidfile alone
+
     # Build kea-unbound-ddns.py argument list
     script_args = [SCRIPT, "--port", cfg["port"]]
 
