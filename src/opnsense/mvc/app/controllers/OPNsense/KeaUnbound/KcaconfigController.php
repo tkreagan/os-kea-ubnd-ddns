@@ -28,7 +28,7 @@
 
 namespace OPNsense\KeaUnbound;
 
-class KcaConfigController extends \OPNsense\Base\IndexController
+class KcaconfigController extends \OPNsense\Base\IndexController
 {
     public function indexAction()
     {

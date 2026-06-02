@@ -30,7 +30,7 @@ namespace OPNsense\KeaUnbound\Api;
 
 use OPNsense\Base\ApiControllerBase;
 
-class KcaConfigController extends ApiControllerBase
+class KcaconfigController extends ApiControllerBase
 {
     /**
      * Check Kea DHCP subnet configuration for DDNS settings.

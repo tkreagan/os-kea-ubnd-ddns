@@ -42,7 +42,7 @@ function loadKeaConfig() {
     $("#configError").hide();
 
     $.ajax({
-        url: '/api/keaunbound/kca-config/check',
+        url: '/api/keaunbound/kcaconfig/check',
         type: 'GET',
         dataType: 'json',
         timeout: 10000,
