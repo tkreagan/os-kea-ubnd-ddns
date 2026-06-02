@@ -33,8 +33,7 @@ use OPNsense\Base\ApiMutableServiceControllerBase;
 class ServiceController extends ApiMutableServiceControllerBase
 {
     protected static $internalServiceClass = '\OPNsense\KeaUnbound\General';
-    protected static $internalServiceEnabled = 'general.enabled';
     protected static $internalServiceTemplate = null;
-    protected static $internalServiceName = 'kea-unbound-ddns';
-    protected static $internalServiceStartStopVar = 'general.enabled';
+    protected static $internalServiceEnabled = 'general.enabled';
+    protected static $internalServiceName = 'keaunbound';
 }
