@@ -81,10 +81,10 @@ function escapeHtml(text) {
 }
 
 const BUCKET_LABELS = {
-    'ok':            { label: 'OK',            cls: 'label-success' },
-    'tsig_mismatch': { label: 'TSIG Mismatch', cls: 'label-warning' },
-    'wrong_target':  { label: 'Wrong Target',  cls: 'label-danger'  },
-    'no_ddns':       { label: 'No DDNS',       cls: 'label-default' },
+    'ok':            { label: 'OK',           cls: 'label-success' },
+    'tsig_mismatch': { label: 'TSIG Mismatch',cls: 'label-danger'  },
+    'wrong_target':  { label: 'Other Target', cls: 'label-warning' },
+    'no_ddns':       { label: 'No DDNS',      cls: 'label-default' },
 };
 
 function bucketBadge(status) {
@@ -122,8 +122,8 @@ function renderKeaConfig(data) {
     // ── Summary stats ─────────────────────────────────────────────────────────
     html += '<div class="row" style="margin-bottom:16px;">';
     html += statCard(ok,      'Correctly Configured', 'text-success');
-    html += statCard(wrong,   'Wrong Target',         'text-danger');
-    html += statCard(tsig,    'TSIG Mismatch',        'text-warning');
+    html += statCard(wrong,   'Other Target',         'text-warning');
+    html += statCard(tsig,    'TSIG Mismatch',        'text-danger');
     html += statCard(no_ddns, 'No DDNS',              'text-muted');
     html += '</div>';
 
