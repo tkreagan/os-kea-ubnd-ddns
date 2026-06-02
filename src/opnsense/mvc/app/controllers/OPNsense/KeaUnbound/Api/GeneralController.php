@@ -67,13 +67,15 @@ class GeneralController extends ApiMutableModelControllerBase
         if ($this->request->isPost()) {
             $backend = new Backend();
 
-            // Update cron job configuration based on auto-clean settings
-            $backend->configdRun('keaunbound.setup_cron');
-
-            // Check if TSIG or port settings changed (these require daemon restart)
-            // For now, always restart to be safe. A smarter implementation could
-            // read the old config and compare before deciding to restart.
+            // Always restart the daemon (v1): port/TSIG/enable settings are baked
+            // into the daemon's launch args by start.py and only read at startup,
+            // so any apply requires a restart to take effect. This also handles the
+            // enable/disable transition (start.py is enable-aware, restart pkills first).
             $backend->configdRun('keaunbound restart');
+
+            // Rebuild cron (core action) so the keaunbound_cron() job is
+            // (re)materialized or removed to match the current auto-clean settings.
+            $backend->configdRun('cron restart');
 
             return ['status' => 'ok'];
         }
@@ -88,7 +90,7 @@ class GeneralController extends ApiMutableModelControllerBase
     {
         if ($this->request->isPost()) {
             $backend = new Backend();
-            $backend->configdRun('keaunbound.sync_static');
+            $backend->configdRun('keaunbound sync_static');
 
             return ['status' => 'ok', 'message' => 'Static reservations sync triggered'];
         }
@@ -103,7 +105,7 @@ class GeneralController extends ApiMutableModelControllerBase
     {
         if ($this->request->isPost()) {
             $backend = new Backend();
-            $backend->configdRun('keaunbound.sync_dynamic');
+            $backend->configdRun('keaunbound sync_dynamic');
 
             return ['status' => 'ok', 'message' => 'Dynamic leases sync triggered'];
         }
@@ -118,7 +120,7 @@ class GeneralController extends ApiMutableModelControllerBase
     {
         if ($this->request->isPost()) {
             $backend = new Backend();
-            $backend->configdRun('keaunbound.clean');
+            $backend->configdRun('keaunbound clean');
 
             return ['status' => 'ok', 'message' => 'Cleanup triggered'];
         }

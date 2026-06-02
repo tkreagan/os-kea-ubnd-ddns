@@ -132,6 +132,43 @@ function keaunbound_services()
     return $services;
 }
 
+function keaunbound_cron()
+{
+    /*
+     * Register the auto-clean cron job the OPNsense way.
+     *
+     * plugins_cron() collects this hook's return value and reconciles it into
+     * the cron model (OPNsense/cron/jobs) by origin, which the Cron template
+     * renders into the managed crontab. There is no file to write and no
+     * teardown to perform: when the feature is disabled we simply return no
+     * jobs, and the next cron rebuild drops the entry. The rebuild is triggered
+     * by 'cron restart' (issued from reconfigureAction) and on boot.
+     *
+     * The job invokes the existing [clean] configd action so the schedule and
+     * the GUI "Clean" button share one code path.
+     */
+    $jobs = [];
+
+    $cfg = new \OPNsense\KeaUnbound\General();
+    if (!empty((string)$cfg->enabled) && !empty((string)$cfg->enable_auto_clean)) {
+        $hour_by_interval = [
+            '6'  => '0,6,12,18',
+            '12' => '0,12',
+            '24' => '0',
+        ];
+        $hour = $hour_by_interval[(string)$cfg->auto_clean_interval] ?? '0,6,12,18';
+
+        // autocron format: [command, minute, hour, mday, month, wday] (trailing => *)
+        $jobs[]['autocron'] = [
+            '/usr/local/sbin/configctl -d keaunbound clean',
+            '0',
+            $hour,
+        ];
+    }
+
+    return $jobs;
+}
+
 function keaunbound_configure()
 {
     return [

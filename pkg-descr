@@ -1,0 +1,9 @@
+Kea Unbound DDNS
+
+Automatically registers Kea DHCP leases and static reservations in the Unbound
+DNS resolver. Runs an RFC 2136 DNS UPDATE stub listener for kea-dhcp-ddns (with
+optional TSIG authentication) bound to 127.0.0.1, plus on-demand reservation and
+lease synchronization, a DNS registration audit view, and scheduled stale-record
+cleanup.
+
+WWW: https://github.com/tkreagan/os-kea-unbound
