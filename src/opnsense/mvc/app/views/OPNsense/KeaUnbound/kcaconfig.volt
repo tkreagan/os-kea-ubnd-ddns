@@ -24,16 +24,18 @@
  # POSSIBILITY OF SUCH DAMAGE.
  #}
 
+<style>
+    .kea-subnet  { font-family: monospace; font-size: 0.9em; }
+    .stat-card   { text-align: center; padding: 12px 8px; }
+    .stat-card h4 { margin: 0 0 4px; font-size: 1.6em; }
+    .stat-card small { font-size: 0.8em; }
+</style>
+
 <script>
 $( document ).ready(function() {
     loadKeaConfig();
-
-    // Refresh every 30 seconds
     setInterval(loadKeaConfig, 30000);
-
-    $("#refreshBtn").click(function() {
-        loadKeaConfig();
-    });
+    $("#refreshBtn").click(function() { loadKeaConfig(); });
 });
 
 function loadKeaConfig() {
@@ -51,187 +53,137 @@ function loadKeaConfig() {
                 showError(data.kea_error);
                 return;
             }
-
             renderKeaConfig(data);
             $("#configLoader").hide();
             $("#configContent").show();
         },
-        error: function(xhr, status, error) {
-            let message = 'Failed to load Kea configuration';
-            if (status === 'timeout') {
-                message = 'Request timeout - check that Kea Control Agent is running';
-            } else if (xhr.status === 0) {
-                message = 'Connection error - Kea Control Agent may not be running';
-            }
-            showError(message);
+        error: function(xhr, status) {
+            showError(status === 'timeout'
+                ? 'Request timed out — check that Kea Control Agent is running'
+                : 'Failed to load Kea configuration');
         }
     });
 }
 
 function showError(message) {
     $("#configLoader").hide();
-    $("#configError").html(`<div class="alert alert-danger alert-dismissible fade show" role="alert">
-        <strong>Error:</strong> ${escapeHtml(message)}
-        <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button>
-    </div>`);
-    $("#configError").show();
+    $("#configError").html(
+        '<div class="alert alert-danger alert-dismissible" role="alert">' +
+        '<button type="button" class="close" data-dismiss="alert"><span>&times;</span></button>' +
+        '<strong>Error:</strong> ' + escapeHtml(message) + '</div>'
+    ).show();
 }
 
 function escapeHtml(text) {
-    let map = {
-        '&': '&amp;',
-        '<': '&lt;',
-        '>': '&gt;',
-        '"': '&quot;',
-        "'": '&#039;'
-    };
-    return text.replace(/[&<>"']/g, m => map[m]);
+    return String(text)
+        .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
+        .replace(/"/g,'&quot;').replace(/'/g,'&#039;');
 }
 
 function renderKeaConfig(data) {
+    const v4 = data.ipv4_subnets || [];
+    const v6 = data.ipv6_subnets || [];
+    const all = v4.concat(v6);
+
+    const configured    = all.filter(s => s.status === 'configured').length;
+    const notConfigured = all.filter(s => s.status !== 'configured').length;
+    const total         = all.length;
+
     let html = '';
 
-    // Info banner
-    html += `<div class="alert alert-info alert-dismissible fade show" role="alert">
-        <strong>DDNS Configuration Check:</strong> This shows which subnets in Kea are configured to send DHCP-DDNS updates. Only subnets with DDNS enabled will have their leases registered to DNS automatically.
-        <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button>
-    </div>`;
+    // ── Summary stats ─────────────────────────────────────────────────────────
+    html += '<div class="row" style="margin-bottom:16px;">';
+    html += statCard(configured,    'Configured for DDNS', 'text-success');
+    html += statCard(notConfigured, 'Not Configured',      'text-warning');
+    html += statCard(total,         'Total Subnets',       'text-info');
+    html += '</div>';
 
-    // IPv4 Subnets
-    if (data.ipv4_subnets && data.ipv4_subnets.length > 0) {
-        html += renderSubnetTable('IPv4 Subnets', data.ipv4_subnets);
-    } else if (data.ipv4_subnets) {
-        html += `<div class="card">
-            <div class="card-header"><h4>IPv4 Subnets</h4></div>
-            <div class="card-body">
-                <p class="text-muted">No IPv4 subnets configured in Kea DHCP.</p>
-            </div>
-        </div><br/>`;
+    // ── Status alert ──────────────────────────────────────────────────────────
+    if (total === 0) {
+        html += '<div class="alert alert-info">No subnets found in Kea DHCP.</div>';
+    } else if (notConfigured > 0) {
+        html += '<div class="alert alert-warning">' +
+                '<strong>Action Needed:</strong> ' + notConfigured + ' subnet' +
+                (notConfigured !== 1 ? 's are' : ' is') +
+                ' not configured for DDNS. Edit the Kea DHCP configuration and add ' +
+                '<code>"ddns-send-updates": true</code> to each subnet definition. ' +
+                'See the Settings tab for documentation.</div>';
+    } else {
+        html += '<div class="alert alert-success">' +
+                '<i class="fa fa-check-circle"></i> <strong>All configured:</strong> ' +
+                'All ' + total + ' subnet' + (total !== 1 ? 's are' : ' is') +
+                ' set to send DDNS updates.</div>';
     }
 
-    // IPv6 Subnets
-    if (data.ipv6_subnets && data.ipv6_subnets.length > 0) {
-        html += renderSubnetTable('IPv6 Subnets', data.ipv6_subnets);
-    } else if (data.ipv6_subnets) {
-        html += `<div class="card">
-            <div class="card-header"><h4>IPv6 Subnets</h4></div>
-            <div class="card-body">
-                <p class="text-muted">No IPv6 subnets configured in Kea DHCP.</p>
-            </div>
-        </div><br/>`;
-    }
+    // ── IPv4 subnets ──────────────────────────────────────────────────────────
+    html += subnetPanel('IPv4 Subnets', v4);
 
-    // Summary
-    let configured = (data.ipv4_subnets || []).concat(data.ipv6_subnets || []).filter(s => s.status === 'configured').length;
-    let notConfigured = (data.ipv4_subnets || []).concat(data.ipv6_subnets || []).filter(s => s.status === 'not-configured').length;
-    let total = (data.ipv4_subnets || []).length + (data.ipv6_subnets || []).length;
-
-    html += `<div class="row">
-        <div class="col-md-4">
-            <div class="card">
-                <div class="card-body text-center">
-                    <h4 class="text-success">${configured}</h4>
-                    <small class="text-muted">Configured for DDNS</small>
-                </div>
-            </div>
-        </div>
-        <div class="col-md-4">
-            <div class="card">
-                <div class="card-body text-center">
-                    <h4 class="text-warning">${notConfigured}</h4>
-                    <small class="text-muted">Not Configured</small>
-                </div>
-            </div>
-        </div>
-        <div class="col-md-4">
-            <div class="card">
-                <div class="card-body text-center">
-                    <h4 class="text-info">${total}</h4>
-                    <small class="text-muted">Total Subnets</small>
-                </div>
-            </div>
-        </div>
-    </div><br/>`;
-
-    // Configuration guidance
-    if (notConfigured > 0) {
-        html += `<div class="alert alert-warning">
-            <strong>Action Needed:</strong> Some subnets are not configured for DDNS. To enable DDNS for a subnet, edit the Kea DHCP configuration and add <code>"ddns-send-updates": true</code> to the subnet definition. See the Settings tab for documentation.
-        </div>`;
-    } else if (total > 0 && configured === total) {
-        html += `<div class="alert alert-success">
-            <strong>All subnets configured:</strong> All configured subnets are set to send DDNS updates. Leases will be registered to DNS automatically.
-        </div>`;
-    }
+    // ── IPv6 subnets ──────────────────────────────────────────────────────────
+    html += subnetPanel('IPv6 Subnets', v6);
 
     $("#configContent").html(html);
 }
 
-function renderSubnetTable(title, subnets) {
-    let html = `<div class="card">
-        <div class="card-header">
-            <h4>${escapeHtml(title)} (${subnets.length})</h4>
-        </div>
-        <div class="card-body">
-            <div class="table-responsive">
-                <table class="table table-sm table-striped">
-                    <thead>
-                        <tr>
-                            <th>Subnet</th>
-                            <th>DDNS Enabled</th>
-                            <th>Status</th>
-                            <th>Comment</th>
-                        </tr>
-                    </thead>
-                    <tbody>`;
+function subnetPanel(title, subnets) {
+    if (subnets.length === 0) {
+        return '<div class="panel panel-default" style="margin-bottom:12px;">' +
+               '<div class="panel-heading"><h4 class="panel-title">' + title + '</h4></div>' +
+               '<div class="panel-body"><p class="text-muted" style="margin:0;">No ' +
+               title.toLowerCase() + ' configured in Kea DHCP.</p></div></div>';
+    }
 
-    subnets.forEach(subnet => {
-        let ddnsIcon = subnet.ddns_enabled ? '✅ Yes' : '❌ No';
-        let ddnsBadge = subnet.ddns_enabled ? '<span class="badge bg-success">Yes</span>' : '<span class="badge bg-danger">No</span>';
-        let statusBadge = subnet.status === 'configured'
-            ? '<span class="badge bg-success">Configured</span>'
-            : '<span class="badge bg-warning">Not Configured</span>';
-        let comment = subnet.comment ? escapeHtml(subnet.comment) : '<span class="text-muted">-</span>';
+    let rows = '';
+    subnets.forEach(function(s) {
+        const ddnsBadge = s.ddns_enabled
+            ? '<span class="label label-success">Yes</span>'
+            : '<span class="label label-danger">No</span>';
+        const statusBadge = s.status === 'configured'
+            ? '<span class="label label-success">Configured</span>'
+            : '<span class="label label-warning">Not Configured</span>';
+        const comment = s.comment
+            ? escapeHtml(s.comment)
+            : '<span class="text-muted">—</span>';
 
-        html += `<tr>
-            <td><code>${escapeHtml(subnet.subnet)}</code></td>
-            <td>${ddnsBadge}</td>
-            <td>${statusBadge}</td>
-            <td>${comment}</td>
-        </tr>`;
+        rows += '<tr>' +
+                '<td class="kea-subnet">' + escapeHtml(s.subnet) + '</td>' +
+                '<td>' + ddnsBadge    + '</td>' +
+                '<td>' + statusBadge  + '</td>' +
+                '<td>' + comment      + '</td>' +
+                '</tr>';
     });
 
-    html += `</tbody>
-                </table>
-            </div>
-        </div>
-    </div><br/>`;
+    return '<div class="panel panel-default" style="margin-bottom:12px;">' +
+           '<div class="panel-heading"><h4 class="panel-title">' + title +
+           ' (' + subnets.length + ')</h4></div>' +
+           '<div class="panel-body" style="padding:0;">' +
+           '<div class="table-responsive">' +
+           '<table class="table table-striped table-condensed" style="margin:0;">' +
+           '<thead><tr><th>Subnet</th><th>DDNS Enabled</th><th>Status</th><th>Comment</th></tr></thead>' +
+           '<tbody>' + rows + '</tbody>' +
+           '</table></div></div></div>';
+}
 
-    return html;
+function statCard(count, label, colorClass) {
+    return '<div class="col-xs-4 col-sm-4">' +
+           '<div class="panel panel-default stat-card">' +
+           '<h4 class="' + colorClass + '">' + count + '</h4>' +
+           '<small class="text-muted">' + label + '</small>' +
+           '</div></div>';
 }
 </script>
 
-<div class="content-box">
-    <div class="row">
-        <div class="col-md-12">
-            <button id="refreshBtn" class="btn btn-primary">
-                <i class="fa fa-refresh"></i> Refresh Now
-            </button>
-            <small class="text-muted" style="margin-left: 10px;">
-                Auto-refresh every 30 seconds
-            </small>
-        </div>
-    </div>
-    <br/>
-
-    <div id="configLoader" style="display: none; text-align: center;">
-        <div class="spinner-border" role="status">
-            <span class="visually-hidden">Loading...</span>
-        </div>
-        <p>Loading Kea DHCP configuration...</p>
-    </div>
-
-    <div id="configError" style="display: none;"></div>
-
-    <div id="configContent" style="display: none;"></div>
+<div class="content-box" style="padding:10px 15px 5px;">
+    <button id="refreshBtn" class="btn btn-primary btn-sm">
+        <i class="fa fa-refresh"></i> Refresh Now
+    </button>
+    <small class="text-muted" style="margin-left:12px;">Auto-refresh every 30 seconds</small>
 </div>
+
+<div id="configLoader" class="content-box" style="text-align:center; padding:20px; display:none;">
+    <i class="fa fa-spinner fa-spin fa-2x"></i>
+    <p class="text-muted" style="margin-top:8px;">Loading Kea DHCP configuration...</p>
+</div>
+
+<div id="configError"  style="display:none; padding:10px;"></div>
+<div id="configContent" style="display:none; padding:10px;"></div>
+</content>
