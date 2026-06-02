@@ -30,7 +30,7 @@
         mapDataToFormUI(data_get_map).done(function() {
             formatTokenizersUI();
             $('.selectpicker').selectpicker('refresh');
-            updateServiceControlUI('kea-unbound-ddns');
+            updateServiceControlUI('keaunbound');
         });
 
         $("#reconfigureAct").SimpleActionButton({
@@ -69,4 +69,4 @@
     {{ partial("layout_partials/base_form", ['fields': formGeneralSettings, 'id': 'frm_generalsettings']) }}
 </div>
 
-{{ partial('layout_partials/base_apply_button', {'data_endpoint': '/api/keaunbound/general/reconfigure', 'data_service_widget': 'kea-unbound-ddns'}) }}
+{{ partial('layout_partials/base_apply_button', {'data_endpoint': '/api/keaunbound/general/reconfigure', 'data_service_widget': 'keaunbound'}) }}
