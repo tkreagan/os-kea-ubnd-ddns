@@ -30,152 +30,338 @@ namespace OPNsense\KeaUnbound\Api;
 
 use OPNsense\Base\ApiControllerBase;
 
+/**
+ * Check Kea DHCP subnet DDNS configuration against the kea-unbound-ddns plugin.
+ *
+ * Each subnet is classified into one of four buckets:
+ *   no_ddns       - ddns-send-updates is false/absent
+ *   wrong_target  - DDNS on, but DHCP-DDNS sends to a different IP:port
+ *   tsig_mismatch - Right IP:port, but TSIG presence/key-name differs
+ *   ok            - Correctly points at our listener with consistent TSIG
+ *
+ * GET /api/keaunbound/kcaconfig/check
+ */
 class KcaconfigController extends ApiControllerBase
 {
-    /**
-     * Check Kea DHCP subnet configuration for DDNS settings.
-     * Queries Kea control agent to see which subnets are configured for DDNS.
-     *
-     * GET /api/keaunbound/kca-config/check
-     *
-     * Returns JSON with structure:
-     * {
-     *   "status": "ok" | "error",
-     *   "kea_error": null | "error message",
-     *   "ipv4_subnets": [
-     *     {
-     *       "subnet": "10.0.0.0/24",
-     *       "ddns_enabled": true | false,
-     *       "status": "configured" | "not-configured"
-     *     }
-     *   ],
-     *   "ipv6_subnets": [...]
-     * }
-     */
-    public function checkAction()
+    private $config_file = '/conf/config.xml';
+
+    // ── Kea Control Agent endpoint ────────────────────────────────────────────
+
+    private function getKeaEndpoint()
     {
-        $result = [
-            'status' => 'ok',
-            'kea_error' => null,
-            'ipv4_subnets' => [],
-            'ipv6_subnets' => []
-        ];
-
-        // Try to query Kea control agent for DHCPv4 config
-        $ipv4_subnets = $this->queryKeaSubnets('dhcp4');
-        if ($ipv4_subnets === null) {
-            $result['status'] = 'error';
-            $result['kea_error'] = 'Unable to query Kea DHCP. Check that Kea Control Agent is running and accessible at 127.0.0.1:8000';
-        } else {
-            $result['ipv4_subnets'] = $ipv4_subnets;
-        }
-
-        // Try to query Kea control agent for DHCPv6 config
-        $ipv6_subnets = $this->queryKeaSubnets('dhcp6');
-        if ($ipv6_subnets === null) {
-            // DHCPv6 might not be configured, that's okay
-            if ($result['status'] !== 'error') {
-                $result['ipv6_subnets'] = [];
+        $host = '127.0.0.1';
+        $port = 8000;
+        if (file_exists($this->config_file)) {
+            $xml = simplexml_load_file($this->config_file);
+            if ($xml !== false) {
+                $h = $xml->xpath('//OPNsense/Kea/ctrl_agent/general/http_host');
+                if (!empty($h) && (string)$h[0] !== '') {
+                    $host = (string)$h[0];
+                }
+                $p = $xml->xpath('//OPNsense/Kea/ctrl_agent/general/http_port');
+                if (!empty($p) && (string)$p[0] !== '') {
+                    $port = intval((string)$p[0]);
+                }
             }
-        } else {
-            $result['ipv6_subnets'] = $ipv6_subnets;
         }
-
-        return $result;
+        return [$host, $port];
     }
 
-    /**
-     * Query Kea control agent for subnet configuration.
-     *
-     * @param string $daemon 'dhcp4' or 'dhcp6'
-     * @return array|null Array of subnets with DDNS config, or null on error
-     */
-    private function queryKeaSubnets($daemon)
+    private function keaQuery($service)
     {
-        // Read the Kea Control Agent endpoint from the real core model
-        // (//OPNsense/Kea/ctrl_agent/general/{http_host,http_port}).
-        $config_file = '/conf/config.xml';
-        $kea_host = '127.0.0.1';
-        $kea_port = 8000;
-
-        if (file_exists($config_file)) {
-            $xml = simplexml_load_file($config_file);
-            if ($xml !== false) {
-                $host_node = $xml->xpath('//OPNsense/Kea/ctrl_agent/general/http_host');
-                if (!empty($host_node) && (string)$host_node[0] !== '') {
-                    $kea_host = (string)$host_node[0];
-                }
-                $port_node = $xml->xpath('//OPNsense/Kea/ctrl_agent/general/http_port');
-                if (!empty($port_node) && (string)$port_node[0] !== '') {
-                    $kea_port = intval((string)$port_node[0]);
-                }
-            }
-        }
-
-        // Query Kea control agent
-        $url = "http://{$kea_host}:{$kea_port}/";
-        // config-get returns the running daemon config under arguments.Dhcp4/Dhcp6
-        // (there is no '{daemon}-get-config' command on Kea).
-        $command = [
-            'command' => 'config-get',
-            'service' => [$daemon]
-        ];
-
-        $ch = curl_init($url);
+        list($host, $port) = $this->getKeaEndpoint();
+        $url = "http://{$host}:{$port}/";
+        $ch  = curl_init($url);
         curl_setopt($ch, CURLOPT_CUSTOMREQUEST, 'POST');
-        curl_setopt($ch, CURLOPT_POSTFIELDS, json_encode($command));
+        curl_setopt($ch, CURLOPT_POSTFIELDS, json_encode(['command' => 'config-get', 'service' => [$service]]));
         curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
-        curl_setopt($ch, CURLOPT_HTTPHEADER, [
-            'Content-Type: application/json',
-        ]);
+        curl_setopt($ch, CURLOPT_HTTPHEADER, ['Content-Type: application/json']);
         curl_setopt($ch, CURLOPT_TIMEOUT, 5);
 
-        $response = curl_exec($ch);
-        $http_code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        $response   = curl_exec($ch);
+        $http_code  = curl_getinfo($ch, CURLINFO_HTTP_CODE);
         $curl_errno = curl_errno($ch);
         curl_close($ch);
 
-        if ($curl_errno !== 0 || $http_code !== 200) {
+        if ($curl_errno !== 0 || $http_code !== 200 || $response === false) {
             return null;
         }
-
         $data = json_decode($response, true);
         if ($data === null) {
             return null;
         }
-
-        // The Control Agent returns a list of per-service response maps;
-        // normalize to the single relevant map.
+        // Normalize the list-of-maps response to a single map.
         if (is_array($data) && isset($data[0]) && is_array($data[0])) {
             $data = $data[0];
         }
+        // result != 0 means the service is offline or rejected the command.
+        if (($data['result'] ?? 1) !== 0) {
+            return null;
+        }
+        return $data['arguments'] ?? [];
+    }
 
-        // Parse response
-        $subnets = [];
+    // ── Our plugin settings ───────────────────────────────────────────────────
 
-        // Response structure: {"result": 0, "text": "...", "arguments": {"Dhcp4": {...}}}
-        if (isset($data['arguments'])) {
-            $key = $daemon === 'dhcp4' ? 'Dhcp4' : 'Dhcp6';
-            if (isset($data['arguments'][$key])) {
-                $dhcp_config = $data['arguments'][$key];
+    private function getPluginSettings()
+    {
+        $settings = [
+            'address'      => '127.0.0.1',
+            'port'         => 53535,
+            'tsig_enabled' => false,
+            'tsig_key'     => '',
+        ];
+        if (!file_exists($this->config_file)) {
+            return $settings;
+        }
+        $xml = simplexml_load_file($this->config_file);
+        if ($xml === false) {
+            return $settings;
+        }
+        $g = $xml->xpath('//OPNsense/KeaUnbound/general');
+        if (empty($g)) {
+            return $settings;
+        }
+        $g = $g[0];
+        if (!empty($g->port)) {
+            $settings['port'] = intval((string)$g->port);
+        }
+        if ((string)$g->enable_tsig === '1') {
+            $settings['tsig_enabled'] = true;
+            $settings['tsig_key']     = trim((string)($g->tsig_key_name ?? ''));
+        }
+        return $settings;
+    }
 
-                // Extract subnets
-                $subnet_key = $daemon === 'dhcp4' ? 'subnet4' : 'subnet6';
-                if (isset($dhcp_config[$subnet_key]) && is_array($dhcp_config[$subnet_key])) {
-                    foreach ($dhcp_config[$subnet_key] as $subnet) {
-                        $ddns_enabled = isset($subnet['ddns-send-updates']) && $subnet['ddns-send-updates'] === true;
+    // ── DHCP-DDNS domain index ────────────────────────────────────────────────
 
-                        $subnets[] = [
-                            'subnet' => $subnet['subnet'] ?? 'unknown',
-                            'ddns_enabled' => $ddns_enabled,
-                            'status' => $ddns_enabled ? 'configured' : 'not-configured',
-                            'comment' => $subnet['comment'] ?? null
-                        ];
-                    }
+    /**
+     * Build a lookup map from domain name (normalised, no trailing dot) to its
+     * full domain config from the DHCP-DDNS forward-ddns domains list.
+     */
+    private function buildDomainMap($d2_args)
+    {
+        $map = [];
+        $domains = $d2_args['DhcpDdns']['forward-ddns']['ddns-domains'] ?? [];
+        foreach ($domains as $domain) {
+            $name = rtrim($domain['name'] ?? '', '.');
+            if ($name !== '') {
+                $map[$name] = $domain;
+            }
+        }
+        return $map;
+    }
+
+    // ── Subnet classification ─────────────────────────────────────────────────
+
+    /**
+     * Classify a single subnet into one of four buckets.
+     *
+     * @param array  $subnet      Kea subnet map
+     * @param string $global_sfx  Global ddns-qualifying-suffix from dhcp config
+     * @param array  $domain_map  Domain name → domain config from DHCP-DDNS
+     * @param array  $plugin      Plugin settings from getPluginSettings()
+     * @param bool   $d2_ok       Whether the DHCP-DDNS daemon was reachable
+     * @return array ['ddns_status' => ..., 'detail' => ..., 'target' => ...]
+     */
+    private function classifySubnet($subnet, $global_sfx, $domain_map, $plugin, $d2_ok)
+    {
+        $ddns_enabled = isset($subnet['ddns-send-updates']) && $subnet['ddns-send-updates'] === true;
+
+        if (!$ddns_enabled) {
+            return [
+                'ddns_status' => 'no_ddns',
+                'detail'      => 'ddns-send-updates is not enabled for this subnet',
+                'target'      => null,
+            ];
+        }
+
+        // Effective qualifying suffix: subnet > global > empty
+        $sfx = rtrim(
+            $subnet['ddns-qualifying-suffix'] ?? $global_sfx ?? '',
+            '.'
+        );
+
+        if (!$d2_ok) {
+            return [
+                'ddns_status' => 'wrong_target',
+                'detail'      => 'DDNS is enabled but the Kea DHCP-DDNS daemon (d2) is not reachable — cannot verify target',
+                'target'      => null,
+            ];
+        }
+
+        // Find the DHCP-DDNS domain that matches this subnet's qualifying suffix.
+        $domain = $domain_map[$sfx] ?? null;
+        if ($domain === null && $sfx !== '') {
+            // Try parent zones as fallback (e.g. "a.b.c" might match "b.c")
+            $parts = explode('.', $sfx);
+            while (count($parts) > 1) {
+                array_shift($parts);
+                $try = implode('.', $parts);
+                if (isset($domain_map[$try])) {
+                    $domain = $domain_map[$try];
+                    break;
                 }
             }
         }
 
+        if ($domain === null) {
+            return [
+                'ddns_status' => 'wrong_target',
+                'detail'      => 'DDNS is enabled but no DHCP-DDNS forward domain matches qualifying suffix "' . $sfx . '"',
+                'target'      => null,
+            ];
+        }
+
+        // Find a DNS server entry that matches our listener.
+        $servers = $domain['dns-servers'] ?? [];
+        $our_addr = $plugin['address'];
+        $our_port = $plugin['port'];
+        $matched  = null;
+        $targets  = [];
+
+        foreach ($servers as $srv) {
+            $saddr = $srv['ip-address'] ?? '';
+            $sport = intval($srv['port'] ?? 53);
+            $targets[] = "{$saddr}:{$sport}";
+            if ($saddr === $our_addr && $sport === $our_port) {
+                $matched = $srv;
+            }
+        }
+
+        if ($matched === null) {
+            $target_str = empty($targets) ? 'no DNS servers configured' : implode(', ', $targets);
+            return [
+                'ddns_status' => 'wrong_target',
+                'detail'      => "DHCP-DDNS sends to {$target_str} — plugin listens on {$our_addr}:{$our_port}",
+                'target'      => $target_str,
+            ];
+        }
+
+        // TSIG check: compare whether both sides agree on using TSIG and the key name.
+        $domain_key = trim($domain['key-name'] ?? '');
+        $our_tsig   = $plugin['tsig_enabled'];
+        $our_key    = $plugin['tsig_key'];
+
+        if ($our_tsig && $domain_key === '') {
+            return [
+                'ddns_status' => 'tsig_mismatch',
+                'detail'      => 'Plugin requires TSIG but DHCP-DDNS sends unsigned updates for this domain',
+                'target'      => "{$our_addr}:{$our_port}",
+            ];
+        }
+        if (!$our_tsig && $domain_key !== '') {
+            return [
+                'ddns_status' => 'tsig_mismatch',
+                'detail'      => "DHCP-DDNS signs updates with key \"{$domain_key}\" but plugin has TSIG disabled",
+                'target'      => "{$our_addr}:{$our_port}",
+            ];
+        }
+        if ($our_tsig && $domain_key !== $our_key) {
+            return [
+                'ddns_status' => 'tsig_mismatch',
+                'detail'      => "TSIG key name mismatch: DHCP-DDNS uses \"{$domain_key}\", plugin expects \"{$our_key}\"",
+                'target'      => "{$our_addr}:{$our_port}",
+            ];
+        }
+
+        return [
+            'ddns_status' => 'ok',
+            'detail'      => $our_tsig
+                ? "Correctly configured (TSIG key \"{$our_key}\")"
+                : 'Correctly configured (no TSIG)',
+            'target'      => "{$our_addr}:{$our_port}",
+        ];
+    }
+
+    // ── Subnet extraction ─────────────────────────────────────────────────────
+
+    private function extractSubnets($dhcp_args, $daemon, $domain_map, $plugin, $d2_ok)
+    {
+        $key        = $daemon === 'dhcp4' ? 'Dhcp4' : 'Dhcp6';
+        $subnet_key = $daemon === 'dhcp4' ? 'subnet4' : 'subnet6';
+        $subnets    = [];
+
+        if (!isset($dhcp_args[$key])) {
+            return $subnets;
+        }
+        $dhcp_config = $dhcp_args[$key];
+        $global_sfx  = $dhcp_config['ddns-qualifying-suffix'] ?? '';
+
+        // Top-level subnets
+        foreach ($dhcp_config[$subnet_key] ?? [] as $subnet) {
+            $subnets[] = $this->buildSubnetEntry($subnet, $global_sfx, $domain_map, $plugin, $d2_ok);
+        }
+        // Shared-network subnets
+        foreach ($dhcp_config['shared-networks'] ?? [] as $net) {
+            $net_sfx = $net['ddns-qualifying-suffix'] ?? $global_sfx;
+            foreach ($net[$subnet_key] ?? [] as $subnet) {
+                // Shared-network suffix overrides global but subnet suffix takes priority
+                $effective_sfx = $subnet['ddns-qualifying-suffix'] ?? $net_sfx;
+                $subnets[] = $this->buildSubnetEntry(
+                    array_merge($subnet, ['_effective_sfx' => $effective_sfx]),
+                    $global_sfx,
+                    $domain_map,
+                    $plugin,
+                    $d2_ok
+                );
+            }
+        }
         return $subnets;
+    }
+
+    private function buildSubnetEntry($subnet, $global_sfx, $domain_map, $plugin, $d2_ok)
+    {
+        $classified = $this->classifySubnet($subnet, $global_sfx, $domain_map, $plugin, $d2_ok);
+        return [
+            'subnet'      => $subnet['subnet'] ?? 'unknown',
+            'ddns_enabled'=> isset($subnet['ddns-send-updates']) && $subnet['ddns-send-updates'] === true,
+            'ddns_status' => $classified['ddns_status'],
+            'detail'      => $classified['detail'],
+            'target'      => $classified['target'],
+            'comment'     => $subnet['comment'] ?? null,
+        ];
+    }
+
+    // ── Public action ─────────────────────────────────────────────────────────
+
+    public function checkAction()
+    {
+        $plugin = $this->getPluginSettings();
+
+        // Query DHCP-DDNS daemon for forward zone configuration.
+        $d2_args = $this->keaQuery('d2');
+        $d2_ok   = $d2_args !== null;
+        $domain_map = $d2_ok ? $this->buildDomainMap($d2_args) : [];
+
+        $result = [
+            'status'         => 'ok',
+            'kea_error'      => null,
+            'our_listener'   => [
+                'address'      => $plugin['address'],
+                'port'         => $plugin['port'],
+                'tsig_enabled' => $plugin['tsig_enabled'],
+            ],
+            'd2_reachable'   => $d2_ok,
+            'ipv4_subnets'   => [],
+            'ipv6_subnets'   => [],
+        ];
+
+        // IPv4
+        $dhcp4 = $this->keaQuery('dhcp4');
+        if ($dhcp4 === null) {
+            $result['status']    = 'error';
+            $result['kea_error'] = 'Unable to query Kea DHCPv4. Check that Kea Control Agent is running.';
+        } else {
+            $result['ipv4_subnets'] = $this->extractSubnets($dhcp4, 'dhcp4', $domain_map, $plugin, $d2_ok);
+        }
+
+        // IPv6 (offline is not an error)
+        $dhcp6 = $this->keaQuery('dhcp6');
+        if ($dhcp6 !== null) {
+            $result['ipv6_subnets'] = $this->extractSubnets($dhcp6, 'dhcp6', $domain_map, $plugin, $d2_ok);
+        }
+
+        return $result;
     }
 }
