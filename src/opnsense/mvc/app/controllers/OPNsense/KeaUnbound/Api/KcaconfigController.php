@@ -184,8 +184,8 @@ class KcaconfigController extends ApiControllerBase
 
         if (!$d2_ok) {
             return [
-                'ddns_status' => 'wrong_target',
-                'detail'      => 'DDNS is enabled but the Kea DHCP-DDNS daemon (d2) is not reachable — cannot verify target',
+                'ddns_status' => 'd2_offline',
+                'detail'      => 'DDNS is enabled but the Kea DHCP-DDNS daemon is not running — enable it under Services → Kea DHCP → DDNS Agent',
                 'target'      => null,
             ];
         }

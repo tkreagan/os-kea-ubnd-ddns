@@ -81,10 +81,11 @@ function escapeHtml(text) {
 }
 
 const BUCKET_LABELS = {
-    'ok':            { label: 'OK',           cls: 'label-success' },
-    'tsig_mismatch': { label: 'TSIG Mismatch',cls: 'label-danger'  },
-    'wrong_target':  { label: 'Other Target', cls: 'label-warning' },
-    'no_ddns':       { label: 'No DDNS',      cls: 'label-default' },
+    'ok':            { label: 'OK',              cls: 'label-success' },
+    'tsig_mismatch': { label: 'TSIG Mismatch',   cls: 'label-danger'  },
+    'wrong_target':  { label: 'Other Target',    cls: 'label-warning' },
+    'no_ddns':       { label: 'No DDNS',         cls: 'label-default' },
+    'd2_offline':    { label: 'DDNS Agent Down', cls: 'label-danger'  },
 };
 
 function bucketBadge(status) {
@@ -101,6 +102,7 @@ function renderKeaConfig(data) {
     const tsig     = all.filter(s => s.ddns_status === 'tsig_mismatch').length;
     const wrong    = all.filter(s => s.ddns_status === 'wrong_target').length;
     const no_ddns  = all.filter(s => s.ddns_status === 'no_ddns').length;
+    const d2_off   = all.filter(s => s.ddns_status === 'd2_offline').length;
     const total    = all.length;
     const problems = total - ok;
 
@@ -123,7 +125,7 @@ function renderKeaConfig(data) {
     html += '<div class="row" style="margin-bottom:16px;">';
     html += statCard(ok,      'Correctly Configured', 'text-success');
     html += statCard(wrong,   'Other Target',         'text-warning');
-    html += statCard(tsig,    'TSIG Mismatch',        'text-danger');
+    html += statCard(tsig + d2_off, 'Needs Attention','text-danger');
     html += statCard(no_ddns, 'No DDNS',              'text-muted');
     html += '</div>';
 
@@ -136,7 +138,8 @@ function renderKeaConfig(data) {
                 ' correctly configured</strong> to send DDNS updates to this plugin.</div>';
     } else {
         let msgs = [];
-        if (wrong   > 0) msgs.push(wrong   + ' sending to the wrong DNS server/port');
+        if (d2_off  > 0) msgs.push(d2_off  + ' need the DDNS Agent running');
+        if (wrong   > 0) msgs.push(wrong   + ' sending to a different DNS server/port');
         if (tsig    > 0) msgs.push(tsig    + ' with a TSIG configuration mismatch');
         if (no_ddns > 0) msgs.push(no_ddns + ' with DDNS disabled');
         html += '<div class="alert alert-warning"><strong>Action Needed:</strong> ' +
@@ -150,13 +153,13 @@ function renderKeaConfig(data) {
 
     // ── Contextual fix instructions ───────────────────────────────────────────
     if (problems > 0) {
-        html += fixGuide(wrong > 0, tsig > 0, no_ddns > 0, data.our_listener);
+        html += fixGuide(wrong > 0, tsig > 0, no_ddns > 0, d2_off > 0, data.our_listener);
     }
 
     $("#configContent").html(html);
 }
 
-function fixGuide(hasWrong, hasTsig, hasNoDdns, listener) {
+function fixGuide(hasWrong, hasTsig, hasNoDdns, hasD2Off, listener) {
     const port = listener ? listener.port : 53535;
     let html = '<div class="panel panel-default" style="margin-top:8px;">' +
                '<div class="panel-heading" style="cursor:pointer;" onclick="$(\'#fixGuideBody\').toggle();">' +
@@ -165,7 +168,19 @@ function fixGuide(hasWrong, hasTsig, hasNoDdns, listener) {
                '<div id="fixGuideBody" style="display:none;">' +
                '<div class="panel-body">';
 
-    html += '<p class="text-muted">All changes are made in <strong>Services → Kea DHCP → Kea DHCPv4 → Subnets</strong>. ' +
+    if (hasD2Off) {
+        html += '<h5><span class="label label-danger">DDNS Agent Down</span> &nbsp;Start the Kea DHCP-DDNS daemon</h5>' +
+                '<ol>' +
+                '<li>Go to <strong>Services → Kea DHCP → DDNS Agent</strong></li>' +
+                '<li>Check <strong>Enabled</strong></li>' +
+                '<li>Leave Bind address as <code>127.0.0.1</code> and Bind port as <code>53001</code></li>' +
+                '<li>Click <strong>Apply</strong></li>' +
+                '</ol>' +
+                '<p class="text-muted">The DDNS Agent must be running before any DHCP lease events can trigger DNS updates. ' +
+                'Once enabled, return here — subnets with correct subnet-level settings will show OK.</p>';
+    }
+
+    html += '<p class="text-muted">Per-subnet settings are in <strong>Services → Kea DHCP → Kea DHCPv4 → Subnets</strong>. ' +
             'Edit the subnet, scroll to the <strong>Dynamic DNS</strong> section, and click <strong>Advanced</strong> ' +
             'to reveal the port and TSIG fields. Apply after saving.</p>';
 
