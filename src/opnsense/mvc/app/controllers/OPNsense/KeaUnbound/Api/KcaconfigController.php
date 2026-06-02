@@ -43,7 +43,8 @@ use OPNsense\Base\ApiControllerBase;
  */
 class KcaconfigController extends ApiControllerBase
 {
-    private $config_file = '/conf/config.xml';
+    private $config_file     = '/conf/config.xml';
+    private $ddns_conf_file  = '/usr/local/etc/kea/kea-dhcp-ddns.conf';
 
     // ── Kea Control Agent endpoint ────────────────────────────────────────────
 
@@ -137,19 +138,37 @@ class KcaconfigController extends ApiControllerBase
 
     /**
      * Build a lookup map from domain name (normalised, no trailing dot) to its
-     * full domain config from the DHCP-DDNS forward-ddns domains list.
+     * full domain config, read directly from kea-dhcp-ddns.conf.
+     *
+     * Kea's Control Agent cannot forward commands to the d2 daemon unless d2
+     * has a control-socket configured — which OPNsense does not generate.
+     * Reading the config file directly is simpler and always works.
+     *
+     * Returns [map, d2_ok]: map is name→domain, d2_ok is true if the file
+     * was readable and parseable (daemon is configured, even if not queryable).
      */
-    private function buildDomainMap($d2_args)
+    private function buildDomainMap()
     {
         $map = [];
-        $domains = $d2_args['DhcpDdns']['forward-ddns']['ddns-domains'] ?? [];
+        if (!file_exists($this->ddns_conf_file)) {
+            return [$map, false];
+        }
+        $raw = file_get_contents($this->ddns_conf_file);
+        if ($raw === false) {
+            return [$map, false];
+        }
+        $conf = json_decode($raw, true);
+        if (!is_array($conf)) {
+            return [$map, false];
+        }
+        $domains = $conf['DhcpDdns']['forward-ddns']['ddns-domains'] ?? [];
         foreach ($domains as $domain) {
             $name = rtrim($domain['name'] ?? '', '.');
             if ($name !== '') {
                 $map[$name] = $domain;
             }
         }
-        return $map;
+        return [$map, true];
     }
 
     // ── Subnet classification ─────────────────────────────────────────────────
@@ -329,10 +348,11 @@ class KcaconfigController extends ApiControllerBase
     {
         $plugin = $this->getPluginSettings();
 
-        // Query DHCP-DDNS daemon for forward zone configuration.
-        $d2_args = $this->keaQuery('d2');
-        $d2_ok   = $d2_args !== null;
-        $domain_map = $d2_ok ? $this->buildDomainMap($d2_args) : [];
+        // Read DHCP-DDNS forward zone configuration directly from the config
+        // file. Kea's Control Agent cannot talk to d2 unless d2 has a
+        // control-socket configured — which OPNsense does not generate.
+        // Reading the file is simpler and always works while the daemon is up.
+        list($domain_map, $d2_ok) = $this->buildDomainMap();
 
         $result = [
             'status'         => 'ok',

@@ -113,8 +113,8 @@ function renderKeaConfig(data) {
         const l = data.our_listener;
         const tsigInfo = l.tsig_enabled ? ' + TSIG' : ' (no TSIG)';
         const d2Info = data.d2_reachable
-            ? '<span class="label label-success">Reachable</span>'
-            : '<span class="label label-warning">Unreachable</span>';
+            ? '<span class="label label-success">Configured</span>'
+            : '<span class="label label-warning">Config not found</span>';
         html += '<div class="alert alert-info" style="margin-bottom:12px;">' +
                 '<i class="fa fa-info-circle"></i> Plugin listener: ' +
                 '<strong>' + escapeHtml(l.address) + ':' + l.port + '</strong>' + escapeHtml(tsigInfo) +
