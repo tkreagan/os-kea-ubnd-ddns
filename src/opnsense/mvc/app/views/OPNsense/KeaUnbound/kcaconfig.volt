@@ -190,10 +190,22 @@ function fixGuide(hasWrong, hasTsig, hasNoDdns, hasD2Off, listener) {
                 '<li>Set <strong>DNS forward zone</strong> to your domain (e.g. <code>plhm.rgn.cm</code>)</li>' +
                 '<li>Set <strong>DNS qualifying suffix</strong> to the same value</li>' +
                 '<li>Optionally set <strong>DNS reverse zone</strong> (e.g. <code>1.10.10.in-addr.arpa.</code>)</li>' +
-                '<li>Click <strong>Advanced</strong></li>' +
-                '<li>Set <strong>DNS server address</strong> to <code>127.0.0.1</code></li>' +
-                '<li>Set <strong>DNS server port</strong> to <code>' + port + '</code></li>' +
-                '<li>Check <strong>Override no update</strong> and <strong>Override client update</strong> (recommended)</li>' +
+                '<li>Click <strong>Advanced</strong> and set the following:</li>' +
+                '<li><strong>DNS server address:</strong> <code>127.0.0.1</code></li>' +
+                '<li><strong>DNS server port:</strong> <code>' + port + '</code></li>' +
+                '<li><strong>Override no update: ✓</strong> — without this, clients that send a "don\'t update DNS" flag ' +
+                '(common on Windows) are honoured and no DNS entry is registered for them.</li>' +
+                '<li><strong>Override client update: ✓</strong> — without this, clients that claim they will handle ' +
+                'their own forward DNS update may not get PTR records registered, causing Missing PTR entries in the Lease Audit.</li>' +
+                '<li><strong>Update on renew: leave off</strong> — sending a DDNS update on every lease renewal adds ' +
+                'unnecessary load with no benefit in normal operation; the scheduled cleanup handles any stale entries.</li>' +
+                '<li><strong>Conflict resolution mode: <code>no-check-with-dhcid</code></strong> — the default ' +
+                '<code>check-with-dhcid</code> mode uses DHCID records to prevent different clients from overwriting ' +
+                'each other\'s DNS entries, but it also blocks dual-stack clients (same device, different DHCPv4/DHCPv6 ' +
+                'identifiers) from registering both A and AAAA records. Since this plugin writes to Unbound (a resolver, ' +
+                'not an authoritative server) and is the sole writer, DHCID protection provides no benefit and only causes ' +
+                'problems. Use <code>no-check-with-dhcid</code> to allow dual-stack and avoid Missing PTR issues. ' +
+                '(See OPNsense issue #10212.)</li>' +
                 '<li>Save and Apply</li>' +
                 '</ol>';
     }
