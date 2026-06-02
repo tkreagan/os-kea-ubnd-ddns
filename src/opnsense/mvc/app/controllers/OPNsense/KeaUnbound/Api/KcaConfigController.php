@@ -92,23 +92,28 @@ class KcaConfigController extends ApiControllerBase
      */
     private function queryKeaSubnets($daemon)
     {
-        // Read Kea control agent config
+        // Read the Kea Control Agent endpoint from the real core model
+        // (//OPNsense/Kea/ctrl_agent/general/{http_host,http_port}).
         $config_file = '/conf/config.xml';
+        $kea_host = '127.0.0.1';
         $kea_port = 8000;
 
-        // Try to extract Kea control agent port from config.xml
         if (file_exists($config_file)) {
             $xml = simplexml_load_file($config_file);
             if ($xml !== false) {
-                $kea_config = $xml->xpath('//OPNsense/KeaUnbound/general/kea_control_port');
-                if (!empty($kea_config) && !empty($kea_config[0])) {
-                    $kea_port = intval((string)$kea_config[0]);
+                $host_node = $xml->xpath('//OPNsense/Kea/ctrl_agent/general/http_host');
+                if (!empty($host_node) && (string)$host_node[0] !== '') {
+                    $kea_host = (string)$host_node[0];
+                }
+                $port_node = $xml->xpath('//OPNsense/Kea/ctrl_agent/general/http_port');
+                if (!empty($port_node) && (string)$port_node[0] !== '') {
+                    $kea_port = intval((string)$port_node[0]);
                 }
             }
         }
 
         // Query Kea control agent
-        $url = "http://127.0.0.1:{$kea_port}/";
+        $url = "http://{$kea_host}:{$kea_port}/";
         $command = [
             'command' => "{$daemon}-get-config",
             'service' => [$daemon]
@@ -135,6 +140,12 @@ class KcaConfigController extends ApiControllerBase
         $data = json_decode($response, true);
         if ($data === null) {
             return null;
+        }
+
+        // The Control Agent returns a list of per-service response maps;
+        // normalize to the single relevant map.
+        if (is_array($data) && isset($data[0]) && is_array($data[0])) {
+            $data = $data[0];
         }
 
         // Parse response

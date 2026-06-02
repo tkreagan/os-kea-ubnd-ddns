@@ -101,27 +101,13 @@
                  Only used when enable_auto_clean is enabled. -->
             <auto_clean_interval type="OptionField">
                 <Required>N</Required>
-                <Default>6</Default>
+                <Default>h6</Default>
                 <OptionValues>
-                    <6>Every 6 hours</6>
-                    <12>Every 12 hours</12>
-                    <24>Every 24 hours</24>
+                    <h6>Every 6 hours</h6>
+                    <h12>Every 12 hours</h12>
+                    <h24>Every 24 hours</h24>
                 </OptionValues>
             </auto_clean_interval>
-
-            <!-- When enabled, kea_sync triggers a full Unbound reload so that
-                 updated static reservations become visible in DNS immediately.
-                 WARNING: Unbound reload wipes all runtime local_data entries
-                 injected for dynamic leases. The plugin automatically resyncs
-                 dynamic leases from the Kea lease DB after the reload, but
-                 there is a brief window during which dynamic lease DNS entries
-                 are unavailable.
-                 Only relevant if "Register DHCP Static Mappings" is also
-                 enabled in Services -> Unbound DNS -> General. -->
-            <reload_unbound_on_kea_sync type="BooleanField">
-                <Default>0</Default>
-                <Required>Y</Required>
-            </reload_unbound_on_kea_sync>
         </general>
     </items>
 </model>

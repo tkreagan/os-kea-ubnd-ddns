@@ -27,7 +27,6 @@ def get_config():
         "tsig_key_name":              "",
         "tsig_key_secret":            "",
         "tsig_algorithm":             "HMAC-SHA256",
-        "reload_unbound_on_kea_sync": "0",
     }
     try:
         tree = ET.parse(CONFIG_XML)

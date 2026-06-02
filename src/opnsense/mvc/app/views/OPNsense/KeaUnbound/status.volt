@@ -34,6 +34,20 @@ $( document ).ready(function() {
     $("#refreshBtn").click(function() {
         loadAuditData();
     });
+
+    $("#cleanBtn").click(function() {
+        if (!confirm("Remove stale and orphaned DNS records from Unbound? " +
+                     "The current stale set is recomputed server-side and removed.")) {
+            return;
+        }
+        const btn = $(this);
+        btn.prop("disabled", true);
+        $("#cleanInfo").text("Cleaning…");
+        ajaxCall("/api/keaunbound/general/clean", {}, function() {
+            // Re-audit so the removed rows disappear from the view.
+            loadAuditData();
+        });
+    });
 });
 
 function loadAuditData() {
@@ -75,6 +89,8 @@ function loadAuditData() {
 
 function showError(message) {
     $("#statusLoader").hide();
+    $("#cleanBtn").prop("disabled", true);
+    $("#cleanInfo").text("");
     $("#statusError").html(`<div class="alert alert-danger alert-dismissible fade show" role="alert">
         <strong>Error:</strong> ${escapeHtml(message)}
         <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button>
@@ -93,8 +109,29 @@ function escapeHtml(text) {
     return text.replace(/[&<>"']/g, m => map[m]);
 }
 
+function updateCleanButton(complete, removable) {
+    const btn = $("#cleanBtn");
+    const info = $("#cleanInfo");
+    if (!complete) {
+        btn.prop("disabled", true);
+        info.text("Cleanup unavailable while the Kea Control Agent is unreachable.");
+    } else if (removable === 0) {
+        btn.prop("disabled", true);
+        info.text("No stale or orphaned records to clean.");
+    } else {
+        btn.prop("disabled", false);
+        info.text(removable + " stale/orphaned record(s) can be cleaned.");
+    }
+}
+
 function renderAuditData(audit) {
     let html = '';
+
+    // Gate the Clean button on Kea availability + a nonzero removable set.
+    const recs = audit.records || [];
+    const staleCount = recs.filter(r => r.status === 'stale').length;
+    const orphanCount = (audit.orphaned_ptrs || []).length;
+    updateCleanButton(audit.complete, staleCount + orphanCount);
 
     // Show warning if Kea was unavailable
     if (!audit.complete && audit.kea_error) {
@@ -264,9 +301,13 @@ function getStatusBadge(status) {
             <button id="refreshBtn" class="btn btn-primary">
                 <i class="fa fa-refresh"></i> Refresh Now
             </button>
+            <button id="cleanBtn" class="btn btn-warning" disabled>
+                <i class="fa fa-trash"></i> Clean Stale Records Now
+            </button>
             <small class="text-muted" style="margin-left: 10px;">
                 Auto-refresh every 30 seconds
             </small>
+            <div><small id="cleanInfo" class="text-muted"></small></div>
         </div>
     </div>
     <br/>

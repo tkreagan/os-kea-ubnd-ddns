@@ -127,14 +127,7 @@ For each subnet where you want DDNS, add this to the subnet configuration in Kea
         <id>general.general.auto_clean_interval</id>
         <label>Auto-clean frequency</label>
         <type>dropdown</type>
-        <help>How often to run the cleanup job. Only used when auto-clean is enabled.</help>
-    </field>
-    <field>
-        <id>clean_now</id>
-        <label>Clean Stale Records Now</label>
-        <type>button</type>
-        <style>info</style>
-        <help>Immediately remove stale DNS records from Unbound. Use this to manually trigger a cleanup without waiting for the scheduled auto-clean job.</help>
+        <help>How often to run the cleanup job. Only used when auto-clean is enabled. The manual "Clean Stale Records Now" button lives on the Lease Audit tab, next to the records it acts on.</help>
     </field>
 
     <field>
@@ -178,15 +171,4 @@ For each subnet where you want DDNS, add this to the subnet configuration in Kea
         <help>Algorithm used to sign DNS UPDATE packets. Must match the algorithm configured in kea-dhcp-ddns. HMAC-SHA256 is recommended. Only used when TSIG is enabled.</help>
     </field>
 
-    <field>
-        <type>header</type>
-        <label>Advanced</label>
-    </field>
-    <field>
-        <id>general.general.reload_unbound_on_kea_sync</id>
-        <label>Reload Unbound on Kea config change</label>
-        <type>checkbox</type>
-        <advanced>true</advanced>
-        <help>When enabled, Unbound is reloaded whenever Kea configuration changes so that updated static reservations become visible in DNS immediately. WARNING: Unbound reload briefly wipes dynamic lease DNS entries (they are automatically restored from the Kea lease database). Only needed if "Register DHCP Static Mappings" is also enabled in Services &rarr; Unbound DNS &rarr; General.</help>
-    </field>
 </form>

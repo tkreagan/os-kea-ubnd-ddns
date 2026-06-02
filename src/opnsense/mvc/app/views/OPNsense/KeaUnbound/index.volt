@@ -46,6 +46,22 @@
                 return dfObj;
             }
         });
+
+        // Manual sync buttons. (The "Clean stale records" action lives on the
+        // Lease Audit tab, next to the records it acts on.)
+        function triggerSync(btnId, endpoint) {
+            const btn = $("#" + btnId);
+            btn.prop("disabled", true);
+            ajaxCall(endpoint, {}, function() {
+                btn.prop("disabled", false);
+            });
+        }
+        $("#sync_static_now").click(function() {
+            triggerSync("sync_static_now", "/api/keaunbound/general/sync_static");
+        });
+        $("#sync_dynamic_now").click(function() {
+            triggerSync("sync_dynamic_now", "/api/keaunbound/general/sync_dynamic");
+        });
     });
 </script>
 

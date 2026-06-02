@@ -78,12 +78,12 @@ class StatusController extends ApiControllerBase
             ];
         }
 
-        // Run the audit script with JSON output
-        $cmd = escapeshellcmd($script) . ' --report-json';
+        // Run the audit script with JSON output. $script is a fixed constant
+        // path with no user input, so no shell-argument escaping is needed.
         $output = [];
         $returnCode = 0;
 
-        exec($cmd . ' 2>&1', $output, $returnCode);
+        exec($script . ' --report-json 2>&1', $output, $returnCode);
 
         // Join output lines
         $jsonOutput = implode("\n", $output);

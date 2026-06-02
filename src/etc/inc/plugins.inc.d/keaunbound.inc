@@ -27,79 +27,27 @@
  */
 
 /*
- * keaunbound.inc -- OPNsense plugin hooks for os-kea-unbound
+ * keaunbound.inc -- OPNsense plugin hooks for os-kea-unbound.
  *
- * Hook registrations:
+ * Hooks (registered in keaunbound_configure()):
  *
- *   kea_sync (priority 2) -- fires after Kea rewrites its config and restarts.
+ *   kea_start / kea_sync / unbound_start -> keaunbound_sync_if_enabled()
+ *       Register Kea static reservations and/or active leases into Unbound via
+ *       reservation-sync.py / lease-sync.py. Gated on the plugin being enabled
+ *       and on the per-feature toggles (static reservations additionally require
+ *       Unbound's regdhcpstatic to be OFF, so we don't fight OPNsense over
+ *       host_entries.conf). Tied to Unbound's lifecycle because Unbound holds
+ *       the records: an Unbound reload wipes runtime local_data, so we
+ *       repopulate on unbound_start.
  *
- *     Step 1 (always): call unbound_add_host_entries() to rewrite
- *     host_entries.conf. This fixes a core OPNsense limitation: normally
- *     host_entries.conf is only rewritten when Unbound reconfigures, not
- *     when Kea config changes. Without this, our is_static_entry() guard
- *     in kea-unbound-ddns.py can over-protect -- blocking DELETE updates
- *     for reservations removed from Kea because the stale host_entries.conf
- *     still lists them.
+ *   bootup (priority 2) -> keaunbound_start_do()
+ *       Start the RFC 2136 stub listener daemon via the 'keaunbound start'
+ *       configd action, ordered after Unbound (bootup priority 1).
  *
- *     if regdhcpstatic is enabled (Services -> Unbound DNS -> General ->
- *     Register DHCP Static Mappings):
- *       Step 2: reload Unbound so updated static reservations become
- *               visible in DNS. This wipes all runtime local_data entries
- *               injected by kea-unbound-ddns.py for dynamic leases.
- *       Step 3: lease DB sync to restore dynamic lease registrations
- *               lost during the Unbound reload.
- *
- *     if regdhcpstatic is disabled (our plugin manages all DHCP DNS):
- *       Step 2: reservation sync -- read static reservations directly from
- *               Kea config and register them in Unbound immediately. This
- *               ensures a newly added reservation (e.g. foo.bar.com ->
- *               10.10.10.10) appears in DNS right away, before the device
- *               has connected and received its lease.
- *       No lease sync needed -- we did not reload Unbound, so dynamic
- *       local_data from kea-unbound-ddns.py remains intact.
- *
- *   unbound_start -- fires when Unbound starts or restarts (boot, manual
- *     reload, or after the regdhcpstatic reload above).
- *       Step 1: reservation sync -- register all static reservations
- *       Step 2: lease DB sync -- register all active dynamic leases
- *     Together these fully repopulate Unbound from scratch without waiting
- *     for devices to renew their leases.
- *
- *   bootup (priority 2) -- ensures our daemon starts after Unbound (priority
- *     1, no suffix = default). Kea does not register on the bootup hook --
- *     it starts via kea_services() which is handled by OPNsense's service
- *     manager after the bootup hook chain completes. Our daemon is therefore
- *     always ready before Kea starts sending DNS UPDATE packets.
- *
- * Verified: Unbound uses bootup with no priority (default=1). Kea does not
- *   use the bootup hook. Our :2 priority correctly places us after Unbound.
- * TODO: implement keaunbound_reservation_sync() -- reads Kea config via
- *       kea-ctrl-agent API and registers static reservations in Unbound.
- * TODO: implement keaunbound_lease_sync() -- queries kea-ctrl-agent REST API
- *       for all active leases and registers them via unbound-control local_data.
- * TODO: implement keaunbound_start_do() -- start daemon via configd.
- * TODO: implement keaunbound_services() -- register with OPNsense service manager.
- * TODO: implement keaunbound_syslog() -- register log facility.
- * TODO: implement MVC model, controller, and UI view.
- * TODO: implement stale record audit in the sync script (kea-unbound-sync.py).
- *       local_data entries injected via unbound-control never expire -- if
- *       kea-dhcp-ddns crashes after an add but before the corresponding delete,
- *       stale A/AAAA/PTR records can accumulate indefinitely. The audit should:
- *         1. Dump list_local_data
- *         2. Cross-reference each A/AAAA record against:
- *              - host_entries.conf (OPNsense-owned, expected)
- *              - Kea active leases via ctrl-agent API (our records, expected)
- *              - Kea static reservations via ctrl-agent API (our records, expected)
- *         3. Flag any record not found in any of the above as potentially stale
- *         4. Report flagged records (hostname, IP, type) for human review
- *         5. PTR records should be treated as paired with their forward record --
- *            report both together when a forward record is flagged
- *         6. Optional --clean flag to remove flagged records after confirmation
- *       The audit should never silently delete -- we do not own all of local_data
- *       and other tools may be writing there. Conservative reporting only unless
- *       --clean is explicitly passed.
- *       Natural fit as an audit mode in kea-unbound-sync.py alongside the normal
- *       sync mode. Could be scheduled weekly via OPNsense cron or scheduled tasks.
+ * Service / schedule / logging hooks:
+ *   keaunbound_services() -- register the daemon for service control
+ *   keaunbound_cron()     -- declare the auto-clean schedule (OPNsense cron)
+ *   keaunbound_syslog()   -- register the 'kea-unbound-ddns' log facility
  */
 
 function keaunbound_syslog()
@@ -114,7 +62,7 @@ function keaunbound_services()
     $services = [];
 
     $cfg = new \OPNsense\KeaUnbound\General();
-    if (empty((string)$cfg->enabled)) {
+    if (empty((string)$cfg->general->enabled)) {
         return $services;
     }
 
@@ -150,13 +98,13 @@ function keaunbound_cron()
     $jobs = [];
 
     $cfg = new \OPNsense\KeaUnbound\General();
-    if (!empty((string)$cfg->enabled) && !empty((string)$cfg->enable_auto_clean)) {
+    if (!empty((string)$cfg->general->enabled) && !empty((string)$cfg->general->enable_auto_clean)) {
         $hour_by_interval = [
-            '6'  => '0,6,12,18',
-            '12' => '0,12',
-            '24' => '0',
+            'h6'  => '0,6,12,18',
+            'h12' => '0,12',
+            'h24' => '0',
         ];
-        $hour = $hour_by_interval[(string)$cfg->auto_clean_interval] ?? '0,6,12,18';
+        $hour = $hour_by_interval[(string)$cfg->general->auto_clean_interval] ?? '0,6,12,18';
 
         // autocron format: [command, minute, hour, mday, month, wday] (trailing => *)
         $jobs[]['autocron'] = [
@@ -192,7 +140,7 @@ function keaunbound_sync_if_enabled($verbose = false)
 
     // Check if the overall KeaUnbound plugin is enabled
     $cfg = new \OPNsense\KeaUnbound\General();
-    if (empty((string)$cfg->enabled)) {
+    if (empty((string)$cfg->general->enabled)) {
         service_log("KeaUnbound: plugin disabled -- skipping sync\n", $verbose);
         return 0;
     }
@@ -339,7 +287,7 @@ function keaunbound_start_do($verbose = false)
      * correct since daemon(8) forks immediately and the action completes.
      */
     $cfg = new \OPNsense\KeaUnbound\General();
-    if (empty((string)$cfg->enabled)) {
+    if (empty((string)$cfg->general->enabled)) {
         service_log("KeaUnbound: disabled — skipping daemon start.\n", $verbose);
         return;
     }
