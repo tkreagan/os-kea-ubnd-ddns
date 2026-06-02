@@ -52,7 +52,11 @@
 
 function keaunbound_syslog()
 {
-    return ['kea-unbound-ddns' => ['facility' => [
+    // Key must be a valid syslog-ng identifier (no hyphens). The template
+    // generates filter/destination names like f_local_keaunbound and routes
+    // logs to /var/log/keaunbound/keaunbound_YYYYMMDD.log.
+    // The facility list matches the syslog ident used by the daemon.
+    return ['keaunbound' => ['facility' => [
         'kea-unbound-ddns',
     ]]];
 }

@@ -4,7 +4,7 @@
             <General order="10" VisibleName="Settings" url="/ui/keaunbound/index"/>
             <KcaConfig order="20" VisibleName="Kea Config Check" url="/ui/keaunbound/kcaconfig"/>
             <Audit order="50" VisibleName="Lease Audit" url="/ui/keaunbound/status"/>
-            <LogFile order="100" VisibleName="Log File" url="/ui/diagnostics/log/core/kea-unbound-ddns"/>
+            <LogFile order="100" VisibleName="Log File" url="/ui/diagnostics/log/core/keaunbound"/>
         </KeaUnbound>
     </Services>
 </menu>
