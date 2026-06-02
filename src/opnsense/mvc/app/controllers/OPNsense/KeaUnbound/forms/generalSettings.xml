@@ -1,6 +1,81 @@
 <form>
     <field>
         <type>header</type>
+        <label>About Kea Unbound DDNS</label>
+    </field>
+    <field>
+        <type>info</type>
+        <label>Documentation</label>
+        <help>
+<![CDATA[
+<h4>Kea Unbound DDNS Integration</h4>
+
+<p>This plugin creates a bridge between Kea DHCP and Unbound DNS, allowing DHCP leases and static reservations to be automatically registered in DNS.</p>
+
+<h4>How It Works</h4>
+
+<p><strong>Static Reservations:</strong> When you create a static DHCP reservation in Kea, this plugin automatically registers it in Unbound DNS (A/AAAA and PTR records). This happens immediately when the plugin is enabled, without waiting for any client to connect.</p>
+
+<p><strong>Dynamic Leases:</strong> When a client receives a DHCP lease from Kea, the lease information is registered in Unbound DNS with a TTL matching the lease expiration time. This ensures DNS records automatically expire when leases expire.</p>
+
+<p><strong>DDNS Protocol:</strong> The plugin implements RFC 2136 DNS UPDATE, receiving DNS update requests from Kea's DHCP-DDNS daemon and translating them into Unbound local_data entries.</p>
+
+<h4>Configuring Kea for DDNS</h4>
+
+<p>For this plugin to work, you must configure Kea DHCP to send DDNS updates. This is a two-part process:</p>
+
+<p><strong>1. Enable DHCP-DDNS Daemon</strong><br/>
+Kea's DHCP-DDNS daemon must be running and configured to send updates to this server (127.0.0.1:{{ port }}).</p>
+
+<p><strong>2. Configure Subnets for DDNS</strong><br/>
+For each subnet where you want DDNS, add this to the subnet configuration in Kea:</p>
+
+<pre><code>"subnet4": [
+  {
+    "subnet": "10.0.0.0/24",
+    "ddns-send-updates": true,
+    "ddns-override-no-update": true,
+    "ddns-override-client-update": true,
+    "hostname-char-replacement": "-",
+    ...
+  }
+]</code></pre>
+
+<p><strong>Settings explained:</strong></p>
+<ul>
+  <li><code>ddns-send-updates</code>: Enable DDNS for this subnet (required)</li>
+  <li><code>ddns-override-no-update</code>: Send updates even if client requests not to (recommended)</li>
+  <li><code>ddns-override-client-update</code>: Always update PTR records (recommended)</li>
+  <li><code>hostname-char-replacement</code>: Replace invalid chars in hostnames (optional, "-" recommended)</li>
+</ul>
+
+<p>Use the <strong>Kea Config Check</strong> tab to verify which subnets are configured for DDNS.</p>
+
+<h4>Features</h4>
+
+<ul>
+  <li><strong>Dual-stack:</strong> Supports both IPv4 (A records) and IPv6 (AAAA records)</li>
+  <li><strong>PTR Records:</strong> Automatically generates reverse DNS (PTR) records</li>
+  <li><strong>Self-healing:</strong> Leases automatically expire from DNS when their TTL expires</li>
+  <li><strong>TSIG Authentication:</strong> Optional TSIG signing for secure updates</li>
+  <li><strong>Audit & Cleanup:</strong> Tools to verify DNS status and clean up stale records</li>
+  <li><strong>OPNsense Integration:</strong> Fully integrated with OPNsense services and configuration</li>
+</ul>
+
+<h4>Tabs</h4>
+
+<ul>
+  <li><strong>Settings:</strong> Configure plugin behavior, enable/disable sync, set TSIG options</li>
+  <li><strong>Kea Config Check:</strong> View which Kea subnets are configured for DDNS</li>
+  <li><strong>Lease Audit:</strong> View all registered DNS entries and their status</li>
+  <li><strong>Log File:</strong> View plugin logs for troubleshooting</li>
+</ul>
+]]>
+        </help>
+    </field>
+
+    <field>
+        <type>header</type>
         <label>Service</label>
     </field>
     <field>
@@ -8,6 +83,58 @@
         <label>Enabled</label>
         <type>checkbox</type>
         <help>Enable Kea to Unbound DNS registration. When enabled, DNS UPDATE packets from kea-dhcp-ddns are received and translated into Unbound local_data entries.</help>
+    </field>
+
+    <field>
+        <type>header</type>
+        <label>DNS Synchronization</label>
+    </field>
+    <field>
+        <id>general.general.sync_static_reservations</id>
+        <label>Sync Kea static reservations to Unbound</label>
+        <type>checkbox</type>
+        <help>Register Kea static reservations in Unbound DNS. Only applies when Unbound's "Register DHCP Static Mappings" setting is disabled. When enabled, reservations appear in DNS immediately (before any client connects). Requires Kea Control Agent to be enabled. NOTE: Enabling/disabling this setting only affects future sync events. Use "Sync Static Reservations Now" below to immediately sync with current settings.</help>
+    </field>
+    <field>
+        <id>sync_static_now</id>
+        <label>Sync Static Reservations Now</label>
+        <type>button</type>
+        <style>info</style>
+        <help>Immediately register all Kea static reservations in Unbound. Use this if you just enabled static reservation syncing or if you've made changes to Kea reservations that need to appear in DNS right away.</help>
+    </field>
+
+    <field>
+        <id>general.general.sync_dynamic_leases</id>
+        <label>Sync Kea active leases to Unbound</label>
+        <type>checkbox</type>
+        <help>Register Kea active leases in Unbound DNS with TTL matching lease expiration. Repopulates Unbound on startup and refreshes entries periodically. Requires Kea Control Agent to be enabled. NOTE: Enabling/disabling this setting only affects future sync events. Use "Sync Dynamic Leases Now" below to immediately sync with current settings.</help>
+    </field>
+    <field>
+        <id>sync_dynamic_now</id>
+        <label>Sync Dynamic Leases Now</label>
+        <type>button</type>
+        <style>info</style>
+        <help>Immediately register all Kea active leases in Unbound. Use this if you just enabled dynamic lease syncing or if you need to refresh the lease DNS entries in Unbound.</help>
+    </field>
+
+    <field>
+        <id>general.general.enable_auto_clean</id>
+        <label>Automatically clean stale DNS records</label>
+        <type>checkbox</type>
+        <help>Periodically run the cleanup job to remove stale DNS records from Unbound (entries that don't match any Kea reservation, lease, or OPNsense-managed entry).</help>
+    </field>
+    <field>
+        <id>general.general.auto_clean_interval</id>
+        <label>Auto-clean frequency</label>
+        <type>dropdown</type>
+        <help>How often to run the cleanup job. Only used when auto-clean is enabled.</help>
+    </field>
+    <field>
+        <id>clean_now</id>
+        <label>Clean Stale Records Now</label>
+        <type>button</type>
+        <style>info</style>
+        <help>Immediately remove stale DNS records from Unbound. Use this to manually trigger a cleanup without waiting for the scheduled auto-clean job.</help>
     </field>
 
     <field>
@@ -27,22 +154,28 @@
         <label>TSIG Authentication</label>
     </field>
     <field>
+        <id>general.general.enable_tsig</id>
+        <label>Enable TSIG authentication</label>
+        <type>checkbox</type>
+        <help>Require TSIG signatures on DNS UPDATE packets from kea-dhcp-ddns. When disabled, packets are accepted unsigned (safe since the listener only accepts connections from 127.0.0.1). When enabled, kea-dhcp-ddns must be configured to sign updates with the matching key name and algorithm below. NOTE: Changes to TSIG settings require clicking "Apply" to restart the daemon and take effect.</help>
+    </field>
+    <field>
         <id>general.general.tsig_key_name</id>
         <label>TSIG Key Name</label>
         <type>text</type>
-        <help>Optional. TSIG key name for authenticating DNS UPDATE packets. If set, kea-dhcp-ddns must be configured to sign updates with the matching key. Leave empty to disable TSIG (safe since the listener only accepts connections from 127.0.0.1).</help>
+        <help>Name of the TSIG key. kea-dhcp-ddns must be configured to sign updates with this exact key name. Only used when TSIG is enabled.</help>
     </field>
     <field>
         <id>general.general.tsig_key_secret</id>
         <label>TSIG Key Secret</label>
         <type>password</type>
-        <help>Base64-encoded HMAC secret matching the key name above. Only used when TSIG Key Name is set.</help>
+        <help>Base64-encoded HMAC secret. Must match the secret configured in kea-dhcp-ddns. Only used when TSIG is enabled.</help>
     </field>
     <field>
         <id>general.general.tsig_algorithm</id>
         <label>TSIG Algorithm</label>
         <type>dropdown</type>
-        <help>Algorithm used to sign DNS UPDATE packets. Must match the algorithm configured in kea-dhcp-ddns for the same key. HMAC-SHA256 is recommended. Only used when TSIG Key Name is set.</help>
+        <help>Algorithm used to sign DNS UPDATE packets. Must match the algorithm configured in kea-dhcp-ddns. HMAC-SHA256 is recommended. Only used when TSIG is enabled.</help>
     </field>
 
     <field>

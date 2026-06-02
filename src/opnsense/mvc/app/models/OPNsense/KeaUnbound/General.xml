@@ -22,11 +22,20 @@
                 <MaximumValue>65535</MaximumValue>
             </port>
 
+            <!-- Enable TSIG authentication for DNS UPDATE packets.
+                 When disabled, packets are accepted unsigned (safe since the
+                 listener only accepts connections from 127.0.0.1). When enabled,
+                 kea-dhcp-ddns must be configured to sign updates with the
+                 matching key name and algorithm. -->
+            <enable_tsig type="BooleanField">
+                <Default>0</Default>
+                <Required>Y</Required>
+            </enable_tsig>
+
             <!-- TSIG key name for authenticating DNS UPDATE packets from
-                 kea-dhcp-ddns. Optional — if empty, TSIG is disabled and
-                 packets are accepted unsigned (safe since we only listen on
-                 127.0.0.1). If set, kea-dhcp-ddns must be configured to
-                 sign updates with the matching key. -->
+                 kea-dhcp-ddns. Only used when enable_tsig is enabled.
+                 kea-dhcp-ddns must be configured to sign updates with the
+                 matching key. -->
             <tsig_key_name type="TextField">
                 <Required>N</Required>
             </tsig_key_name>
@@ -53,6 +62,52 @@
                     <HMAC-SHA512>HMAC-SHA512</HMAC-SHA512>
                 </OptionValues>
             </tsig_algorithm>
+
+            <!-- Sync static reservations from Kea to Unbound.
+                 Only applies when Unbound's "Register DHCP Static Mappings"
+                 (Services -> Unbound DNS -> General -> regdhcpstatic) is DISABLED.
+                 When enabled, static reservations from Kea are registered in
+                 Unbound's local_data via the reservation-sync.py script, making
+                 them available in DNS immediately (before any client connects).
+                 When Unbound's static mapping is enabled, OPNsense manages
+                 static DNS directly and this plugin's sync is skipped. -->
+            <sync_static_reservations type="BooleanField">
+                <Default>0</Default>
+                <Required>Y</Required>
+            </sync_static_reservations>
+
+            <!-- Sync active DHCP leases from Kea to Unbound.
+                 When enabled, active leases from Kea are registered in
+                 Unbound's local_data via the lease-sync.py script. TTL is set
+                 to the remaining lease lifetime, so entries automatically expire
+                 when leases expire, forcing clients to reconnect and refresh.
+                 This is called on Unbound startup (to repopulate after reload)
+                 and periodically via cron (to keep entries fresh). -->
+            <sync_dynamic_leases type="BooleanField">
+                <Default>0</Default>
+                <Required>Y</Required>
+            </sync_dynamic_leases>
+
+            <!-- Automatically clean stale DNS records from Unbound.
+                 When enabled, the local-data-clean.py script runs periodically
+                 to remove stale records (entries in Unbound that don't match
+                 any Kea reservation, lease, or OPNsense-managed entry). -->
+            <enable_auto_clean type="BooleanField">
+                <Default>0</Default>
+                <Required>Y</Required>
+            </enable_auto_clean>
+
+            <!-- How often to run the auto-clean job.
+                 Only used when enable_auto_clean is enabled. -->
+            <auto_clean_interval type="OptionField">
+                <Required>N</Required>
+                <Default>6</Default>
+                <OptionValues>
+                    <6>Every 6 hours</6>
+                    <12>Every 12 hours</12>
+                    <24>Every 24 hours</24>
+                </OptionValues>
+            </auto_clean_interval>
 
             <!-- When enabled, kea_sync triggers a full Unbound reload so that
                  updated static reservations become visible in DNS immediately.

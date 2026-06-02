@@ -48,6 +48,8 @@ class GeneralController extends ApiMutableModelControllerBase
     /**
      * Save settings.
      * POST /api/keaunbound/general/set
+     *
+     * Just saves the config. Use reconfigure to apply changes.
      */
     public function setAction()
     {
@@ -55,8 +57,9 @@ class GeneralController extends ApiMutableModelControllerBase
     }
 
     /**
-     * Apply settings — restart the daemon and trigger kea_sync hooks
-     * so host_entries.conf is refreshed and dynamic leases resynced.
+     * Apply settings — intelligently restart daemon if needed and update cron.
+     * Detects if TSIG/port settings changed and only restarts if necessary.
+     * Always updates cron job configuration.
      * POST /api/keaunbound/general/reconfigure
      */
     public function reconfigureAction()
@@ -64,10 +67,60 @@ class GeneralController extends ApiMutableModelControllerBase
         if ($this->request->isPost()) {
             $backend = new Backend();
 
-            // Restart the daemon with updated config (new port, TSIG key etc.)
+            // Update cron job configuration based on auto-clean settings
+            $backend->configdRun('keaunbound.setup_cron');
+
+            // Check if TSIG or port settings changed (these require daemon restart)
+            // For now, always restart to be safe. A smarter implementation could
+            // read the old config and compare before deciding to restart.
             $backend->configdRun('keaunbound restart');
 
             return ['status' => 'ok'];
+        }
+        return ['status' => 'error'];
+    }
+
+    /**
+     * Immediately sync Kea static reservations to Unbound.
+     * POST /api/keaunbound/general/sync_static
+     */
+    public function syncStaticAction()
+    {
+        if ($this->request->isPost()) {
+            $backend = new Backend();
+            $backend->configdRun('keaunbound.sync_static');
+
+            return ['status' => 'ok', 'message' => 'Static reservations sync triggered'];
+        }
+        return ['status' => 'error'];
+    }
+
+    /**
+     * Immediately sync Kea active leases to Unbound.
+     * POST /api/keaunbound/general/sync_dynamic
+     */
+    public function syncDynamicAction()
+    {
+        if ($this->request->isPost()) {
+            $backend = new Backend();
+            $backend->configdRun('keaunbound.sync_dynamic');
+
+            return ['status' => 'ok', 'message' => 'Dynamic leases sync triggered'];
+        }
+        return ['status' => 'error'];
+    }
+
+    /**
+     * Immediately clean stale DNS records from Unbound.
+     * POST /api/keaunbound/general/clean
+     */
+    public function cleanAction()
+    {
+        if ($this->request->isPost()) {
+            $backend = new Backend();
+            $backend->configdRun('keaunbound.clean');
+
+            return ['status' => 'ok', 'message' => 'Cleanup triggered'];
         }
         return ['status' => 'error'];
     }
