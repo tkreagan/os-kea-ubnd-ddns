@@ -188,24 +188,22 @@ function keaunbound_sync_if_enabled($verbose = false)
 
 /**
  * Check if static reservations should be synced from Kea.
- * Two-part test:
- *  1. Unbound must NOT be managing static reservations (regdhcpstatic disabled)
- *  2. KeaUnbound plugin must be configured to sync them
+ *
+ * Gated solely on the plugin's own sync_static_reservations toggle. We do NOT
+ * consult Unbound's regdhcpstatic ("Register DHCP Static Mappings"): the real
+ * conflict-guard is the host_entries.conf skip in reservation-sync.py, which
+ * never touches a name OPNsense already wrote. So whether regdhcpstatic is on
+ * or off, the plugin only fills the gap for reservations OPNsense hasn't
+ * registered — and a reservation only becomes a host_entries entry via an
+ * Unbound reconfigure, which wipes the plugin's runtime record anyway. There is
+ * never a moment a name is registered twice: it's a live record (plugin) XOR a
+ * config-persistent override (OPNsense), never both.
  */
 function should_sync_static_reservations()
 {
     $config = \OPNsense\Core\Config::getInstance();
-
-    // Get Unbound's static DHCP registration setting
-    $unbound_static_xpath = $config->object()->xpath('OPNsense/Unbound/general/regdhcpstatic');
-    $unbound_enabled = !empty($unbound_static_xpath) && (string)$unbound_static_xpath[0] === '1';
-
-    // Get KeaUnbound plugin setting
     $keaunbound_static_xpath = $config->object()->xpath('OPNsense/KeaUnbound/general/sync_static_reservations');
-    $plugin_enabled = !empty($keaunbound_static_xpath) && (string)$keaunbound_static_xpath[0] === '1';
-
-    // Sync only if: Unbound NOT managing them AND plugin wants to
-    return !$unbound_enabled && $plugin_enabled;
+    return !empty($keaunbound_static_xpath) && (string)$keaunbound_static_xpath[0] === '1';
 }
 
 /**

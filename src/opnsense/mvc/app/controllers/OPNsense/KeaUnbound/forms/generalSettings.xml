@@ -93,7 +93,7 @@ For each subnet where you want DDNS, add this to the subnet configuration in Kea
         <id>general.general.sync_static_reservations</id>
         <label>Sync Kea static reservations to Unbound</label>
         <type>checkbox</type>
-        <help>Register Kea static reservations in Unbound DNS. Only applies when Unbound's "Register DHCP Static Mappings" setting is disabled. When enabled, reservations appear in DNS immediately (before any client connects). Requires Kea Control Agent to be enabled.</help>
+        <help>Register Kea static reservations in Unbound DNS so they resolve immediately (before any client connects). Names already managed by OPNsense in Unbound (Host Overrides, or "Register DHCP Static Mappings") are skipped, so this is safe whether or not that Unbound setting is on. Requires Kea Control Agent to be enabled.</help>
     </field>
 
     <field>
@@ -118,7 +118,7 @@ For each subnet where you want DDNS, add this to the subnet configuration in Kea
 
     <field>
         <type>header</type>
-        <label>Listener</label>
+        <label>Kea-Unbound DDNS Listener</label>
     </field>
     <field>
         <id>general.general.port</id>

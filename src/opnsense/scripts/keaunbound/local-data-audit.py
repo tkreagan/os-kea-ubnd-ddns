@@ -253,6 +253,13 @@ def audit_local_data(report_json: bool = False, verbose: bool = False) -> int:
                 "type": record_type,
                 "ttl": ttl,
                 "ptr_registered": ptr_registered,
+                # Independent attributes (not mutually exclusive) — an entry can
+                # be e.g. both a reservation and a live record. The UI shows these
+                # as columns; "status"/"source" remain for the summary roll-up.
+                "reserved": ip in res_ips,        # Kea static reservation
+                "leased": ip in lease_ips,        # client currently holds it
+                "override": ip in he_ips,         # config-persistent (host_entries.conf)
+                "live": in_unbound,               # resolvable in Unbound right now
                 "source": source,
                 "in_unbound": in_unbound,
                 "status": status,

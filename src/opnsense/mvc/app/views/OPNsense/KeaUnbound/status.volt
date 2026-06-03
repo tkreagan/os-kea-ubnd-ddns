@@ -31,11 +31,19 @@
     th.sortable:after        { content: ' \2195'; opacity: 0.4; }
     th.sortable.asc:after    { content: ' \2191'; opacity: 1; }
     th.sortable.desc:after   { content: ' \2193'; opacity: 1; }
-    .kea-summary td, .kea-summary th { vertical-align: middle; }
-    .kea-summary tfoot th { border-top: 2px solid #ddd; }
+    .kea-summary td, .kea-summary th { vertical-align: middle; white-space: nowrap; }
+    /* Compact (content width) when explanations are hidden; full width with a
+       wrapping description column when shown. */
+    .kea-summary          { width: auto; }
+    .kea-summary.kea-wide { width: 100%; }
+    .kea-summary .kea-desc { white-space: normal; width: 100%; }
     /* Explicit blue — OPNsense's theme renders text-primary/label-primary orange. */
     .kea-blue            { color: #2c6fbb; }
     .label.label-kea-blue { background-color: #2c6fbb; }
+    .kea-amber           { color: #c9890a; }
+    .kea-flag            { text-align: center; }
+    /* Let the boolean column headers wrap at spaces so the columns stay narrow. */
+    th.sortable.kea-flag { white-space: normal; }
 </style>
 
 <script>
@@ -43,7 +51,20 @@ $( document ).ready(function() {
     loadAuditData();
     setInterval(loadAuditData, 30000);
 
+    // Only show a manual sync button if that sync is enabled in settings.
+    $.ajax({ url: '/api/keaunbound/general/get', type: 'GET', dataType: 'json' }).done(function(d) {
+        const g = (d && d.general && d.general.general) || {};
+        if (String(g.sync_static_reservations) === '1') { $("#syncStaticBtn").show(); }
+        if (String(g.sync_dynamic_leases) === '1')      { $("#syncDynamicBtn").show(); }
+    });
+
     $("#refreshBtn").click(function() { loadAuditData(); });
+
+    $(document).on("click", "#toggleDesc", function(e) {
+        e.preventDefault();
+        showDesc = !showDesc;
+        applyDescVisibility();
+    });
 
     $("#cleanBtn").click(function() {
         if (!confirm("Remove stale and orphaned DNS records from Unbound?\n\nThe stale set is recomputed server-side before removal.")) {
@@ -127,30 +148,40 @@ function escapeHtml(text) {
         .replace(/"/g,'&quot;').replace(/'/g,'&#039;');
 }
 
-function statusBadge(status) {
-    const map = {
-        'ok':           '<span class="label label-success">Registered</span>',
-        'missing-PTR':  '<span class="label label-warning">Missing PTR</span>',
-        'stale':        '<span class="label label-danger">Possibly Stale</span>',
-        'orphaned-PTR': '<span class="label label-danger">Possible Orphan PTR</span>',
-        'static':       '<span class="label label-kea-blue">Static</span>',
-        'unknown':      '<span class="label label-default">Unknown</span>'
-    };
-    return map[status] || '<span class="label label-default">' + escapeHtml(status) + '</span>';
+function flag(on, color) {
+    // Filled circle = present, open circle = absent — in the column's color.
+    return '<span style="color:' + color + '; font-size:1.05em;">' +
+           (on ? '●' : '○') + '</span>';
+}
+
+// Whether the summary's "What it means" column is shown. Persists across the
+// 30s auto-refresh re-renders; applied after each render.
+var showDesc = false;
+function applyDescVisibility() {
+    $(".kea-desc").toggle(showDesc);
+    $(".kea-summary").toggleClass("kea-wide", showDesc);
+    $("#toggleDesc").text(showDesc ? "Hide explanations" : "Show explanations");
 }
 
 function renderAuditData(audit) {
     const records = audit.records || [];
     const orphans  = audit.orphaned_ptrs || [];
 
-    const ok      = records.filter(r => r.status === 'ok').length;
-    const missing = records.filter(r => r.status === 'missing-PTR').length;
-    const stale   = records.filter(r => r.status === 'stale').length;
-    const staticN = records.filter(r => r.status === 'static').length;
-    const unknown = records.filter(r => r.status === 'unknown').length;
-    const orphanN = orphans.length;
+    // Authoritative counts for cleanup (status-based).
+    const stale     = records.filter(r => r.status === 'stale').length;
+    const orphanN   = orphans.length;
     const removable = stale + orphanN;
-    const total     = records.length + orphanN;
+
+    // Summary counts. These intentionally OVERLAP (e.g. a missing-PTR record is
+    // also an active lease), so there is no meaningful grand total.
+    const sActiveLease = records.filter(r => r.leased).length;
+    const sConfigured  = records.filter(r => (r.reserved || r.override) && !r.leased).length;
+    // Missing PTR among the backed rows above (lease / reservation / override) —
+    // pure-stale records are reported only under "Possibly Stale / Orphaned".
+    const sMissingPtr  = records.filter(r => !r.ptr_registered &&
+                                            (r.reserved || r.leased || r.override)).length;
+    const sStaleOrphan = stale + orphanN;
+    const sUnknown     = records.filter(r => r.status === 'unknown').length;
 
     let html = '';
 
@@ -164,41 +195,36 @@ function renderAuditData(audit) {
 
     // ── Summary table ─────────────────────────────────────────────────────────
     const summaryRows = [
-        ['Dynamically Registered', 'text-success', ok,
-         'Forward record (A/AAAA) registered into Unbound by this plugin from a current Kea active lease or static reservation, with a matching reverse (PTR) record. Nothing to do.'],
-        ['Static', 'kea-blue', staticN,
-         'An Unbound host override, or a static DHCP mapping OPNsense keeps in host_entries.conf. Managed by Unbound — this plugin never changes it. (Kea static reservations appear above as Dynamically Registered.)'],
-        ['Missing PTR', 'text-warning', missing,
-         'The forward record is registered, but it has no matching reverse (PTR) record.'],
-        ['Possibly Stale', 'text-danger', stale,
-         'Still in Unbound but not backed by any Kea lease, Kea reservation, or Unbound host override — so it may be removable (see note below).'],
-        ['Possible Orphan PTR', 'text-danger', orphanN,
-         'A reverse (PTR) record with no matching forward record, and not from Kea or an Unbound host override — possibly removable (see note below).'],
+        ['Active Leases', 'text-success', sActiveLease,
+         'A client currently holds this address — a dynamic lease, or a static reservation whose host is online. Registered in DNS with a lease-tracking TTL.'],
+        ['Static Reservations & Config Overrides', 'kea-blue', sConfigured,
+         'Configured but not currently leased: a Kea reservation with no active lease yet, or an Unbound host override. Resolves whether or not a client is online.'],
+        ['Missing Pointers', 'kea-amber', sMissingPtr,
+         'Has a forward (A/AAAA) record but no matching reverse (PTR) record. Counts across the rows above.'],
+        ['Possibly Stale / Orphaned', 'text-danger', sStaleOrphan,
+         'A live override record in Unbound not backed by any active lease, Kea reservation, or configured host override — or a reverse (PTR) with no forward record. May be removable.' +
+         '<br><br>These are not necessarily wrong: they are simply not backed by a Kea lease, reservation, or Unbound host override (for example, left over from an expired lease, or a record added by another tool). Cleaning removes them; anything still in use re-registers on the next lease renewal or sync.'],
     ];
-    if (unknown > 0) {
-        summaryRows.push(['Unknown', 'text-muted', unknown,
-            'Kea data is unavailable, so staleness cannot be determined right now.']);
+    if (sUnknown > 0) {
+        summaryRows.push(['Undetermined', 'text-muted', sUnknown,
+            'Kea data is unavailable, so backing cannot be determined right now.']);
     }
-    html += '<div class="panel panel-default" style="margin-bottom:8px;">' +
-            '<div class="panel-heading"><h4 class="panel-title">DNS Record Summary</h4></div>' +
+    html += '<div class="panel panel-default" style="margin-bottom:16px;">' +
+            '<div class="panel-heading">' +
+            '<h4 class="panel-title" style="display:inline;">DNS Record Summary</h4>' +
+            '<a href="#" id="toggleDesc" class="small" style="float:right;"></a>' +
+            '</div>' +
             '<div class="panel-body" style="padding:0;">' +
             '<table class="table table-condensed kea-summary" style="margin-bottom:0;">' +
-            '<thead><tr><th>Category</th><th class="text-right">Count</th><th>What it means</th></tr></thead><tbody>';
+            '<thead><tr><th>Category</th><th class="text-right">Count</th><th class="kea-desc">What it means</th></tr></thead><tbody>';
     summaryRows.forEach(function(r) {
         html += '<tr>' +
             '<td><span class="' + r[1] + '"><strong>' + r[0] + '</strong></span></td>' +
             '<td class="text-right ' + r[1] + '"><strong>' + r[2] + '</strong></td>' +
-            '<td class="text-muted">' + r[3] + '</td>' +
+            '<td class="text-muted kea-desc">' + r[3] + '</td>' +
             '</tr>';
     });
-    html += '</tbody>' +
-            '<tfoot><tr><th>Total</th><th class="text-right">' + total + '</th><th></th></tr></tfoot>' +
-            '</table></div></div>';
-    html += '<p class="text-muted small" style="margin:0 0 16px;">' +
-            '<i class="fa fa-info-circle"></i> <strong>Stale</strong> and <strong>orphaned</strong> entries are not necessarily wrong — ' +
-            'they are simply not backed by a Kea lease, a Kea reservation, or an Unbound host override (for example, left over from ' +
-            'an expired lease, or added by another tool). Cleaning removes them; anything still in use re-registers on the next lease renewal or sync.' +
-            '</p>';
+    html += '</tbody></table></div></div>';
 
     // ── Stale / cleanup section ───────────────────────────────────────────────
     html += '<div class="panel panel-default" style="margin-bottom:16px;">' +
@@ -262,35 +288,30 @@ function renderAuditData(audit) {
                 '<div class="panel-heading"><h4 class="panel-title">DNS Records (' + records.length + ')</h4></div>' +
                 '<div class="panel-body" style="padding:0;">' +
                 '<div class="table-responsive">' +
-                '<table class="table table-striped table-condensed" style="margin:0;">' +
+                '<table class="table table-striped table-condensed kea-records" style="margin:0;">' +
                 '<thead><tr>' +
                 '<th class="sortable">Hostname</th>' +
                 '<th class="sortable">IP Address</th>' +
                 '<th class="sortable">Type</th>' +
                 '<th class="sortable">TTL</th>' +
-                '<th class="sortable">Source</th>' +
-                '<th class="sortable">Registration</th>' +
-                '<th class="sortable">In Unbound</th>' +
-                '<th class="sortable">PTR</th>' +
+                '<th class="sortable kea-flag">PTR</th>' +
+                '<th class="sortable kea-flag">Active Lease</th>' +
+                '<th class="sortable kea-flag">Live Record</th>' +
+                '<th class="sortable kea-flag">Static Reservation</th>' +
+                '<th class="sortable kea-flag">Config Override</th>' +
                 '</tr></thead><tbody>';
 
         records.forEach(function(r) {
-            const inUnbound = r.in_unbound
-                ? '<span class="label label-success">Yes</span>'
-                : '<span class="label label-danger">No</span>';
-            const ptr = r.ptr_registered
-                ? '<span class="label label-success">&#10003;</span>'
-                : '<span class="label label-default">&#10007;</span>';
-
             html += '<tr>' +
                 '<td class="kea-hostname">' + escapeHtml(r.hostname) + '</td>' +
                 '<td class="kea-ip">'       + escapeHtml(r.ip)       + '</td>' +
-                '<td>' + escapeHtml(r.type)   + '</td>' +
+                '<td>' + escapeHtml(r.type) + '</td>' +
                 '<td>' + escapeHtml(r.ttl != null ? String(r.ttl) : '—') + '</td>' +
-                '<td>' + escapeHtml(r.source) + '</td>' +
-                '<td>' + statusBadge(r.status) + '</td>' +
-                '<td>' + inUnbound + '</td>' +
-                '<td>' + ptr + '</td>' +
+                '<td class="kea-flag">' + flag(r.ptr_registered, '#c9890a') + '</td>' +
+                '<td class="kea-flag">' + flag(r.leased, '#3c763d') + '</td>' +
+                '<td class="kea-flag">' + flag(r.live, '#3c763d') + '</td>' +
+                '<td class="kea-flag">' + flag(r.reserved, '#2c6fbb') + '</td>' +
+                '<td class="kea-flag">' + flag(r.override, '#2c6fbb') + '</td>' +
                 '</tr>';
         });
 
@@ -300,6 +321,7 @@ function renderAuditData(audit) {
     }
 
     $("#statusContent").html(html);
+    applyDescVisibility();
 }
 
 function updateCleanButton(complete, removable) {
@@ -326,10 +348,10 @@ function updateCleanButton(complete, removable) {
         <small class="text-muted" style="margin-left:12px;">Auto-refresh every 30 seconds</small>
     </div>
     <div style="margin-top:8px;">
-        <button id="syncStaticBtn" class="btn btn-default btn-sm">
-            <i class="fa fa-download"></i> Sync Static DHCP Reservations
+        <button id="syncStaticBtn" class="btn btn-default btn-sm" style="display:none;">
+            <i class="fa fa-download"></i> Sync Static Records
         </button>
-        <button id="syncDynamicBtn" class="btn btn-default btn-sm" style="margin-left:8px;">
+        <button id="syncDynamicBtn" class="btn btn-default btn-sm" style="display:none; margin-left:8px;">
             <i class="fa fa-download"></i> Sync Active DHCP Leases
         </button>
         <button id="cleanBtn" class="btn btn-warning btn-sm" disabled style="margin-left:8px;">

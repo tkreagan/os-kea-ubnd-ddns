@@ -64,13 +64,13 @@
             </tsig_algorithm>
 
             <!-- Sync static reservations from Kea to Unbound.
-                 Only applies when Unbound's "Register DHCP Static Mappings"
-                 (Services -> Unbound DNS -> General -> regdhcpstatic) is DISABLED.
                  When enabled, static reservations from Kea are registered in
                  Unbound's local_data via the reservation-sync.py script, making
                  them available in DNS immediately (before any client connects).
-                 When Unbound's static mapping is enabled, OPNsense manages
-                 static DNS directly and this plugin's sync is skipped. -->
+                 reservation-sync.py skips any name already in host_entries.conf,
+                 so this is safe regardless of Unbound's "Register DHCP Static
+                 Mappings" (regdhcpstatic) setting — the plugin only fills the
+                 gap for reservations OPNsense has not itself registered. -->
             <sync_static_reservations type="BooleanField">
                 <Default>0</Default>
                 <Required>Y</Required>
@@ -100,7 +100,7 @@
             <!-- How often to run the auto-clean job.
                  Only used when enable_auto_clean is enabled. -->
             <auto_clean_interval type="OptionField">
-                <Required>N</Required>
+                <Required>Y</Required>
                 <Default>h6</Default>
                 <OptionValues>
                     <h6>Every 6 hours</h6>
