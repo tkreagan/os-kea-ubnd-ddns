@@ -154,6 +154,34 @@ function flag(on, color) {
            (on ? '●' : '○') + '</span>';
 }
 
+// Per-host reverse (PTR) state icon.
+function ptrIcon(state) {
+    switch (state) {
+        case 'correct':
+            return '<i class="fa-solid fa-circle" style="color:#3c763d;" title="Reverse (PTR) points to this host"></i>';
+        case 'multiple':
+            return '<i class="fa-solid fa-circle-nodes" style="color:#c9890a;" title="This IP has multiple PTR records (one names this host)"></i>';
+        case 'wrong':
+            return '<i class="fa-regular fa-circle-xmark" style="color:#a94442;" title="This IP has a PTR, but none point to this host"></i>';
+        default: // 'none'
+            return '<i class="fa-regular fa-circle" style="color:#999;" title="No reverse (PTR) record for this IP"></i>';
+    }
+}
+
+// Forward-consistency icon for a PTR record.
+function fwdIcon(state) {
+    switch (state) {
+        case 'match':
+            return '<i class="fa-solid fa-circle" style="color:#3c763d;" title="Forward A/AAAA matches this PTR"></i>';
+        case 'partial':
+            return '<i class="fa-solid fa-circle" style="color:#c9890a;" title="Forward matches, but other names on this IP have no PTR"></i>';
+        case 'mismatch':
+            return '<i class="fa-solid fa-circle" style="color:#c9890a;" title="Forward A/AAAA points to a different IP"></i>';
+        default: // 'orphan'
+            return '<i class="fa-solid fa-circle" style="color:#a94442;" title="No forward A/AAAA record (orphan PTR)"></i>';
+    }
+}
+
 // Whether the summary's "What it means" column is shown. Persists across the
 // 30s auto-refresh re-renders; applied after each render.
 var showDesc = false;
@@ -307,7 +335,7 @@ function renderAuditData(audit) {
                 '<td class="kea-ip">'       + escapeHtml(r.ip)       + '</td>' +
                 '<td>' + escapeHtml(r.type) + '</td>' +
                 '<td>' + escapeHtml(r.ttl != null ? String(r.ttl) : '—') + '</td>' +
-                '<td class="kea-flag">' + flag(r.ptr_registered, '#c9890a') + '</td>' +
+                '<td class="kea-flag">' + ptrIcon(r.ptr_state) + '</td>' +
                 '<td class="kea-flag">' + flag(r.leased, '#3c763d') + '</td>' +
                 '<td class="kea-flag">' + flag(r.live, '#3c763d') + '</td>' +
                 '<td class="kea-flag">' + flag(r.reserved, '#2c6fbb') + '</td>' +
@@ -318,6 +346,39 @@ function renderAuditData(audit) {
         html += '</tbody></table></div></div></div>';
     } else {
         html += '<div class="alert alert-info">No DNS records found.</div>';
+    }
+
+    // ── Reverse (PTR) records table ────────────────────────────────────────────
+    const ptrs = audit.ptr_records || [];
+    if (ptrs.length > 0) {
+        html += '<div class="panel panel-default">' +
+                '<div class="panel-heading"><h4 class="panel-title">Reverse (PTR) Records (' + ptrs.length + ')</h4></div>' +
+                '<div class="panel-body" style="padding:0;">' +
+                '<div class="table-responsive">' +
+                '<table class="table table-striped table-condensed" style="margin:0;">' +
+                '<thead><tr>' +
+                '<th class="sortable">IP Address</th>' +
+                '<th class="sortable">Reverse Name</th>' +
+                '<th class="sortable">Points To</th>' +
+                '<th class="sortable">TTL</th>' +
+                '<th class="sortable kea-flag">Forward</th>' +
+                '</tr></thead><tbody>';
+        ptrs.forEach(function(p) {
+            html += '<tr>' +
+                '<td class="kea-ip">'       + escapeHtml(p.ip ? p.ip : '—') + '</td>' +
+                '<td class="kea-hostname">' + escapeHtml(p.ptr_name) + '</td>' +
+                '<td class="kea-hostname">' + escapeHtml(p.target ? p.target : '—') + '</td>' +
+                '<td>' + escapeHtml(p.ttl != null ? String(p.ttl) : '—') + '</td>' +
+                '<td class="kea-flag">' + fwdIcon(p.fwd_state) + '</td>' +
+                '</tr>';
+        });
+        html += '</tbody></table></div>' +
+                '<div class="panel-body" style="padding:6px 12px;">' +
+                '<span class="text-muted small">Forward: ' +
+                '<i class="fa-solid fa-circle" style="color:#3c763d;"></i> matches&nbsp;&nbsp;' +
+                '<i class="fa-solid fa-circle" style="color:#c9890a;"></i> different IP, or other names on this IP lack a PTR&nbsp;&nbsp;' +
+                '<i class="fa-solid fa-circle" style="color:#a94442;"></i> no forward record (orphan)' +
+                '</span></div></div>';
     }
 
     $("#statusContent").html(html);

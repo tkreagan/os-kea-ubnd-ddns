@@ -98,6 +98,20 @@ def _ttl_for_ip(lines, ip):
     return None
 
 
+def _ptr_targets(unbound_data, ip):
+    """Return the set of target hostnames (lowercased, no trailing dot) of the
+    PTR records for ip, read from Unbound's local_data. Empty if no reverse."""
+    targets = set()
+    ptr_name = reverse_ptr(ip)
+    if not ptr_name:
+        return targets
+    for line in unbound_data.get(ptr_name, []):
+        parts = line.split()
+        if len(parts) >= 5 and parts[3] == "PTR":
+            targets.add(parts[4].rstrip(".").lower())
+    return targets
+
+
 def _host_entry_ips(lines):
     """Extract A/AAAA IPs from host_entries.conf local-data lines for a name."""
     ips = set()
@@ -124,6 +138,7 @@ def audit_local_data(report_json: bool = False, verbose: bool = False) -> int:
         "kea_error": None,
         "records": [],
         "orphaned_ptrs": [],
+        "ptr_records": [],
     }
 
     host_entries = read_host_entries()
@@ -236,6 +251,20 @@ def audit_local_data(report_json: bool = False, verbose: bool = False) -> int:
             ptr_name = reverse_ptr(ip)
             ptr_registered = bool(ptr_name and ptr_name in unbound_ptr_names)
 
+            # Per-host reverse state: does a PTR for this IP name THIS host?
+            #   none     - no PTR for the IP
+            #   correct  - exactly one PTR, and it names this host
+            #   multiple - IP has >1 PTR and this host is among them (supersedes correct)
+            #   wrong    - PTR(s) exist for the IP but none name this host
+            ptr_targets = _ptr_targets(unbound_data, ip)
+            hn = hostname.rstrip(".").lower()
+            if not ptr_targets:
+                ptr_state = "none"
+            elif hn in ptr_targets:
+                ptr_state = "multiple" if len(ptr_targets) > 1 else "correct"
+            else:
+                ptr_state = "wrong"
+
             if status == "ok" and not ptr_registered:
                 status = "missing-PTR"
 
@@ -253,6 +282,7 @@ def audit_local_data(report_json: bool = False, verbose: bool = False) -> int:
                 "type": record_type,
                 "ttl": ttl,
                 "ptr_registered": ptr_registered,
+                "ptr_state": ptr_state,
                 # Independent attributes (not mutually exclusive) — an entry can
                 # be e.g. both a reservation and a live record. The UI shows these
                 # as columns; "status"/"source" remain for the summary roll-up.
@@ -283,6 +313,50 @@ def audit_local_data(report_json: bool = False, verbose: bool = False) -> int:
             "target": target,
             "status": "orphaned-PTR",
         })
+
+    # ── Reverse (PTR) records: every PTR in Unbound, with forward consistency ──
+    # Forward A/AAAA map from Unbound runtime data (name -> set of IPs).
+    fwd_ips_by_name = {}
+    for name, lines in unbound_data.items():
+        if is_ptr_name(name):
+            continue
+        ips = set()
+        for line in lines:
+            parts = line.split()
+            if len(parts) >= 5 and parts[3] in ("A", "AAAA"):
+                ips.add(parts[4])
+        if ips:
+            fwd_ips_by_name[name.rstrip(".").lower()] = ips
+    names_by_ip = {}
+    for name, ips in fwd_ips_by_name.items():
+        for ip in ips:
+            names_by_ip.setdefault(ip, set()).add(name)
+
+    for ptr_name in sorted(n for n in unbound_data if is_ptr_name(n)):
+        ip = _ip_from_ptr(ptr_name)
+        covered = _ptr_targets(unbound_data, ip) if ip else set()
+        uncovered = (names_by_ip.get(ip, set()) - covered) if ip else set()
+        for line in unbound_data.get(ptr_name, []):
+            parts = line.split()
+            if len(parts) < 5 or parts[3] != "PTR":
+                continue
+            target = parts[4].rstrip(".")
+            target_ips = fwd_ips_by_name.get(target.lower(), set())
+            if not target_ips:
+                fwd_state = "orphan"      # red: target has no forward A/AAAA at all
+            elif ip and ip not in target_ips:
+                fwd_state = "mismatch"    # amber: forward points to a different IP
+            elif uncovered:
+                fwd_state = "partial"     # amber: other names on this IP have no PTR
+            else:
+                fwd_state = "match"       # green: forward matches, full coverage
+            result["ptr_records"].append({
+                "ip": ip,
+                "ptr_name": ptr_name,
+                "target": target,
+                "ttl": parts[1],
+                "fwd_state": fwd_state,
+            })
 
     if report_json:
         print(json.dumps(result, indent=2))
