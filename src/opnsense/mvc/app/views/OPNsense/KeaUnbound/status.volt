@@ -33,6 +33,9 @@
     th.sortable.desc:after   { content: ' \2193'; opacity: 1; }
     .kea-summary td, .kea-summary th { vertical-align: middle; }
     .kea-summary tfoot th { border-top: 2px solid #ddd; }
+    /* Explicit blue — OPNsense's theme renders text-primary/label-primary orange. */
+    .kea-blue            { color: #2c6fbb; }
+    .label.label-kea-blue { background-color: #2c6fbb; }
 </style>
 
 <script>
@@ -52,6 +55,18 @@ $( document ).ready(function() {
             loadAuditData();
         });
     });
+
+    // Manual sync buttons — force a re-sync from Kea, then refresh the audit.
+    function triggerSync(btn, endpoint) {
+        const orig = btn.html();
+        btn.prop("disabled", true).html('<i class="fa fa-spinner fa-spin"></i> Syncing...');
+        ajaxCall(endpoint, {}, function() {
+            btn.prop("disabled", false).html(orig);
+            loadAuditData();
+        });
+    }
+    $("#syncStaticBtn").click(function()  { triggerSync($(this), "/api/keaunbound/general/sync_static"); });
+    $("#syncDynamicBtn").click(function() { triggerSync($(this), "/api/keaunbound/general/sync_dynamic"); });
 
     // Sortable table
     $(document).on("click", "th.sortable", function() {
@@ -116,9 +131,9 @@ function statusBadge(status) {
     const map = {
         'ok':           '<span class="label label-success">Registered</span>',
         'missing-PTR':  '<span class="label label-warning">Missing PTR</span>',
-        'stale':        '<span class="label label-danger">Stale</span>',
-        'orphaned-PTR': '<span class="label label-danger">Orphaned</span>',
-        'static':       '<span class="label label-default">Static</span>',
+        'stale':        '<span class="label label-danger">Possibly Stale</span>',
+        'orphaned-PTR': '<span class="label label-danger">Possible Orphan PTR</span>',
+        'static':       '<span class="label label-kea-blue">Static</span>',
         'unknown':      '<span class="label label-default">Unknown</span>'
     };
     return map[status] || '<span class="label label-default">' + escapeHtml(status) + '</span>';
@@ -149,22 +164,25 @@ function renderAuditData(audit) {
 
     // ── Summary table ─────────────────────────────────────────────────────────
     const summaryRows = [
-        ['Registered', 'text-success', ok,
-         'Forward record (A/AAAA) backed by a current Kea active lease or static reservation (managed in Kea DHCP), with a matching reverse (PTR) record. Nothing to do.'],
-        ['Missing reverse (PTR)', 'text-warning', missing,
+        ['Dynamically Registered', 'text-success', ok,
+         'Forward record (A/AAAA) registered into Unbound by this plugin from a current Kea active lease or static reservation, with a matching reverse (PTR) record. Nothing to do.'],
+        ['Static', 'kea-blue', staticN,
+         'An Unbound host override, or a static DHCP mapping OPNsense keeps in host_entries.conf. Managed by Unbound — this plugin never changes it. (Kea static reservations appear above as Dynamically Registered.)'],
+        ['Missing PTR', 'text-warning', missing,
          'The forward record is registered, but it has no matching reverse (PTR) record.'],
-        ['Static (OPNsense-managed)', 'text-muted', staticN,
-         'An Unbound host override, or a static DHCP mapping OPNsense keeps in host_entries.conf. Managed by Unbound — this plugin never changes it. (Kea static reservations appear above as Registered.)'],
-        ['Stale — can be cleaned', 'text-danger', stale,
-         'Still in Unbound but not backed by any Kea lease, Kea reservation, or Unbound host override.'],
-        ['Orphaned reverse (PTR) — can be cleaned', 'text-danger', orphanN,
-         'A reverse (PTR) record with no matching forward record, and not from Kea or an Unbound host override.'],
+        ['Possibly Stale', 'text-danger', stale,
+         'Still in Unbound but not backed by any Kea lease, Kea reservation, or Unbound host override — so it may be removable (see note below).'],
+        ['Possible Orphan PTR', 'text-danger', orphanN,
+         'A reverse (PTR) record with no matching forward record, and not from Kea or an Unbound host override — possibly removable (see note below).'],
     ];
     if (unknown > 0) {
         summaryRows.push(['Unknown', 'text-muted', unknown,
             'Kea data is unavailable, so staleness cannot be determined right now.']);
     }
-    html += '<table class="table table-condensed kea-summary" style="margin-bottom:16px;">' +
+    html += '<div class="panel panel-default" style="margin-bottom:8px;">' +
+            '<div class="panel-heading"><h4 class="panel-title">DNS Record Summary</h4></div>' +
+            '<div class="panel-body" style="padding:0;">' +
+            '<table class="table table-condensed kea-summary" style="margin-bottom:0;">' +
             '<thead><tr><th>Category</th><th class="text-right">Count</th><th>What it means</th></tr></thead><tbody>';
     summaryRows.forEach(function(r) {
         html += '<tr>' +
@@ -175,8 +193,8 @@ function renderAuditData(audit) {
     });
     html += '</tbody>' +
             '<tfoot><tr><th>Total</th><th class="text-right">' + total + '</th><th></th></tr></tfoot>' +
-            '</table>';
-    html += '<p class="text-muted small" style="margin:-8px 0 16px;">' +
+            '</table></div></div>';
+    html += '<p class="text-muted small" style="margin:0 0 16px;">' +
             '<i class="fa fa-info-circle"></i> <strong>Stale</strong> and <strong>orphaned</strong> entries are not necessarily wrong — ' +
             'they are simply not backed by a Kea lease, a Kea reservation, or an Unbound host override (for example, left over from ' +
             'an expired lease, or added by another tool). Cleaning removes them; anything still in use re-registers on the next lease renewal or sync.' +
@@ -195,15 +213,15 @@ function renderAuditData(audit) {
         updateCleanButton(true, 0);
     } else {
         html += '<p class="text-warning"><i class="fa fa-exclamation-triangle"></i> ' + removable + ' record(s) can be removed: ' +
-                stale + ' stale hostname' + (stale !== 1 ? 's' : '') +
-                (orphanN > 0 ? ', ' + orphanN + ' orphaned PTR' + (orphanN !== 1 ? 's' : '') : '') + '.</p>';
+                stale + ' possibly-stale record' + (stale !== 1 ? 's' : '') +
+                (orphanN > 0 ? ', ' + orphanN + ' possible orphan PTR' + (orphanN !== 1 ? 's' : '') : '') + '.</p>';
         updateCleanButton(true, removable);
 
         // Detail the stale forward records that will be removed.
         if (stale > 0) {
             const staleRecs = records.filter(r => r.status === 'stale')
                 .sort((a, b) => a.hostname.localeCompare(b.hostname));
-            html += '<p class="text-muted" style="margin-bottom:4px;"><strong>Stale records:</strong></p>';
+            html += '<p class="text-muted" style="margin-bottom:4px;"><strong>Possibly stale records:</strong></p>';
             html += '<table class="table table-condensed" style="margin-bottom:12px;"><thead><tr>' +
                     '<th>Hostname</th><th>Type</th><th>IP Address</th><th>TTL</th><th>Source</th>' +
                     '</tr></thead><tbody>';
@@ -220,7 +238,7 @@ function renderAuditData(audit) {
         }
         // Detail the orphaned PTR records that will be removed.
         if (orphanN > 0) {
-            html += '<p class="text-muted" style="margin-bottom:4px;"><strong>Orphaned PTR records:</strong></p>';
+            html += '<p class="text-muted" style="margin-bottom:4px;"><strong>Possible orphan PTR records:</strong></p>';
             html += '<table class="table table-condensed" style="margin-bottom:0;"><thead><tr>' +
                     '<th>PTR Name</th><th>Address</th><th>Type</th><th>TTL</th><th>Points To</th>' +
                     '</tr></thead><tbody>';
@@ -300,14 +318,24 @@ function updateCleanButton(complete, removable) {
 }
 </script>
 
-<div class="content-box" style="padding:10px 15px 5px;">
-    <button id="refreshBtn" class="btn btn-primary btn-sm">
-        <i class="fa fa-refresh"></i> Refresh Now
-    </button>
-    <button id="cleanBtn"   class="btn btn-warning btn-sm" disabled style="margin-left:8px;">
-        <i class="fa fa-trash-o"></i> Clean Stale Records
-    </button>
-    <small class="text-muted" style="margin-left:12px;">Auto-refresh every 30 seconds</small>
+<div class="content-box" style="padding:10px 15px;">
+    <div>
+        <button id="refreshBtn" class="btn btn-primary btn-sm">
+            <i class="fa fa-refresh"></i> Refresh Now
+        </button>
+        <small class="text-muted" style="margin-left:12px;">Auto-refresh every 30 seconds</small>
+    </div>
+    <div style="margin-top:8px;">
+        <button id="syncStaticBtn" class="btn btn-default btn-sm">
+            <i class="fa fa-download"></i> Sync Static DHCP Reservations
+        </button>
+        <button id="syncDynamicBtn" class="btn btn-default btn-sm" style="margin-left:8px;">
+            <i class="fa fa-download"></i> Sync Active DHCP Leases
+        </button>
+        <button id="cleanBtn" class="btn btn-warning btn-sm" disabled style="margin-left:8px;">
+            <i class="fa fa-trash-o"></i> Clean Stale Records
+        </button>
+    </div>
 </div>
 
 <div id="statusLoader" class="content-box" style="text-align:center; padding:20px; display:none;">

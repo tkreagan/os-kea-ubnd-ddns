@@ -46,36 +46,13 @@
                 return dfObj;
             }
         });
-
-        // Manual sync buttons. (The "Clean stale records" action lives on the
-        // Lease Audit tab, next to the records it acts on.)
-        function triggerSync(btnId, endpoint) {
-            const btn = $("#" + btnId);
-            btn.prop("disabled", true);
-            ajaxCall(endpoint, {}, function() {
-                btn.prop("disabled", false);
-            });
-        }
-        $("#sync_static_now").click(function() {
-            triggerSync("sync_static_now", "/api/keaunbound/general/sync_static");
-        });
-        $("#sync_dynamic_now").click(function() {
-            triggerSync("sync_dynamic_now", "/api/keaunbound/general/sync_dynamic");
-        });
+        // The manual Sync and Clean action buttons now live together on the
+        // Lease Audit tab, next to the records they affect.
     });
 </script>
 
 <div class="content-box">
     {{ partial("layout_partials/base_form", ['fields': formGeneralSettings, 'id': 'frm_generalsettings']) }}
-</div>
-
-<div class="content-box" style="padding: 10px 20px;">
-    <button id="sync_static_now" class="btn btn-default" type="button">
-        <i class="fa fa-refresh"></i> {{ lang._('Sync Static Reservations Now') }}
-    </button>
-    <button id="sync_dynamic_now" class="btn btn-default" type="button" style="margin-left: 8px;">
-        <i class="fa fa-refresh"></i> {{ lang._('Sync Dynamic Leases Now') }}
-    </button>
 </div>
 
 {{ partial('layout_partials/base_apply_button', {'data_endpoint': '/api/keaunbound/general/reconfigure', 'data_service_widget': 'keaunbound'}) }}
