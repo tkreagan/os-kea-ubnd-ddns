@@ -31,9 +31,8 @@
     th.sortable:after        { content: ' \2195'; opacity: 0.4; }
     th.sortable.asc:after    { content: ' \2191'; opacity: 1; }
     th.sortable.desc:after   { content: ' \2193'; opacity: 1; }
-    .stat-card    { text-align: center; padding: 12px 8px; }
-    .stat-card h4 { margin: 0 0 4px; font-size: 1.6em; }
-    .stat-card small { font-size: 0.8em; }
+    .kea-summary td, .kea-summary th { vertical-align: middle; }
+    .kea-summary tfoot th { border-top: 2px solid #ddd; }
 </style>
 
 <script>
@@ -115,9 +114,9 @@ function escapeHtml(text) {
 
 function statusBadge(status) {
     const map = {
-        'ok':           '<span class="label label-success">OK</span>',
+        'ok':           '<span class="label label-success">Registered</span>',
         'missing-PTR':  '<span class="label label-warning">Missing PTR</span>',
-        'stale':        '<span class="label label-info">Stale</span>',
+        'stale':        '<span class="label label-danger">Stale</span>',
         'orphaned-PTR': '<span class="label label-danger">Orphaned</span>',
         'static':       '<span class="label label-default">Static</span>',
         'unknown':      '<span class="label label-default">Unknown</span>'
@@ -133,8 +132,10 @@ function renderAuditData(audit) {
     const missing = records.filter(r => r.status === 'missing-PTR').length;
     const stale   = records.filter(r => r.status === 'stale').length;
     const staticN = records.filter(r => r.status === 'static').length;
+    const unknown = records.filter(r => r.status === 'unknown').length;
     const orphanN = orphans.length;
     const removable = stale + orphanN;
+    const total     = records.length + orphanN;
 
     let html = '';
 
@@ -146,14 +147,40 @@ function renderAuditData(audit) {
                 escapeHtml(audit.kea_error) + '</div>';
     }
 
-    // ── Summary stats ────────────────────────────────────────────────────────
-    html += '<div class="row" style="margin-bottom:16px;">';
-    html += statCard(ok,      'OK',           'text-success');
-    html += statCard(missing, 'Missing PTR',  'text-warning');
-    html += statCard(stale,   'Stale',        'text-info');
-    html += statCard(orphanN, 'Orphaned PTR', 'text-danger');
-    html += statCard(staticN, 'Static',       'text-muted');
-    html += '</div>';
+    // ── Summary table ─────────────────────────────────────────────────────────
+    const summaryRows = [
+        ['Registered', 'text-success', ok,
+         'Forward record (A/AAAA) backed by a current Kea active lease or static reservation (managed in Kea DHCP), with a matching reverse (PTR) record. Nothing to do.'],
+        ['Missing reverse (PTR)', 'text-warning', missing,
+         'The forward record is registered, but it has no matching reverse (PTR) record.'],
+        ['Static (OPNsense-managed)', 'text-muted', staticN,
+         'An Unbound host override, or a static DHCP mapping OPNsense keeps in host_entries.conf. Managed by Unbound — this plugin never changes it. (Kea static reservations appear above as Registered.)'],
+        ['Stale — can be cleaned', 'text-danger', stale,
+         'Still in Unbound but not backed by any Kea lease, Kea reservation, or Unbound host override.'],
+        ['Orphaned reverse (PTR) — can be cleaned', 'text-danger', orphanN,
+         'A reverse (PTR) record with no matching forward record, and not from Kea or an Unbound host override.'],
+    ];
+    if (unknown > 0) {
+        summaryRows.push(['Unknown', 'text-muted', unknown,
+            'Kea data is unavailable, so staleness cannot be determined right now.']);
+    }
+    html += '<table class="table table-condensed kea-summary" style="margin-bottom:16px;">' +
+            '<thead><tr><th>Category</th><th class="text-right">Count</th><th>What it means</th></tr></thead><tbody>';
+    summaryRows.forEach(function(r) {
+        html += '<tr>' +
+            '<td><span class="' + r[1] + '"><strong>' + r[0] + '</strong></span></td>' +
+            '<td class="text-right ' + r[1] + '"><strong>' + r[2] + '</strong></td>' +
+            '<td class="text-muted">' + r[3] + '</td>' +
+            '</tr>';
+    });
+    html += '</tbody>' +
+            '<tfoot><tr><th>Total</th><th class="text-right">' + total + '</th><th></th></tr></tfoot>' +
+            '</table>';
+    html += '<p class="text-muted small" style="margin:-8px 0 16px;">' +
+            '<i class="fa fa-info-circle"></i> <strong>Stale</strong> and <strong>orphaned</strong> entries are not necessarily wrong — ' +
+            'they are simply not backed by a Kea lease, a Kea reservation, or an Unbound host override (for example, left over from ' +
+            'an expired lease, or added by another tool). Cleaning removes them; anything still in use re-registers on the next lease renewal or sync.' +
+            '</p>';
 
     // ── Stale / cleanup section ───────────────────────────────────────────────
     html += '<div class="panel panel-default" style="margin-bottom:16px;">' +
@@ -255,14 +282,6 @@ function renderAuditData(audit) {
     }
 
     $("#statusContent").html(html);
-}
-
-function statCard(count, label, colorClass) {
-    return '<div class="col-xs-2 col-sm-2">' +
-           '<div class="panel panel-default stat-card">' +
-           '<h4 class="' + colorClass + '">' + count + '</h4>' +
-           '<small class="text-muted">' + label + '</small>' +
-           '</div></div>';
 }
 
 function updateCleanButton(complete, removable) {

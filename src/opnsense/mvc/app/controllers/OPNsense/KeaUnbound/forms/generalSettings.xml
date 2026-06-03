@@ -107,7 +107,7 @@ For each subnet where you want DDNS, add this to the subnet configuration in Kea
         <id>general.general.enable_auto_clean</id>
         <label>Automatically clean stale DNS records</label>
         <type>checkbox</type>
-        <help>Periodically run the cleanup job to remove stale DNS records from Unbound (entries that don't match any Kea reservation, lease, or OPNsense-managed entry).</help>
+        <help>Periodically run the cleanup job to remove stale DNS records from Unbound (entries that don't match any Kea reservation, lease, or OPNsense-managed entry). Warning: cleanup removes ANY A/AAAA/PTR record in Unbound's runtime local-data that is not backed by Kea or defined as an Unbound Host Override — so records injected directly into Unbound by another tool or script (not through Host Overrides) will be erased. Use the Lease Audit tab to preview exactly what would be removed before enabling this.</help>
     </field>
     <field>
         <id>general.general.auto_clean_interval</id>
