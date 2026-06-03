@@ -26,7 +26,6 @@ import signal
 import socket
 import subprocess
 import sys
-import syslog
 
 _DNSPYTHON_MIN = (2, 8)
 
@@ -58,10 +57,15 @@ except ImportError:
     )
     sys.exit(1)
 
+# Shared logging setup lives with the sync utilities so every plugin component
+# (daemon, sync/audit/clean scripts, start.py) logs with one program tag to the
+# single keaunbound log. The plugin always installs both halves together.
+sys.path.insert(0, "/usr/local/opnsense/scripts/keaunbound")
+from lib.keaunbound_sync import setup_logging  # noqa: E402
+
 # ── Constants ─────────────────────────────────────────────────────────────────
 DEFAULT_PORT         = 53535
 DEFAULT_UNBOUND_CONF = "/var/unbound/unbound.conf"
-SYSLOG_IDENT        = "kea-unbound-ddns"
 # /var/unbound/host_entries.conf is written by OPNsense and contains:
 #   1. Manual host overrides configured in Services → Unbound DNS → Host Overrides
 #   2. Static DHCP reservation hostnames, IF "Register DHCP Static Mappings"
@@ -71,7 +75,6 @@ SYSLOG_IDENT        = "kea-unbound-ddns"
 # We must not touch any record in this file — it is entirely OPNsense-managed.
 DEFAULT_HOST_ENTRIES = "/var/unbound/host_entries.conf"
 UNBOUND_CONTROL      = "/usr/local/sbin/unbound-control"
-LOG_PREFIX           = "[kea-unbound-ddns]"
 
 # ── Argument parsing ──────────────────────────────────────────────────────────
 def parse_args():
@@ -93,49 +96,11 @@ def parse_args():
     return p.parse_args()
 
 # ── Logging ───────────────────────────────────────────────────────────────────
-#
-# Logs go to syslog using LOG_DAEMON facility — the standard facility for
-# system daemons. OPNsense's log viewer shows entries from registered syslog
-# facilities; keaunbound_syslog() in keaunbound.inc registers 'kea-unbound-ddns'
-# so these logs appear in the UI alongside Kea and Unbound logs.
-#
-# In verbose mode, messages also go to stderr for manual testing.
-# The syslog module is used directly (as per OPNsense convention) rather than
-# logging.handlers.SysLogHandler.
-
-_SYSLOG_PRIORITY = {
-    logging.DEBUG:    syslog.LOG_DEBUG,
-    logging.INFO:     syslog.LOG_INFO,
-    logging.WARNING:  syslog.LOG_WARNING,
-    logging.ERROR:    syslog.LOG_ERR,
-    logging.CRITICAL: syslog.LOG_CRIT,
-}
-
-class SyslogHandler(logging.Handler):
-    """logging.Handler that writes to syslog via the syslog module."""
-    def emit(self, record: logging.LogRecord):
-        priority = _SYSLOG_PRIORITY.get(record.levelno, syslog.LOG_INFO)
-        syslog.syslog(priority, self.format(record))
-
-def setup_logging(verbose: bool) -> logging.Logger:
-    syslog.openlog(SYSLOG_IDENT, facility=syslog.LOG_DAEMON)
-
-    logger = logging.getLogger("kea-unbound-ddns")
-    logger.setLevel(logging.DEBUG if verbose else logging.INFO)
-    fmt = logging.Formatter(LOG_PREFIX + " [%(levelname)s] %(message)s")
-
-    # Syslog handler — always active
-    sh = SyslogHandler()
-    sh.setFormatter(fmt)
-    logger.addHandler(sh)
-
-    # Stderr handler — only in verbose mode, useful for manual testing
-    if verbose:
-        se = logging.StreamHandler(sys.stderr)
-        se.setFormatter(fmt)
-        logger.addHandler(se)
-
-    return logger
+# setup_logging() is imported from lib.keaunbound_sync (above) so the daemon and
+# the sync/audit/clean scripts share one implementation and one program tag
+# ('kea-ub'), all landing in the keaunbound log registered by keaunbound_syslog()
+# in keaunbound.inc. It logs via libc syslog (LOG_DAEMON) and, in verbose mode,
+# also mirrors to stderr for manual testing.
 
 # ── unbound-control wrapper ───────────────────────────────────────────────────
 def unbound_control(args: list[str], unbound_conf: str, dry_run: bool,

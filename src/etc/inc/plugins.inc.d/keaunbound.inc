@@ -47,17 +47,31 @@
  * Service / schedule / logging hooks:
  *   keaunbound_services() -- register the daemon for service control
  *   keaunbound_cron()     -- declare the auto-clean schedule (OPNsense cron)
- *   keaunbound_syslog()   -- register the 'kea-unbound-ddns' log facility
+ *   keaunbound_syslog()   -- register the 'kea-ub' log facility
  */
+
+/**
+ * Log a plugin error to syslog under the shared 'kea-ub' program tag so PHP
+ * error paths land in the keaunbound log alongside the daemon and Python tools.
+ */
+function keaunbound_log_error($message)
+{
+    openlog('kea-ub', LOG_PID, LOG_DAEMON);
+    syslog(LOG_ERR, $message);
+    closelog();
+}
 
 function keaunbound_syslog()
 {
     // Key must be a valid syslog-ng identifier (no hyphens). The template
     // generates filter/destination names like f_local_keaunbound and routes
     // logs to /var/log/keaunbound/keaunbound_YYYYMMDD.log.
-    // The facility list matches the syslog ident used by the daemon.
+    // The facility list is the syslog program tag shared by every component
+    // (daemon, Python sync/audit/clean tools, start.py, and PHP error paths).
+    // It must avoid the substring "unbound" — the core resolver filter is
+    // program("unbound") and matches it as a substring — hence 'kea-ub'.
     return ['keaunbound' => ['facility' => [
-        'kea-unbound-ddns',
+        'kea-ub',
     ]]];
 }
 
@@ -224,7 +238,7 @@ function keaunbound_reservation_sync($verbose = false)
 
     if (!file_exists($script)) {
         service_log("KeaUnbound: reservation-sync.py not found at $script\n", $verbose);
-        syslog(LOG_ERR, "keaunbound: reservation-sync.py not found at $script");
+        keaunbound_log_error("reservation-sync.py not found at $script");
         return 1;
     }
 
@@ -233,7 +247,7 @@ function keaunbound_reservation_sync($verbose = false)
 
     if ($ret !== 0) {
         service_log("KeaUnbound: reservation-sync.py failed with exit code $ret\n", $verbose);
-        syslog(LOG_ERR, "keaunbound: reservation-sync.py failed with exit code $ret");
+        keaunbound_log_error("reservation-sync.py failed with exit code $ret");
         return 1;
     } else {
         service_log("KeaUnbound: reservation-sync.py completed successfully\n", $verbose);
@@ -260,7 +274,7 @@ function keaunbound_lease_sync($verbose = false)
 
     if (!file_exists($script)) {
         service_log("KeaUnbound: lease-sync.py not found at $script\n", $verbose);
-        syslog(LOG_ERR, "keaunbound: lease-sync.py not found at $script");
+        keaunbound_log_error("lease-sync.py not found at $script");
         return 1;
     }
 
@@ -269,7 +283,7 @@ function keaunbound_lease_sync($verbose = false)
 
     if ($ret !== 0) {
         service_log("KeaUnbound: lease-sync.py failed with exit code $ret\n", $verbose);
-        syslog(LOG_ERR, "keaunbound: lease-sync.py failed with exit code $ret");
+        keaunbound_log_error("lease-sync.py failed with exit code $ret");
         return 1;
     } else {
         service_log("KeaUnbound: lease-sync.py completed successfully\n", $verbose);

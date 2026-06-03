@@ -13,10 +13,37 @@ import subprocess
 import sys
 import xml.etree.ElementTree as ET
 
-CONFIG_XML     = "/conf/config.xml"
-DAEMON         = "/usr/sbin/daemon"
-SCRIPT         = "/usr/local/sbin/kea-unbound-ddns.py"
-PIDFILE        = "/var/run/kea-unbound-ddns.pid"
+sys.path.insert(0, "/usr/local/opnsense/scripts/keaunbound")
+from lib.keaunbound_sync import setup_logging  # noqa: E402
+
+CONFIG_XML         = "/conf/config.xml"
+DAEMON             = "/usr/sbin/daemon"
+SCRIPT             = "/usr/local/sbin/kea-unbound-ddns.py"
+# Child (listener) PID — used by the service status check (keaunbound_services).
+PIDFILE            = "/var/run/kea-unbound-ddns.pid"
+# daemon(8) supervisor PID — the process that holds the -r respawn loop. Stop and
+# restart must signal THIS (not the child): killing only the child lets the
+# supervisor immediately respawn it, and each start would add another supervisor,
+# so two would fight over the port and crash-loop on "Address already in use".
+SUPERVISOR_PIDFILE = "/var/run/kea-unbound-ddns.supervisor.pid"
+
+# Log to syslog (the keaunbound log) and, because this runs under the configd
+# [start] action, also to stderr (verbose=True) so failures surface in the
+# action output too.
+logger = setup_logging(verbose=True)
+
+def _pid_alive(pidfile):
+    """Return the PID from pidfile if that process is alive, else None.
+    Returns True for a live PID we lack permission to signal (still 'alive')."""
+    try:
+        with open(pidfile) as pf:
+            pid = int(pf.read().strip())
+        os.kill(pid, 0)  # signal 0: existence check only
+        return pid
+    except (FileNotFoundError, ValueError, ProcessLookupError):
+        return None
+    except OSError:
+        return True  # exists but EPERM — treat as alive
 
 def get_config():
     """Read KeaUnbound settings from config.xml. Returns dict with defaults."""
@@ -38,7 +65,7 @@ def get_config():
                 if child is not None and child.text:
                     cfg[key] = child.text.strip()
     except Exception as e:
-        print(f"ERROR: cannot read {CONFIG_XML}: {e}", file=sys.stderr)
+        logger.error("cannot read %s: %s", CONFIG_XML, e)
         sys.exit(1)
     return cfg
 
@@ -46,21 +73,30 @@ def main():
     cfg = get_config()
 
     if cfg["enabled"] != "1":
-        print("kea-unbound-ddns is disabled — not starting.", file=sys.stderr)
+        logger.info("kea-unbound-ddns is disabled — not starting.")
         sys.exit(0)
 
-    # Remove a stale pidfile before handing off to daemon(8). daemon(8) treats
-    # an existing pidfile whose PID is no longer running as an error on some
-    # FreeBSD versions, causing "Execute error" from configd.
-    if os.path.exists(PIDFILE):
-        try:
-            with open(PIDFILE) as pf:
-                pid = int(pf.read().strip())
-            os.kill(pid, 0)  # signal 0: check existence only
-        except (ProcessLookupError, ValueError):
-            os.unlink(PIDFILE)  # process gone — safe to remove
-        except OSError:
-            pass  # process exists (EPERM or similar) — leave pidfile alone
+    # Idempotent start: if a supervisor is already running, do NOT launch a
+    # second one — two daemon(8) supervisors would fight over the port and
+    # crash-loop. (restart stops the old supervisor first, so this only blocks
+    # accidental double-starts, e.g. start invoked while already up.)
+    existing = _pid_alive(SUPERVISOR_PIDFILE)
+    if existing:
+        logger.info("kea-unbound-ddns already running (supervisor pid %s) — not starting another.",
+                    existing)
+        sys.exit(0)
+
+    # Remove stale pidfiles before handing off to daemon(8): a leftover pidfile
+    # whose PID is no longer running makes daemon(8) refuse to start ("process
+    # already running") on some FreeBSD versions, causing "Execute error" from
+    # configd. We've already established the supervisor isn't alive above, so any
+    # surviving pidfile here is stale.
+    for pf in (SUPERVISOR_PIDFILE, PIDFILE):
+        if os.path.exists(pf) and _pid_alive(pf) is None:
+            try:
+                os.unlink(pf)
+            except OSError:
+                pass
 
     # Build kea-unbound-ddns.py argument list
     script_args = [SCRIPT, "--port", cfg["port"]]
@@ -71,24 +107,25 @@ def main():
     # so this is a backstop.)
     if cfg["enable_tsig"] == "1":
         if not cfg["tsig_key_name"] or not cfg["tsig_key_secret"]:
-            print("ERROR: TSIG is enabled but key name/secret is missing — "
-                  "refusing to start. Set the TSIG key or disable TSIG.",
-                  file=sys.stderr)
+            logger.error("TSIG is enabled but key name/secret is missing — "
+                         "refusing to start. Set the TSIG key or disable TSIG.")
             sys.exit(1)
         script_args += [
             "--tsig-key",       f"{cfg['tsig_key_name']}:{cfg['tsig_key_secret']}",
             "--tsig-algorithm", cfg["tsig_algorithm"],
         ]
 
-    # Launch via daemon(8): -f forks to background, -p writes pidfile,
-    # -r restarts on crash (with 5s backoff via -R 5)
-    cmd = [DAEMON, "-f", "-p", PIDFILE, "-r", "-R", "5"] + script_args
+    # Launch via daemon(8): -f forks to background, -p writes the child PID,
+    # -P writes the supervisor PID (so stop/restart can signal the supervisor),
+    # -r restarts the child on crash (with 5s backoff via -R 5).
+    cmd = [DAEMON, "-f", "-p", PIDFILE, "-P", SUPERVISOR_PIDFILE,
+           "-r", "-R", "5"] + script_args
 
     try:
         subprocess.run(cmd, check=True)
-        print("kea-unbound-ddns started.", file=sys.stderr)
+        logger.info("kea-unbound-ddns started (port %s).", cfg["port"])
     except subprocess.CalledProcessError as e:
-        print(f"ERROR: failed to start kea-unbound-ddns: {e}", file=sys.stderr)
+        logger.error("failed to start kea-unbound-ddns: %s", e)
         sys.exit(1)
 
 if __name__ == "__main__":

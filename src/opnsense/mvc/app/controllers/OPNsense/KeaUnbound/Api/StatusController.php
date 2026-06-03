@@ -92,9 +92,12 @@ class StatusController extends ApiControllerBase
         $result = json_decode($jsonOutput, true);
 
         if ($result === null) {
-            // JSON parse failed - script may have errored
-            syslog(LOG_ERR, "keaunbound: audit script failed or returned invalid JSON");
-            syslog(LOG_ERR, "keaunbound: output was: " . $jsonOutput);
+            // JSON parse failed - script may have errored. Tag under the shared
+            // 'kea-ub' program name so these land in the keaunbound log.
+            \openlog('kea-ub', LOG_PID, LOG_DAEMON);
+            \syslog(LOG_ERR, "audit script failed or returned invalid JSON");
+            \syslog(LOG_ERR, "output was: " . $jsonOutput);
+            \closelog();
 
             return [
                 'status' => 'error',

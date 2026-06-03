@@ -20,10 +20,10 @@ from __future__ import annotations
 import ipaddress
 import json
 import logging
-import logging.handlers
 import re
 import subprocess
 import sys
+import syslog
 import time
 import urllib.error
 import urllib.request
@@ -35,7 +35,7 @@ CONFIG_XML = "/conf/config.xml"
 HOST_ENTRIES = "/var/unbound/host_entries.conf"
 UNBOUND_CONTROL = "/usr/local/sbin/unbound-control"
 UNBOUND_CONF = "/var/unbound/unbound.conf"
-SYSLOG_IDENT = "kea-unbound-sync"
+SYSLOG_IDENT = "kea-ub"
 
 # Kea lease "state" enum: 0 = default/active (the only one we register),
 # 1 = declined, 2 = expired-reclaimed.
@@ -62,17 +62,50 @@ class KeaServiceUnavailableError(KeaUnavailableError):
     pass
 
 
+# Map Python logging levels to syslog priorities.
+_SYSLOG_PRIORITY = {
+    logging.DEBUG:    syslog.LOG_DEBUG,
+    logging.INFO:     syslog.LOG_INFO,
+    logging.WARNING:  syslog.LOG_WARNING,
+    logging.ERROR:    syslog.LOG_ERR,
+    logging.CRITICAL: syslog.LOG_CRIT,
+}
+
+
+class SyslogHandler(logging.Handler):
+    """logging.Handler that writes to syslog via the libc syslog module.
+
+    Used in preference to logging.handlers.SysLogHandler because the latter
+    emits only "<PRI>ident: message" over the socket with no real program tag
+    or PID, which syslog-ng mis-attributes — in our case routing our lines into
+    the resolver log (its filter matches the substring "unbound") and never into
+    the keaunbound log. libc syslog() sets a proper program tag via openlog()
+    and includes the PID. Every plugin component (daemon, sync/audit/clean
+    scripts, start.py) shares this handler so all logs carry the same
+    SYSLOG_IDENT tag and land in the one keaunbound log.
+    """
+    def emit(self, record: logging.LogRecord):
+        priority = _SYSLOG_PRIORITY.get(record.levelno, syslog.LOG_INFO)
+        try:
+            syslog.syslog(priority, self.format(record))
+        except Exception:
+            self.handleError(record)
+
+
 def setup_logging(verbose: bool = False) -> logging.Logger:
-    """Set up syslog logging with optional stderr for debugging."""
+    """Set up syslog logging (program tag = SYSLOG_IDENT) via libc syslog, with
+    optional stderr output in verbose mode. Safe to call once per process."""
+    syslog.openlog(SYSLOG_IDENT, syslog.LOG_PID, syslog.LOG_DAEMON)
+
     logger = logging.getLogger(SYSLOG_IDENT)
     logger.setLevel(logging.DEBUG if verbose else logging.INFO)
+    # Drop handlers from any earlier call so a repeated setup_logging() in one
+    # process doesn't duplicate every log line.
+    logger.handlers.clear()
 
-    # Syslog handler
-    handler = logging.handlers.SysLogHandler(
-        address="/var/run/log",
-        facility=logging.handlers.SysLogHandler.LOG_DAEMON
-    )
-    formatter = logging.Formatter(f"{SYSLOG_IDENT}: %(message)s")
+    formatter = logging.Formatter("[%(levelname)s] %(message)s")
+
+    handler = SyslogHandler()
     handler.setFormatter(formatter)
     logger.addHandler(handler)
 
