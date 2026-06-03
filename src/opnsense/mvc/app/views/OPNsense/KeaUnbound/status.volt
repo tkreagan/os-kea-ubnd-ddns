@@ -172,18 +172,41 @@ function renderAuditData(audit) {
                 (orphanN > 0 ? ', ' + orphanN + ' orphaned PTR' + (orphanN !== 1 ? 's' : '') : '') + '.</p>';
         updateCleanButton(true, removable);
 
-        // List the stale names if present
+        // Detail the stale forward records that will be removed.
         if (stale > 0) {
-            const staleNames = records.filter(r => r.status === 'stale').map(r => r.hostname);
-            const unique = [...new Set(staleNames)].sort();
-            html += '<p class="text-muted" style="margin-bottom:4px;"><strong>Stale hostnames:</strong></p><ul style="margin-bottom:8px;">';
-            unique.forEach(n => { html += '<li class="kea-hostname">' + escapeHtml(n) + '</li>'; });
-            html += '</ul>';
+            const staleRecs = records.filter(r => r.status === 'stale')
+                .sort((a, b) => a.hostname.localeCompare(b.hostname));
+            html += '<p class="text-muted" style="margin-bottom:4px;"><strong>Stale records:</strong></p>';
+            html += '<table class="table table-condensed" style="margin-bottom:12px;"><thead><tr>' +
+                    '<th>Hostname</th><th>Type</th><th>IP Address</th><th>TTL</th><th>Source</th>' +
+                    '</tr></thead><tbody>';
+            staleRecs.forEach(function(r) {
+                html += '<tr>' +
+                    '<td class="kea-hostname">' + escapeHtml(r.hostname) + '</td>' +
+                    '<td>' + escapeHtml(r.type) + '</td>' +
+                    '<td class="kea-ip">'       + escapeHtml(r.ip)   + '</td>' +
+                    '<td>' + escapeHtml(r.ttl != null ? String(r.ttl) : '—') + '</td>' +
+                    '<td>' + escapeHtml(r.source) + '</td>' +
+                    '</tr>';
+            });
+            html += '</tbody></table>';
         }
+        // Detail the orphaned PTR records that will be removed.
         if (orphanN > 0) {
-            html += '<p class="text-muted" style="margin-bottom:4px;"><strong>Orphaned PTR records:</strong></p><ul>';
-            orphans.forEach(o => { html += '<li class="kea-hostname">' + escapeHtml(o.ptr_name) + '</li>'; });
-            html += '</ul>';
+            html += '<p class="text-muted" style="margin-bottom:4px;"><strong>Orphaned PTR records:</strong></p>';
+            html += '<table class="table table-condensed" style="margin-bottom:0;"><thead><tr>' +
+                    '<th>PTR Name</th><th>Address</th><th>Type</th><th>TTL</th><th>Points To</th>' +
+                    '</tr></thead><tbody>';
+            orphans.forEach(function(o) {
+                html += '<tr>' +
+                    '<td class="kea-hostname">' + escapeHtml(o.ptr_name) + '</td>' +
+                    '<td class="kea-ip">' + escapeHtml(o.address ? o.address : '—') + '</td>' +
+                    '<td>PTR</td>' +
+                    '<td>' + escapeHtml(o.ttl != null ? String(o.ttl) : '—') + '</td>' +
+                    '<td class="kea-hostname">' + escapeHtml(o.target ? o.target : '—') + '</td>' +
+                    '</tr>';
+            });
+            html += '</tbody></table>';
         }
     }
     html += '</div></div>';
@@ -199,6 +222,7 @@ function renderAuditData(audit) {
                 '<th class="sortable">Hostname</th>' +
                 '<th class="sortable">IP Address</th>' +
                 '<th class="sortable">Type</th>' +
+                '<th class="sortable">TTL</th>' +
                 '<th class="sortable">Source</th>' +
                 '<th class="sortable">Registration</th>' +
                 '<th class="sortable">In Unbound</th>' +
@@ -217,6 +241,7 @@ function renderAuditData(audit) {
                 '<td class="kea-hostname">' + escapeHtml(r.hostname) + '</td>' +
                 '<td class="kea-ip">'       + escapeHtml(r.ip)       + '</td>' +
                 '<td>' + escapeHtml(r.type)   + '</td>' +
+                '<td>' + escapeHtml(r.ttl != null ? String(r.ttl) : '—') + '</td>' +
                 '<td>' + escapeHtml(r.source) + '</td>' +
                 '<td>' + statusBadge(r.status) + '</td>' +
                 '<td>' + inUnbound + '</td>' +

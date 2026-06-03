@@ -68,6 +68,36 @@ def _forward_ips_from_lines(lines):
     return ips
 
 
+def _ip_from_ptr(ptr_name):
+    """Convert a reverse-DNS name back to its IP address string, or '' if it
+    isn't a full, parseable in-addr.arpa / ip6.arpa name (e.g. a delegation)."""
+    name = ptr_name.rstrip(".")
+    if name.endswith(".in-addr.arpa"):
+        labels = name[:-len(".in-addr.arpa")].split(".")
+        if len(labels) == 4 and all(l.isdigit() for l in labels):
+            return ".".join(reversed(labels))
+    elif name.endswith(".ip6.arpa"):
+        nibbles = name[:-len(".ip6.arpa")].split(".")
+        if len(nibbles) == 32 and all(len(n) == 1 for n in nibbles):
+            rev = "".join(reversed(nibbles))
+            groups = [rev[i:i + 4] for i in range(0, 32, 4)]
+            try:
+                return str(ipaddress.ip_address(":".join(groups)))
+            except ValueError:
+                return ""
+    return ""
+
+
+def _ttl_for_ip(lines, ip):
+    """Return the TTL (as a string) of the A/AAAA local_data line for ip, or
+    None. Lines are 'name. TTL IN TYPE rdata' from unbound list_local_data."""
+    for line in lines:
+        parts = line.split()
+        if len(parts) >= 5 and parts[3] in ("A", "AAAA") and parts[4] == ip:
+            return parts[1]
+    return None
+
+
 def _host_entry_ips(lines):
     """Extract A/AAAA IPs from host_entries.conf local-data lines for a name."""
     ips = set()
@@ -214,10 +244,14 @@ def audit_local_data(report_json: bool = False, verbose: bool = False) -> int:
             except ValueError:
                 record_type = "A"
 
+            # TTL is only meaningful for records actually present in Unbound.
+            ttl = _ttl_for_ip(unbound_data.get(hostname, []), ip) if in_unbound else None
+
             result["records"].append({
                 "hostname": hostname,
                 "ip": ip,
                 "type": record_type,
+                "ttl": ttl,
                 "ptr_registered": ptr_registered,
                 "source": source,
                 "in_unbound": in_unbound,
@@ -226,9 +260,20 @@ def audit_local_data(report_json: bool = False, verbose: bool = False) -> int:
 
     for ptr_name in sorted(orphaned_ptr_names):
         lines = unbound_data.get(ptr_name, [])
+        raw = lines[0] if lines else ""
+        # Parse 'ptr. TTL IN PTR target.' for TTL and the target hostname.
+        ttl = None
+        target = ""
+        parts = raw.split()
+        if len(parts) >= 5 and parts[3] == "PTR":
+            ttl = parts[1]
+            target = parts[4].rstrip(".")
         result["orphaned_ptrs"].append({
             "ptr_name": ptr_name,
-            "data": lines[0] if lines else "",
+            "address": _ip_from_ptr(ptr_name),
+            "data": raw,
+            "ttl": ttl,
+            "target": target,
             "status": "orphaned-PTR",
         })
 
