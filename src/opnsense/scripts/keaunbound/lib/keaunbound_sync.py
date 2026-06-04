@@ -41,6 +41,9 @@ CONFIG_XML = "/conf/config.xml"
 HOST_ENTRIES = "/var/unbound/host_entries.conf"
 UNBOUND_CONTROL = "/usr/local/sbin/unbound-control"
 UNBOUND_CONF = "/var/unbound/unbound.conf"
+# "kea-ub" deliberately avoids the substring "unbound": OPNsense's core resolver
+# syslog-ng filter is program("unbound"), which matches as an unanchored substring,
+# so any tag containing "unbound" would be routed into the resolver log instead of ours.
 SYSLOG_IDENT = "kea-ub"
 
 # Kea lease "state" enum: 0 = default/active (the only one we register),

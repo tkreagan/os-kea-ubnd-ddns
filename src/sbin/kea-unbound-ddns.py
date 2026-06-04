@@ -99,8 +99,11 @@ def parse_args():
 # setup_logging() is imported from lib.keaunbound_sync (above) so the daemon and
 # the sync/audit/clean scripts share one implementation and one program tag
 # ('kea-ub'), all landing in the keaunbound log registered by keaunbound_syslog()
-# in keaunbound.inc. It logs via libc syslog (LOG_DAEMON) and, in verbose mode,
-# also mirrors to stderr for manual testing.
+# in keaunbound.inc. The tag is 'kea-ub' rather than anything containing "unbound"
+# because OPNsense's core resolver filter is program("unbound") — an unanchored
+# substring match — which would swallow our log lines into the resolver log.
+# It logs via libc syslog (LOG_DAEMON) and, in verbose mode, also mirrors to
+# stderr for manual testing.
 
 # ── unbound-control wrapper ───────────────────────────────────────────────────
 def unbound_control(args: list[str], unbound_conf: str, dry_run: bool,
