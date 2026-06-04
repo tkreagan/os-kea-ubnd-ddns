@@ -131,7 +131,7 @@ def audit_local_data(report_json: bool = False, verbose: bool = False) -> int:
     Returns 0 on success, non-zero on error.
     """
     logger = setup_logging(verbose)
-    logger.info("Starting local-data audit")
+    logger.debug("Starting local-data audit")
 
     result = {
         "complete": True,
@@ -152,7 +152,7 @@ def audit_local_data(report_json: bool = False, verbose: bool = False) -> int:
             reservations = query_kea_reservations(service=service)
         except KeaServiceUnavailableError as e:
             # Service offline / config unreadable (e.g. dhcp6 not running) — skip.
-            logger.info(f"Skipping {service}: {e}")
+            logger.debug(f"Skipping {service}: {e}")
             continue
         except KeaUnavailableError as e:
             # Kea daemon unreachable — cannot complete the audit.
@@ -404,7 +404,7 @@ def audit_local_data(report_json: bool = False, verbose: bool = False) -> int:
             for orphan in result["orphaned_ptrs"]:
                 print(f"  {orphan['ptr_name']}")
 
-    logger.info("Audit complete")
+    logger.debug("Audit complete")
     return 0
 
 

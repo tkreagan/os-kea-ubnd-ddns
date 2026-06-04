@@ -57,7 +57,7 @@ def sync_leases(dry_run: bool = False, verbose: bool = False) -> int:
             try:
                 leases = query_kea_leases(service=service)
             except KeaServiceUnavailableError as e:
-                logger.info(f"Skipping {service}: {e}")
+                logger.debug(f"Skipping {service}: {e}")
                 continue
             except KeaUnavailableError as e:
                 logger.warning(f"Kea unavailable for {service}: {e}")
@@ -79,7 +79,7 @@ def sync_leases(dry_run: bool = False, verbose: bool = False) -> int:
 
                 # Skip if in host_entries.conf (OPNsense manages it)
                 if is_in_host_entries(hostname, host_entries):
-                    logger.info(f"Skipping {hostname} — in host_entries.conf")
+                    logger.debug(f"Skipping {hostname} — in host_entries.conf")
                     skipped += 1
                     continue
 
