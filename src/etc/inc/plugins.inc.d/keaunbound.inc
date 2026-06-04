@@ -241,7 +241,7 @@ function keaunbound_reservation_sync($verbose = false)
     }
 
     service_log("KeaUnbound: calling $script...\n", $verbose);
-    $ret = mwexec($script . ' 2>&1', true);
+    exec($script . ' 2>&1', $output, $ret);
 
     if ($ret !== 0) {
         service_log("KeaUnbound: reservation-sync.py failed with exit code $ret\n", $verbose);
@@ -277,7 +277,7 @@ function keaunbound_lease_sync($verbose = false)
     }
 
     service_log("KeaUnbound: calling $script...\n", $verbose);
-    $ret = mwexec($script . ' 2>&1', true);
+    exec($script . ' 2>&1', $output, $ret);
 
     if ($ret !== 0) {
         service_log("KeaUnbound: lease-sync.py failed with exit code $ret\n", $verbose);
