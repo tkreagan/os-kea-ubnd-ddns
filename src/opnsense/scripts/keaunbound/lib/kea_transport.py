@@ -1,4 +1,6 @@
 #!/usr/local/bin/python3
+# SPDX-License-Identifier: BSD-2-Clause
+# Copyright (c) 2026 Thomas Reagan
 """
 kea_transport.py -- Connection layer for talking to Kea daemons directly.
 

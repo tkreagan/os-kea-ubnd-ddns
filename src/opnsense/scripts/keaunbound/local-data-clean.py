@@ -1,4 +1,6 @@
 #!/usr/local/bin/python3
+# SPDX-License-Identifier: BSD-2-Clause
+# Copyright (c) 2026 Thomas Reagan
 """
 local-data-clean.py -- Remove stale records from Unbound local_data.
 

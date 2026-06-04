@@ -1,5 +1,6 @@
 {#
- # Copyright (c) 2026 tkr
+ # SPDX-License-Identifier: BSD-2-Clause
+ # Copyright (c) 2026 Thomas Reagan
  # All rights reserved.
  #
  # Redistribution and use in source and binary forms, with or without modification,

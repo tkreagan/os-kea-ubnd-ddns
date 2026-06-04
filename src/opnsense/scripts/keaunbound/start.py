@@ -1,4 +1,6 @@
 #!/usr/local/bin/python3
+# SPDX-License-Identifier: BSD-2-Clause
+# Copyright (c) 2026 Thomas Reagan
 """
 start.py -- Start kea-unbound-ddns.py via daemon(8) with settings from
 the OPNsense model (config.xml //OPNsense/KeaUnbound).

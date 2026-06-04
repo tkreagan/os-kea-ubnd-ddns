@@ -1,4 +1,6 @@
 #!/usr/local/bin/python3
+# SPDX-License-Identifier: BSD-2-Clause
+# Copyright (c) 2026 Thomas Reagan
 """
 lease-sync.py -- Register Kea active leases in Unbound.
 
