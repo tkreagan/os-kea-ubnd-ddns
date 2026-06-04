@@ -46,7 +46,7 @@ from lib.keaunbound_sync import (
     read_host_entries,
     unbound_list_local_data,
     unbound_control,
-    collect_kea_ips,
+    collect_kea_pairs,
     find_stale_records,
     setup_logging,
     query_kea_reservations,
@@ -222,13 +222,13 @@ def clean_stale_records(interactive: bool = False, dry_run: bool = False, verbos
 
     # Stale detection requires authoritative Kea data; never guess without it.
     try:
-        kea_ips = collect_kea_ips()
+        kea_pairs = collect_kea_pairs()
     except KeaUnavailableError as e:
         logger.error(f"Kea unavailable: {e}")
         logger.error("Cannot safely identify stale records without Kea data — aborting")
         return 1
 
-    stale_names, orphaned_ptrs = find_stale_records(unbound_data, kea_ips, host_entries)
+    stale_names, orphaned_ptrs = find_stale_records(unbound_data, kea_pairs, host_entries)
 
     total_stale = len(stale_names) + len(orphaned_ptrs)
 

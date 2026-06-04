@@ -184,19 +184,21 @@ def audit_local_data(report_json: bool = False, verbose: bool = False) -> int:
         result["kea_error"] = result["kea_error"] or "No Kea service (dhcp4/dhcp6) responded"
 
     # IP indexes per hostname, by source
-    kea_ips = set()
+    kea_pairs = set()
     res_ips_by_host = {}
     lease_ips_by_host = {}
     for res in kea_reservations:
         for ip in (res["ip"], res["ipv6"]):
             if ip:
-                kea_ips.add(ip)
                 res_ips_by_host.setdefault(res["hostname"], set()).add(ip)
+                if res["hostname"]:
+                    kea_pairs.add((res["hostname"], ip))
     for lease in kea_leases:
         for ip in (lease["ip"], lease["ipv6"]):
             if ip:
-                kea_ips.add(ip)
                 lease_ips_by_host.setdefault(lease["hostname"], set()).add(ip)
+                if lease["hostname"]:
+                    kea_pairs.add((lease["hostname"], ip))
 
     unbound_ips_by_host = {}
     for name, lines in unbound_data.items():
@@ -218,7 +220,7 @@ def audit_local_data(report_json: bool = False, verbose: bool = False) -> int:
     stale_names = set()
     orphaned_ptr_names = set()
     if result["complete"]:
-        stale_names, orphaned_ptr_names = find_stale_records(unbound_data, kea_ips, host_entries)
+        stale_names, orphaned_ptr_names = find_stale_records(unbound_data, kea_pairs, host_entries)
 
     all_hostnames = (set(res_ips_by_host) | set(lease_ips_by_host)
                      | set(unbound_ips_by_host) | set(host_ips_by_host))

@@ -442,18 +442,23 @@ def _forward_ips(unbound_data: Dict[str, List[str]]) -> Dict[str, Set[str]]:
     return forward_ips
 
 
-def find_stale_records(unbound_data: Dict[str, List[str]], kea_ips: Set[str],
+def find_stale_records(unbound_data: Dict[str, List[str]],
+                       kea_pairs: Set[Tuple[str, str]],
                        host_entries: Dict[str, List[str]]) -> Tuple[Set[str], Set[str]]:
     """
     Single source of truth for what cleanup removes — used by both the audit
     (to show the preview) and the clean script (to act). Returns
     (stale_names, orphaned_ptrs):
 
-      stale_names   -- forward (A/AAAA) owner names whose every IP is absent
-                       from Kea and which are not OPNsense-managed.
+      stale_names   -- forward (A/AAAA) owner names where no (name, ip) pair is
+                       known to Kea and which are not OPNsense-managed.
       orphaned_ptrs -- PTR owner names not backed by a *surviving* forward
                        record (i.e. no forward maps to them once stale forwards
                        are removed), and not OPNsense-managed.
+
+    Using per-(hostname, ip) pairs rather than a flat IP set means a record like
+    "host-A → IP-X" is correctly flagged stale when Kea's IP-X is leased to a
+    different host-B — IP-X is in Kea's address space, but not for host-A.
 
     Computing orphans against surviving forwards means a PTR whose only forward
     is itself stale is correctly flagged for removal alongside it, while a PTR
@@ -461,12 +466,12 @@ def find_stale_records(unbound_data: Dict[str, List[str]], kea_ips: Set[str],
     """
     forward_ips = _forward_ips(unbound_data)
 
-    # Stale forwards: no IP backed by Kea, not OPNsense-managed.
+    # Stale forwards: no (name, ip) pair backed by Kea, not OPNsense-managed.
     stale_names: Set[str] = set()
     for name, ips in forward_ips.items():
         if is_in_host_entries(name, host_entries):
             continue
-        if not (ips & kea_ips):
+        if not any((name, ip) in kea_pairs for ip in ips):
             stale_names.add(name)
 
     # PTR names that a surviving (kept) forward still points to.
@@ -491,13 +496,13 @@ def find_stale_records(unbound_data: Dict[str, List[str]], kea_ips: Set[str],
     return stale_names, orphaned_ptrs
 
 
-def collect_kea_ips(logger: Optional[logging.Logger] = None) -> Set[str]:
+def collect_kea_pairs(logger: Optional[logging.Logger] = None) -> Set[Tuple[str, str]]:
     """
-    Collect every IP Kea knows about (reservations + active leases, v4 and v6).
-    Raises KeaUnavailableError if Kea cannot be reached — callers that clean
-    records must not proceed without this data.
+    Collect every (hostname, ip) pair Kea knows about (reservations + active
+    leases, v4 and v6).  Raises KeaUnavailableError if Kea cannot be reached —
+    callers that clean records must not proceed without this data.
     """
-    kea_ips: Set[str] = set()
+    kea_pairs: Set[Tuple[str, str]] = set()
     any_ok = False
     for service in ("dhcp4", "dhcp6"):
         try:
@@ -512,15 +517,13 @@ def collect_kea_ips(logger: Optional[logging.Logger] = None) -> Set[str]:
         leases = query_kea_leases(service=service)
         any_ok = True
         for res in reservations:
-            if res["ip"]:
-                kea_ips.add(res["ip"])
-            if res["ipv6"]:
-                kea_ips.add(res["ipv6"])
+            for ip in (res["ip"], res["ipv6"]):
+                if ip and res["hostname"]:
+                    kea_pairs.add((res["hostname"], ip))
         for lease in leases:
-            if lease["ip"]:
-                kea_ips.add(lease["ip"])
-            if lease["ipv6"]:
-                kea_ips.add(lease["ipv6"])
+            for ip in (lease["ip"], lease["ipv6"]):
+                if ip and lease["hostname"]:
+                    kea_pairs.add((lease["hostname"], ip))
     if not any_ok:
         raise KeaUnavailableError("No Kea service (dhcp4/dhcp6) responded")
-    return kea_ips
+    return kea_pairs
