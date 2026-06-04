@@ -9,6 +9,7 @@ the appropriate daemon(8) + kea-unbound-ddns.py command.
 """
 
 import os
+import socket
 import subprocess
 import sys
 import xml.etree.ElementTree as ET
@@ -32,6 +33,18 @@ SUPERVISOR_PIDFILE = "/var/run/kea-unbound-ddns.supervisor.pid"
 # action output too.
 logger = setup_logging(verbose=True)
 
+def _port_in_use(port: int) -> bool:
+    """Return True if UDP port is already bound on 127.0.0.1."""
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        s.bind(("127.0.0.1", port))
+        return False
+    except OSError:
+        return True
+    finally:
+        s.close()
+
+
 def _pid_alive(pidfile):
     """Return the PID from pidfile if that process is alive, else None.
     Returns True for a live PID we lack permission to signal (still 'alive')."""
@@ -54,6 +67,7 @@ def get_config():
         "tsig_key_name":              "",
         "tsig_key_secret":            "",
         "tsig_algorithm":             "HMAC-SHA256",
+        "aggressive_cleanup":         "0",
     }
     try:
         tree = ET.parse(CONFIG_XML)
@@ -76,15 +90,26 @@ def main():
         logger.info("kea-unbound-ddns is disabled — not starting.")
         sys.exit(0)
 
-    # Idempotent start: if a supervisor is already running, do NOT launch a
-    # second one — two daemon(8) supervisors would fight over the port and
-    # crash-loop. (restart stops the old supervisor first, so this only blocks
-    # accidental double-starts, e.g. start invoked while already up.)
+    # Idempotent start: refuse to launch a second supervisor.
+    # Two-layer check:
+    #   1. Supervisor pidfile — catches the normal case where stop ran cleanly.
+    #   2. Port availability — catches the pathological case where an orphaned
+    #      process is still holding the port after a failed stop (e.g. pidfile
+    #      was deleted but the process didn't die). Without this, start.py would
+    #      launch a new daemon(8) supervisor that immediately crash-loops on
+    #      "Address already in use", spamming the log every 5 seconds.
     existing = _pid_alive(SUPERVISOR_PIDFILE)
     if existing:
         logger.info("kea-unbound-ddns already running (supervisor pid %s) — not starting another.",
                     existing)
         sys.exit(0)
+
+    port = int(cfg["port"])
+    if _port_in_use(port):
+        logger.error(
+            "Port %d is already in use — an old instance may still be running. "
+            "Run 'configctl keaunbound stop' to clear it before starting.", port)
+        sys.exit(1)
 
     # Remove stale pidfiles before handing off to daemon(8): a leftover pidfile
     # whose PID is no longer running makes daemon(8) refuse to start ("process
@@ -114,6 +139,9 @@ def main():
             "--tsig-key",       f"{cfg['tsig_key_name']}:{cfg['tsig_key_secret']}",
             "--tsig-algorithm", cfg["tsig_algorithm"],
         ]
+
+    if cfg["aggressive_cleanup"] == "1":
+        script_args.append("--aggressive-cleanup")
 
     # Launch via daemon(8): -f forks to background, -p writes the child PID,
     # -P writes the supervisor PID (so stop/restart can signal the supervisor),

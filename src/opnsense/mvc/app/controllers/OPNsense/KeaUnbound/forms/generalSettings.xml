@@ -104,6 +104,16 @@ For each subnet where you want DDNS, add this to the subnet configuration in Kea
     </field>
 
     <field>
+        <type>header</type>
+        <label>DNS Record Cleaning</label>
+    </field>
+    <field>
+        <id>general.general.aggressive_cleanup</id>
+        <label>Clean up old IPs on lease update</label>
+        <type>checkbox</type>
+        <help>When a new DHCP lease is registered via DDNS UPDATE, remove any previous IP addresses for that hostname that are no longer in Kea's lease or reservation table. This handles the common case where Kea issues a client a new IP without sending a DNS DELETE for the old one (standard Kea behaviour on IP change). Best-effort: the ADD is always recorded and the DDNS response is always sent regardless of whether cleanup succeeds. Requires Kea to be reachable at the time of the update.</help>
+    </field>
+    <field>
         <id>general.general.enable_auto_clean</id>
         <label>Automatically clean stale DNS records</label>
         <type>checkbox</type>

@@ -88,6 +88,19 @@
                 <Required>Y</Required>
             </sync_dynamic_leases>
 
+            <!-- Remove previous IPs for a hostname when a new lease is
+                 registered via DDNS ADD. After each successful A/AAAA
+                 registration, query Kea for all IPs that hostname currently
+                 holds and remove any extras from Unbound that are no longer
+                 backed by an active lease or reservation. Handles the common
+                 case where Kea issues a client a new IP without sending a
+                 DELETE for the old one. Best-effort: ADD outcome is unaffected
+                 regardless of whether cleanup succeeds or Kea is reachable. -->
+            <aggressive_cleanup type="BooleanField">
+                <Default>1</Default>
+                <Required>Y</Required>
+            </aggressive_cleanup>
+
             <!-- Automatically clean stale DNS records from Unbound.
                  When enabled, the local-data-clean.py script runs periodically
                  to remove stale records (entries in Unbound that don't match

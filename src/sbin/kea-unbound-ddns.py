@@ -89,6 +89,10 @@ def parse_args():
                    help="TSIG key in NAME:SECRET format (base64 secret)")
     p.add_argument("--tsig-algorithm", default="HMAC-SHA256",
                    help="TSIG algorithm (default: HMAC-SHA256)")
+    p.add_argument("--aggressive-cleanup", action="store_true",
+                   help="After a successful A/AAAA ADD, remove stale IPs for "
+                        "that hostname from Unbound (IPs no longer in Kea). "
+                        "Best-effort: ADD outcome is unaffected if cleanup fails.")
     p.add_argument("--dry-run", "-n", action="store_true",
                    help="Parse and log updates but do not call unbound-control")
     p.add_argument("--verbose", "-v", action="store_true",
@@ -312,9 +316,39 @@ def query_unbound(name: str, record_type: str, logger: logging.Logger,
         return []
 
 # ── Update processing ─────────────────────────────────────────────────────────
+CLEANUP_SCRIPT = "/usr/local/opnsense/scripts/keaunbound/local-data-clean.py"
+
+
+def _cleanup_host(hostname: str, new_ip: str, logger: logging.Logger) -> None:
+    """
+    Invoke local-data-clean.py --hostname after a successful A/AAAA ADD to
+    remove stale IPs for that hostname from Unbound.
+
+    Best-effort: errors are logged but never propagate — the ADD already
+    succeeded and the DDNS response has been (or will be) sent. The new_ip
+    is passed via --keep-ip so it is always preserved even if Kea's lease DB
+    hasn't fully committed the new binding yet.
+    """
+    cmd = [sys.executable, CLEANUP_SCRIPT,
+           "--hostname", hostname, "--keep-ip", new_ip]
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
+        for line in result.stdout.strip().splitlines():
+            logger.info("[cleanup] %s", line)
+        if result.returncode != 0:
+            logger.warning("[cleanup] script exited %d for %s", result.returncode, hostname)
+        if result.stderr.strip():
+            logger.debug("[cleanup] stderr: %s", result.stderr.strip())
+    except subprocess.TimeoutExpired:
+        logger.warning("[cleanup] timed out for %s", hostname)
+    except Exception as e:
+        logger.warning("[cleanup] failed for %s: %s", hostname, e)
+
+
 def process_update(msg: dns.message.Message, unbound_conf: str,
                    dry_run: bool, logger: logging.Logger,
-                   static_files: list[str]) -> int:
+                   static_files: list[str],
+                   aggressive_cleanup: bool = False) -> int:
     """
     Process a DNS UPDATE message. Returns DNS RCODE to send back.
     Update section lives in msg.authority for dnspython parsed UPDATE messages.
@@ -450,6 +484,12 @@ def process_update(msg: dns.message.Message, unbound_conf: str,
                             unbound_control(["local_data", ptr_record],
                                             unbound_conf, dry_run, logger)
                         added += 1
+                        # After registering the new IP, remove any stale IPs
+                        # for this hostname that Kea did not DELETE (e.g. when
+                        # a client renews at a new address). Best-effort: the
+                        # ADD already succeeded; cleanup failures are logged only.
+                        if aggressive_cleanup:
+                            _cleanup_host(name, rdata, logger)
                     else:
                         errors += 1
 
@@ -583,7 +623,8 @@ def main():
         logger.debug("DNS UPDATE from %s id=%d", addr, msg.id)
 
         # Process the update
-        rcode = process_update(msg, args.unbound_conf, args.dry_run, logger, static_files)
+        rcode = process_update(msg, args.unbound_conf, args.dry_run, logger,
+                               static_files, args.aggressive_cleanup)
 
         # Send response
         try:
