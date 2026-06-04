@@ -1,0 +1,38 @@
+<?xml version="1.0"?>
+<!-- Full-featured OPNsense config stub for unit tests -->
+<opnsense>
+  <system>
+    <domain>lan</domain>
+  </system>
+  <OPNsense>
+    <KeaUnbound>
+      <general>
+        <enabled>1</enabled>
+        <port>53535</port>
+        <enable_tsig>0</enable_tsig>
+        <tsig_key_name></tsig_key_name>
+        <tsig_key_secret></tsig_key_secret>
+        <tsig_algorithm>HMAC-SHA256</tsig_algorithm>
+        <aggressive_cleanup>0</aggressive_cleanup>
+        <sync_static_reservations>1</sync_static_reservations>
+        <sync_dynamic_leases>1</sync_dynamic_leases>
+        <enable_auto_clean>1</enable_auto_clean>
+        <auto_clean_interval>h6</auto_clean_interval>
+      </general>
+    </KeaUnbound>
+    <Kea>
+      <dhcp4>
+        <general>
+          <enabled>1</enabled>
+          <manual_config>0</manual_config>
+        </general>
+      </dhcp4>
+      <dhcp6>
+        <general>
+          <enabled>1</enabled>
+          <manual_config>0</manual_config>
+        </general>
+      </dhcp6>
+    </Kea>
+  </OPNsense>
+</opnsense>

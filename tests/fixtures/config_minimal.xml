@@ -1,0 +1,21 @@
+<?xml version="1.0"?>
+<!-- Minimal OPNsense config: plugin enabled, all defaults -->
+<opnsense>
+  <system>
+    <domain>lan</domain>
+  </system>
+  <OPNsense>
+    <KeaUnbound>
+      <general>
+        <enabled>1</enabled>
+      </general>
+    </KeaUnbound>
+    <Kea>
+      <dhcp4>
+        <general>
+          <enabled>1</enabled>
+        </general>
+      </dhcp4>
+    </Kea>
+  </OPNsense>
+</opnsense>

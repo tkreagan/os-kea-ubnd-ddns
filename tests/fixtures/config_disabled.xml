@@ -1,0 +1,14 @@
+<?xml version="1.0"?>
+<!-- OPNsense config with plugin disabled -->
+<opnsense>
+  <system>
+    <domain>lan</domain>
+  </system>
+  <OPNsense>
+    <KeaUnbound>
+      <general>
+        <enabled>0</enabled>
+      </general>
+    </KeaUnbound>
+  </OPNsense>
+</opnsense>

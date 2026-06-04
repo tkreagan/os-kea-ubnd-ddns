@@ -2,5 +2,10 @@ __pycache__/
 *.pyc
 .DS_Store
 
+# Test runtime artifacts
+tests/.env
+tests/results/
+*.txz
+
 # Private agent/dev working notes — not for the repo.
 CLAUDE.md

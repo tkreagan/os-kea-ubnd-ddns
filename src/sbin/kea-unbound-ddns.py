@@ -582,7 +582,9 @@ def parse_tsig_key(spec: str | None, algorithm: str = "HMAC-SHA256") -> dict | N
               f"Valid options: {', '.join(algo_map)}", file=sys.stderr)
         sys.exit(1)
 
-    return dns.tsigkeyring.make_keyring({name: secret}, algorithm=algo)
+    # dns.tsigkeyring.from_text() accepts {name: (algorithm, base64_secret)}
+    # and returns a keyring usable by dnspython's TSIG implementation.
+    return dns.tsigkeyring.from_text({name: (algo, secret)})
 
 # ── Signal handling ───────────────────────────────────────────────────────────
 _running = True

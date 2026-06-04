@@ -1,0 +1,28 @@
+<?xml version="1.0"?>
+<!-- OPNsense config with TSIG authentication enabled -->
+<opnsense>
+  <system>
+    <domain>lan</domain>
+  </system>
+  <OPNsense>
+    <KeaUnbound>
+      <general>
+        <enabled>1</enabled>
+        <port>53535</port>
+        <enable_tsig>1</enable_tsig>
+        <tsig_key_name>testkey</tsig_key_name>
+        <!-- base64("testsecret") = dGVzdHNlY3JldA== -->
+        <tsig_key_secret>dGVzdHNlY3JldA==</tsig_key_secret>
+        <tsig_algorithm>HMAC-SHA256</tsig_algorithm>
+        <aggressive_cleanup>0</aggressive_cleanup>
+      </general>
+    </KeaUnbound>
+    <Kea>
+      <dhcp4>
+        <general>
+          <enabled>1</enabled>
+        </general>
+      </dhcp4>
+    </Kea>
+  </OPNsense>
+</opnsense>
