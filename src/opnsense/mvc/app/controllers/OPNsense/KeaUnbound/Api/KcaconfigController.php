@@ -509,25 +509,42 @@ class KcaconfigController extends ApiControllerBase
         ];
     }
 
+    // Whether a Kea daemon is enabled in OPNsense (//OPNsense/Kea/<svc>/general/enabled).
+    private function isServiceEnabled($service)
+    {
+        if (!file_exists($this->config_file)) {
+            return false;
+        }
+        $xml = simplexml_load_file($this->config_file);
+        if ($xml === false) {
+            return false;
+        }
+        $n = $xml->xpath("//OPNsense/Kea/{$service}/general/enabled");
+        return !empty($n) && (string)$n[0] === '1';
+    }
+
     /**
      * Describe the control channel resolved for a daemon, for display on the
      * Config Check page. `$reachable` is whether config-get actually succeeded.
+     * `enabled` lets the UI skip the reachability dot for daemons that are not
+     * supposed to be running (e.g. DHCPv6 off), so a disabled service is not
+     * shown as a problem.
      */
     private function describeConnection($service, $reachable)
     {
-        $desc = $this->resolveKeaSocket($service);
-        if ($desc === null) {
-            return ['method' => 'none', 'detail' => null, 'reachable' => $reachable];
-        }
-        if ($desc['type'] === 'unix') {
-            return ['method' => 'unix', 'detail' => $desc['path'], 'reachable' => $reachable];
-        }
-        $scheme = !empty($desc['tls']) ? 'https' : 'http';
-        return [
-            'method'    => 'http',
-            'detail'    => "{$scheme}://{$desc['host']}:{$desc['port']}",
+        $base = [
+            'enabled'   => $this->isServiceEnabled($service),
             'reachable' => $reachable,
         ];
+        $desc = $this->resolveKeaSocket($service);
+        if ($desc === null) {
+            return $base + ['method' => 'none', 'detail' => null];
+        }
+        if ($desc['type'] === 'unix') {
+            return $base + ['method' => 'unix', 'detail' => $desc['path']];
+        }
+        $scheme = !empty($desc['tls']) ? 'https' : 'http';
+        return $base + ['method' => 'http', 'detail' => "{$scheme}://{$desc['host']}:{$desc['port']}"];
     }
 
     // ── Public action ─────────────────────────────────────────────────────────

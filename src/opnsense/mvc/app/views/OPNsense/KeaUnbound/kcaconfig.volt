@@ -102,8 +102,14 @@ function bucketBadge(status) {
 }
 
 // One "DHCPv4: <method> <path/url>" line with a reachable indicator dot.
+// The dot is only shown for daemons that are enabled in Kea — a disabled
+// service (e.g. DHCPv6 off) is reported as such, not flagged as unreachable.
 function connLine(label, conn) {
     if (!conn) return '';
+    if (!conn.enabled) {
+        return '<div class="ku-row"><strong>' + label + ':</strong> ' +
+               '<span class="text-muted">service not enabled in Kea</span></div>';
+    }
     let val;
     if (conn.method === 'unix') {
         val = '<span class="text-muted">unix socket</span> <code>' + escapeHtml(conn.detail) + '</code>';
