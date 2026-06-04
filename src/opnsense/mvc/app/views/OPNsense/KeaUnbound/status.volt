@@ -77,10 +77,12 @@ $( document ).ready(function() {
     });
 
     $("#cleanBtn").click(function() {
-        if (!confirm("Remove stale and orphaned DNS records from Unbound?\n\nThe stale set is recomputed server-side before removal.")) {
-            return;
-        }
-        const btn = $(this);
+        $("#cleanConfirmModal").modal("show");
+    });
+
+    $("#cleanConfirmBtn").click(function() {
+        $("#cleanConfirmModal").modal("hide");
+        const btn = $("#cleanBtn");
         btn.prop("disabled", true).html('<i class="fa fa-spinner fa-spin"></i> Cleaning...');
         ajaxCall("/api/keaunbound/general/clean", {}, function() {
             loadAuditData();
@@ -111,8 +113,10 @@ $( document ).ready(function() {
 
         const rows = table.find("tbody tr").toArray();
         rows.sort(function(a, b) {
-            const va = $(a).children("td").eq(col).text().trim();
-            const vb = $(b).children("td").eq(col).text().trim();
+            const cellA = $(a).children("td").eq(col);
+            const cellB = $(b).children("td").eq(col);
+            const va = cellA.data("sort") !== undefined ? String(cellA.data("sort")) : cellA.text().trim();
+            const vb = cellB.data("sort") !== undefined ? String(cellB.data("sort")) : cellB.text().trim();
             return asc ? va.localeCompare(vb) : vb.localeCompare(va);
         });
         table.find("tbody").empty().append(rows);
@@ -177,6 +181,14 @@ function ptrIcon(state) {
         default: // 'none'
             return '<i class="fa-regular fa-circle" style="color:#999;" title="No reverse (PTR) record for this IP"></i>';
     }
+}
+
+// Sort keys for icon columns — lower = "better" so ascending sorts best-first.
+function ptrSortKey(state) {
+    return {correct: '1', multiple: '2', wrong: '3', none: '4'}[state] || '4';
+}
+function fwdSortKey(state) {
+    return {match: '1', partial: '2', mismatch: '3', orphan: '4'}[state] || '4';
 }
 
 // Forward-consistency icon for a PTR record.
@@ -346,15 +358,30 @@ function renderAuditData(audit) {
                 '<td class="kea-ip">'       + escapeHtml(r.ip)       + '</td>' +
                 '<td>' + escapeHtml(r.type) + '</td>' +
                 '<td>' + escapeHtml(r.ttl != null ? String(r.ttl) : '—') + '</td>' +
-                '<td class="kea-flag">' + ptrIcon(r.ptr_state) + '</td>' +
-                '<td class="kea-flag">' + flag(r.leased, '#3c763d') + '</td>' +
-                '<td class="kea-flag">' + flag(r.live, '#3c763d') + '</td>' +
-                '<td class="kea-flag">' + flag(r.reserved, '#2c6fbb') + '</td>' +
-                '<td class="kea-flag">' + flag(r.override, '#2c6fbb') + '</td>' +
+                '<td class="kea-flag" data-sort="' + ptrSortKey(r.ptr_state) + '">' + ptrIcon(r.ptr_state) + '</td>' +
+                '<td class="kea-flag" data-sort="' + (r.leased   ? '1' : '0') + '">' + flag(r.leased,   '#3c763d') + '</td>' +
+                '<td class="kea-flag" data-sort="' + (r.live     ? '1' : '0') + '">' + flag(r.live,     '#3c763d') + '</td>' +
+                '<td class="kea-flag" data-sort="' + (r.reserved ? '1' : '0') + '">' + flag(r.reserved, '#2c6fbb') + '</td>' +
+                '<td class="kea-flag" data-sort="' + (r.override ? '1' : '0') + '">' + flag(r.override, '#2c6fbb') + '</td>' +
                 '</tr>';
         });
 
-        html += '</tbody></table></div></div></div>';
+        html += '</tbody></table></div>' +
+                '<div class="panel-body" style="padding:6px 12px 8px;">' +
+                '<span class="text-muted small">' +
+                'PTR:&nbsp;&nbsp;' +
+                '<i class="fa-solid fa-circle" style="color:#3c763d;"></i> correct&nbsp;&nbsp;' +
+                '<i class="fa-solid fa-circle-nodes" style="color:#c9890a;"></i> multiple (one matches)&nbsp;&nbsp;' +
+                '<i class="fa-regular fa-circle-xmark" style="color:#a94442;"></i> wrong (IP has a PTR, none name this host)&nbsp;&nbsp;' +
+                '<i class="fa-regular fa-circle" style="color:#999;"></i> none' +
+                '</span>' +
+                '<br><span class="text-muted small">' +
+                'Flags:&nbsp;&nbsp;' +
+                '<i class="fa-solid fa-circle" style="color:#3c763d;"></i> yes&nbsp;' +
+                '<i class="fa-regular fa-circle" style="color:#3c763d;"></i> no&nbsp;&mdash; green = active lease / live record&nbsp;&nbsp;' +
+                '<i class="fa-solid fa-circle" style="color:#2c6fbb;"></i> yes&nbsp;' +
+                '<i class="fa-regular fa-circle" style="color:#2c6fbb;"></i> no&nbsp;&mdash; blue = static reservation / config override' +
+                '</span></div></div>';
     } else {
         html += '<div class="alert alert-info">No DNS records found.</div>';
     }
@@ -381,10 +408,13 @@ function renderAuditData(audit) {
             const ttls = tgts.map(function(t) {
                 return '<div>' + escapeHtml(t.ttl != null ? String(t.ttl) : '—') + '</div>';
             }).join('');
+            const worstFwd = tgts.reduce(function(w, t) {
+                const k = fwdSortKey(t.fwd_state); return k > w ? k : w;
+            }, '0');
             html += '<tr>' +
                 '<td class="kea-ip">' + escapeHtml(p.ip ? p.ip : '—') + '</td>' +
                 '<td><span class="kea-hostname kea-revname" title="' + escapeHtml(p.ptr_name) + '">' + escapeHtml(p.ptr_name) + '</span></td>' +
-                '<td class="kea-hostname">' + pts + '</td>' +
+                '<td class="kea-hostname" data-sort="' + worstFwd + '">' + pts + '</td>' +
                 '<td>' + ttls + '</td>' +
                 '</tr>';
         });
@@ -416,6 +446,27 @@ function updateCleanButton(complete, removable) {
     }
 }
 </script>
+
+<div class="modal fade" id="cleanConfirmModal" tabindex="-1" role="dialog" aria-labelledby="cleanConfirmModalLabel">
+    <div class="modal-dialog" role="document">
+        <div class="modal-content">
+            <div class="modal-header">
+                <button type="button" class="close" data-dismiss="modal" aria-label="Close"><span aria-hidden="true">&times;</span></button>
+                <h4 class="modal-title" id="cleanConfirmModalLabel">Clean Stale Records</h4>
+            </div>
+            <div class="modal-body">
+                <p>Remove stale and orphaned DNS records from Unbound?</p>
+                <p class="text-muted">The stale set is recomputed server-side before removal. Records still in use will re-register on the next lease renewal or sync.</p>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-default" data-dismiss="modal">Cancel</button>
+                <button type="button" class="btn btn-warning" id="cleanConfirmBtn">
+                    <i class="fa fa-trash-o"></i> Clean Records
+                </button>
+            </div>
+        </div>
+    </div>
+</div>
 
 <div class="content-box" style="padding:10px 15px;">
     <div>
