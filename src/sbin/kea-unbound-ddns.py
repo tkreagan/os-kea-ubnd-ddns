@@ -2,18 +2,57 @@
 """
 kea-unbound-ddns.py — RFC 2136 stub listener for Kea → Unbound DNS registration.
 
-Listens on localhost:53535 (UDP), receives DNS UPDATE packets from kea-dhcp-ddns,
+Listens on 127.0.0.1:53535 (UDP), receives DNS UPDATE packets from kea-dhcp-ddns,
 and translates them into unbound-control local_data / local_data_remove calls.
 
-All other DNS opcodes are ignored. TSIG authentication is supported optionally.
+── Role in the plugin ────────────────────────────────────────────────────────────
+This script is the real-time path. It handles individual lease events as they
+happen. It does NOT do bulk operations:
+
+  This script        → real-time ADD/DELETE per DDNS UPDATE packet
+  reservation-sync.py→ one-shot bulk import of all Kea static reservations
+  lease-sync.py      → one-shot bulk import of all active Kea leases
+  local-data-audit.py→ read-only comparison of Unbound vs Kea (no writes)
+  local-data-clean.py→ bulk removal of stale records (scheduled or on demand)
+
+The sync scripts repopulate Unbound after a restart (Unbound's local_data is
+runtime-only and does not survive a reload). This daemon handles all updates
+that arrive while Unbound is running.
+
+── ADD handling ──────────────────────────────────────────────────────────────────
+For each A/AAAA ADD:
+  1. Register the forward record: unbound-control local_data "name TTL IN A ip"
+  2. Register the reverse record: unbound-control local_data "ptr TTL IN PTR name."
+  3. If --aggressive-cleanup is set: call local-data-clean.py --hostname to remove
+     any older IPs for the same hostname that Kea no longer recognises. This handles
+     the common Kea behaviour of issuing a new IP without DELETEing the old one.
+     The ADD always succeeds regardless of cleanup outcome.
+
+── DELETE handling ───────────────────────────────────────────────────────────────
+For each A/AAAA DELETE:
+  1. Preserve any sibling address family (IPv6 if deleting A, IPv4 if deleting AAAA)
+     by querying Unbound first — local_data_remove wipes ALL records for a name.
+  2. Remove the forward record: unbound-control local_data_remove name
+  3. Remove the PTR record(s) for the deleted IP(s).
+  4. Re-add the preserved sibling record and its PTR with the original TTL.
+
+── Static entry guard ────────────────────────────────────────────────────────────
+Before every ADD and DELETE, is_static_entry() checks host_entries.conf. Records
+managed by OPNsense via Unbound Host Overrides (or "Register DHCP Static Mappings")
+live in that file and must never be touched by this daemon. Note: unbound-control
+local_data_remove affects BOTH runtime-added entries AND config-file-sourced entries
+in Unbound's in-memory zone — not just runtime entries — so this guard is essential.
+
+── Lifecycle ─────────────────────────────────────────────────────────────────────
+Launched by start.py via daemon(8) with -r (auto-respawn on crash) and -R 5 (5s
+backoff). Stop and restart use stop.py, which signals the daemon(8) supervisor
+(not just the child) and waits for clean exit. Do not run this script directly in
+production — always use the configd actions (keaunbound start/stop/restart).
 
 Usage:
     kea-unbound-ddns.py [--port PORT] [--unbound-conf FILE] [--host-entries FILE]
                         [--tsig-key NAME:SECRET] [--tsig-algorithm ALGO]
-                        [--dry-run] [--verbose]
-
-PID management is handled by daemon(8) which launches this script.
-Do not run this script directly in production — use configd actions.
+                        [--aggressive-cleanup] [--dry-run] [--verbose]
 """
 
 from __future__ import annotations

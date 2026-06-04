@@ -471,6 +471,12 @@ function updateCleanButton(complete, removable) {
 </div>
 
 <div class="content-box" style="padding:10px 15px;">
+    <p class="text-muted small" style="margin:0 0 8px;">
+        Compares Unbound's runtime DNS records against Kea leases, reservations, and
+        Unbound Host Overrides. Records backed by an active source show as live; records
+        with no backing can be removed with the Clean button. Use the Sync buttons to
+        force a re-sync from Kea without restarting any service.
+    </p>
     <div style="display:flex; align-items:center;">
         <label style="margin:0; font-weight:normal; color:#777; cursor:pointer;">
             <input type="checkbox" id="autoRefreshCheck" checked style="margin-right:5px;">
@@ -481,14 +487,14 @@ function updateCleanButton(complete, removable) {
         </button>
     </div>
     <div style="margin-top:8px;">
-        <button id="syncStaticBtn" class="btn btn-default btn-sm" style="display:none;">
+        <button id="cleanBtn" class="btn btn-warning btn-sm" disabled>
+            <i class="fa fa-trash-o"></i> Clean Stale Records
+        </button>
+        <button id="syncStaticBtn" class="btn btn-default btn-sm" style="display:none; margin-left:8px;">
             <i class="fa fa-download"></i> Sync Static Records
         </button>
         <button id="syncDynamicBtn" class="btn btn-default btn-sm" style="display:none; margin-left:8px;">
             <i class="fa fa-download"></i> Sync Active DHCP Leases
-        </button>
-        <button id="cleanBtn" class="btn btn-warning btn-sm" disabled style="margin-left:8px;">
-            <i class="fa fa-trash-o"></i> Clean Stale Records
         </button>
     </div>
 </div>

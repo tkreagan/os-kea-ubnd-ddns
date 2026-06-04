@@ -10,22 +10,59 @@
 <![CDATA[
 <h4>Kea Unbound DDNS Integration</h4>
 
-<p>This plugin creates a bridge between Kea DHCP and Unbound DNS, allowing DHCP leases and static reservations to be automatically registered in DNS.</p>
+<p>This plugin bridges Kea DHCP and Unbound DNS so hostnames resolve as soon as a device
+is assigned an address — without waiting for a DNS reload or manual entry.</p>
 
 <h4>How It Works</h4>
 
-<p><strong>Static Reservations:</strong> When you create a static DHCP reservation in Kea, this plugin automatically registers it in Unbound DNS (A/AAAA and PTR records). This happens immediately when the plugin is enabled, without waiting for any client to connect.</p>
+<p><strong>DDNS Listener (real-time):</strong> A background daemon listens for DNS UPDATE
+packets (RFC 2136) sent by Kea's DHCP-DDNS service on <code>127.0.0.1:{{ port }}</code>.
+Each time a client receives a lease, Kea notifies the daemon, which immediately registers
+the forward (A/AAAA) and reverse (PTR) record in Unbound. When a lease expires or is
+released, Kea sends a DELETE and the records are removed. This path handles the common
+case; the sync and cleanup paths below handle edge cases and recovery.</p>
 
-<p><strong>Dynamic Leases:</strong> When a client receives a DHCP lease from Kea, the lease information is registered in Unbound DNS with a TTL matching the lease expiration time. This ensures DNS records automatically expire when leases expire.</p>
+<p><strong>Static Reservation Sync:</strong> When enabled, Kea static reservations are
+registered in Unbound immediately — before any client connects — so the hostname resolves
+whether or not the device is online. Names already managed by OPNsense via Unbound Host
+Overrides are skipped. Fires automatically on Kea start, Kea config change, and Unbound
+reload; also available as a manual button on the Lease Audit tab.</p>
 
-<p><strong>DDNS Protocol:</strong> The plugin implements RFC 2136 DNS UPDATE, receiving DNS update requests from Kea's DHCP-DDNS daemon and translating them into Unbound local_data entries.</p>
+<p><strong>Active Lease Sync:</strong> When enabled, all active Kea leases are synced into
+Unbound with TTLs set to the remaining lease lifetime. This repopulates Unbound after a
+restart and catches any leases the DDNS stream may have missed (e.g. leases issued while
+the daemon was down). Fires automatically on Kea start, Kea config change, and Unbound
+reload; also available as a manual button on the Lease Audit tab.</p>
+
+<h4>DNS Record Cleaning</h4>
+
+<p>Kea's DDNS protocol is ADD-heavy: it reliably sends ADDs when a new IP is issued but
+does not always send a DELETE for the old IP when a client moves to a new address. Two
+complementary cleanup mechanisms handle the resulting drift:</p>
+
+<p><strong>Clean up old IPs on lease update (per-hostname, fires on every ADD):</strong>
+Each time a new IP is registered for a hostname via DDNS, the daemon immediately checks
+whether that hostname has any older IPs in Unbound that Kea no longer recognises. If so,
+they are removed along with their PTR records. This is best-effort — the ADD and the DDNS
+response always succeed regardless of cleanup outcome. Records managed by Unbound Host
+Overrides are never touched.</p>
+
+<p><strong>Scheduled bulk cleanup (all of Unbound vs. all of Kea):</strong> Periodically
+compares every record in Unbound's runtime local data against every Kea lease, reservation,
+and Unbound Host Override. Any record not backed by one of those sources is removed. Requires
+full Kea data to be available; if Kea is unreachable the bulk clean is skipped to avoid
+removing records it cannot verify. The <strong>Clean Stale Records</strong> button on the
+Lease Audit tab runs the same operation on demand. Use the Lease Audit tab to preview
+exactly which records would be removed before enabling scheduled cleanup.</p>
 
 <h4>Configuring Kea for DDNS</h4>
 
-<p>For this plugin to work, you must configure Kea DHCP to send DDNS updates. This is a two-part process:</p>
+<p>For this plugin to work, Kea DHCP must be configured to send DDNS updates. This is a
+two-part process:</p>
 
 <p><strong>1. Enable DHCP-DDNS Daemon</strong><br/>
-Kea's DHCP-DDNS daemon must be running and configured to send updates to this server (127.0.0.1:{{ port }}).</p>
+Kea's DHCP-DDNS daemon must be running and configured to forward updates to
+<code>127.0.0.1:{{ port }}</code>.</p>
 
 <p><strong>2. Configure Subnets for DDNS</strong><br/>
 For each subnet where you want DDNS, add this to the subnet configuration in Kea:</p>
@@ -44,31 +81,34 @@ For each subnet where you want DDNS, add this to the subnet configuration in Kea
 <p><strong>Settings explained:</strong></p>
 <ul>
   <li><code>ddns-send-updates</code>: Enable DDNS for this subnet (required)</li>
-  <li><code>ddns-override-no-update</code>: Send updates even if client requests not to (recommended)</li>
-  <li><code>ddns-override-client-update</code>: Always update PTR records (recommended)</li>
-  <li><code>hostname-char-replacement</code>: Replace invalid chars in hostnames (optional, "-" recommended)</li>
+  <li><code>ddns-override-no-update</code>: Register even if the client opts out (recommended)</li>
+  <li><code>ddns-override-client-update</code>: Always register PTR records (recommended)</li>
+  <li><code>hostname-char-replacement</code>: Replace invalid characters in hostnames (optional, <code>"-"</code> recommended)</li>
 </ul>
 
-<p>Use the <strong>Kea Config Check</strong> tab to verify which subnets are configured for DDNS.</p>
+<p>Use the <strong>Kea Config Check</strong> tab to verify which subnets are configured for
+DDNS and that the DDNS daemon is pointing at the correct address and port.</p>
 
 <h4>Features</h4>
 
 <ul>
-  <li><strong>Dual-stack:</strong> Supports both IPv4 (A records) and IPv6 (AAAA records)</li>
-  <li><strong>PTR Records:</strong> Automatically generates reverse DNS (PTR) records</li>
-  <li><strong>Self-healing:</strong> Leases automatically expire from DNS when their TTL expires</li>
-  <li><strong>TSIG Authentication:</strong> Optional TSIG signing for secure updates</li>
-  <li><strong>Audit & Cleanup:</strong> Tools to verify DNS status and clean up stale records</li>
-  <li><strong>OPNsense Integration:</strong> Fully integrated with OPNsense services and configuration</li>
+  <li><strong>Real-time registration:</strong> Hostnames resolve the moment a lease is issued, via RFC 2136 DDNS</li>
+  <li><strong>Dual-stack:</strong> Full IPv4 (A) and IPv6 (AAAA) support with matching PTR records</li>
+  <li><strong>Static reservations:</strong> Pre-register Kea reservations in DNS before any client connects</li>
+  <li><strong>Drift correction:</strong> Two cleanup paths remove stale records Kea never explicitly deleted</li>
+  <li><strong>Lease Audit:</strong> Full visibility into every DNS record — what's live, what's backed by Kea, what's stale</li>
+  <li><strong>Host Override safety:</strong> Records managed by Unbound Host Overrides are never modified or removed</li>
+  <li><strong>TSIG Authentication:</strong> Optional TSIG signing on DDNS updates (advanced)</li>
+  <li><strong>OPNsense integration:</strong> Service control, cron scheduling, and syslog via standard OPNsense hooks</li>
 </ul>
 
 <h4>Tabs</h4>
 
 <ul>
-  <li><strong>Settings:</strong> Configure plugin behavior, enable/disable sync, set TSIG options</li>
-  <li><strong>Kea Config Check:</strong> View which Kea subnets are configured for DDNS</li>
-  <li><strong>Lease Audit:</strong> View all registered DNS entries and their status</li>
-  <li><strong>Log File:</strong> View plugin logs for troubleshooting</li>
+  <li><strong>Settings:</strong> Enable the plugin, configure sync and cleanup behaviour, set TSIG options</li>
+  <li><strong>Kea Config Check:</strong> Verify which Kea subnets have DDNS configured and that the DDNS daemon is correctly pointed at this plugin</li>
+  <li><strong>Lease Audit:</strong> Inspect every DNS record in Unbound with its Kea backing status. Preview and run stale record cleanup. Manually trigger syncs.</li>
+  <li><strong>Log File:</strong> Live and historical logs for the daemon, sync, audit, and cleanup operations</li>
 </ul>
 ]]>
         </help>
@@ -111,19 +151,19 @@ For each subnet where you want DDNS, add this to the subnet configuration in Kea
         <id>general.general.aggressive_cleanup</id>
         <label>Clean up old IPs on lease update</label>
         <type>checkbox</type>
-        <help>When a new DHCP lease is registered via DDNS UPDATE, remove any previous IP addresses for that hostname that are no longer in Kea's lease or reservation table. This handles the common case where Kea issues a client a new IP without sending a DNS DELETE for the old one (standard Kea behaviour on IP change). Best-effort: the ADD is always recorded and the DDNS response is always sent regardless of whether cleanup succeeds. Requires Kea to be reachable at the time of the update.</help>
+        <help>When a new DHCP lease is registered via DDNS UPDATE, remove any previous IP addresses for that hostname that are no longer in Kea's lease or reservation table. This handles the common case where Kea issues a client a new IP without sending a DNS DELETE for the old one (standard Kea behaviour on IP change). Best-effort: the ADD is always recorded and the DDNS response is always sent regardless of whether cleanup succeeds. Requires Kea to be reachable at the time of the update. Records managed by Unbound Host Overrides are never touched.</help>
     </field>
     <field>
         <id>general.general.enable_auto_clean</id>
         <label>Automatically clean stale DNS records</label>
         <type>checkbox</type>
-        <help>Periodically run the cleanup job to remove stale DNS records from Unbound (entries that don't match any Kea reservation, lease, or OPNsense-managed entry). Warning: cleanup removes ANY A/AAAA/PTR record in Unbound's runtime local-data that is not backed by Kea or defined as an Unbound Host Override — so records injected directly into Unbound by another tool or script (not through Host Overrides) will be erased. Use the Lease Audit tab to preview exactly what would be removed before enabling this.</help>
+        <help>Periodically compare all of Unbound's runtime DNS records against all Kea leases, reservations, and Unbound Host Overrides, and remove any record not backed by one of those sources. Requires Kea to be reachable; the job is skipped if Kea is unavailable. Warning: this removes ANY A/AAAA/PTR record in Unbound's runtime local-data not backed by Kea or an Unbound Host Override — records injected by another tool or script will be erased. Use the Lease Audit tab to preview exactly what would be removed before enabling this.</help>
     </field>
     <field>
         <id>general.general.auto_clean_interval</id>
         <label>Auto-clean frequency</label>
         <type>dropdown</type>
-        <help>How often to run the cleanup job. Only used when auto-clean is enabled. The manual "Clean Stale Records Now" button lives on the Lease Audit tab, next to the records it acts on.</help>
+        <help>How often to run the scheduled bulk cleanup. Only used when auto-clean is enabled. The manual Clean button on the Lease Audit tab runs the same operation on demand.</help>
     </field>
 
     <field>
