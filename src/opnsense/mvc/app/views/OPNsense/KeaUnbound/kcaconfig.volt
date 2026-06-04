@@ -39,7 +39,9 @@
 <script>
 $( document ).ready(function() {
     loadKeaConfig();
-    setInterval(loadKeaConfig, 30000);
+    setInterval(function() {
+        if ($("#autoRefreshCheck").is(":checked")) { loadKeaConfig(); }
+    }, 30000);
     $("#refreshBtn").click(function() { loadKeaConfig(); });
 });
 
@@ -338,10 +340,15 @@ function subnetPanel(title, subnets) {
 </script>
 
 <div class="content-box" style="padding:10px 15px 5px;">
-    <button id="refreshBtn" class="btn btn-primary btn-sm">
-        <i class="fa fa-refresh"></i> Refresh Now
-    </button>
-    <small class="text-muted" style="margin-left:12px;">Auto-refresh every 30 seconds</small>
+    <div style="display:flex; align-items:center;">
+        <label style="margin:0; font-weight:normal; color:#777; cursor:pointer;">
+            <input type="checkbox" id="autoRefreshCheck" checked style="margin-right:5px;">
+            Auto-refresh every 30 seconds
+        </label>
+        <button id="refreshBtn" class="btn btn-primary btn-sm" style="margin-left:20px;">
+            <i class="fa fa-refresh"></i> Refresh Now
+        </button>
+    </div>
 </div>
 
 <div id="configLoader" class="content-box" style="text-align:center; padding:20px; display:none;">

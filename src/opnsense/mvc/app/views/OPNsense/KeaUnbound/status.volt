@@ -54,7 +54,9 @@
 <script>
 $( document ).ready(function() {
     loadAuditData();
-    setInterval(loadAuditData, 30000);
+    setInterval(function() {
+        if ($("#autoRefreshCheck").is(":checked")) { loadAuditData(); }
+    }, 30000);
 
     // Only show a manual sync button if that sync is enabled in settings.
     $.ajax({ url: '/api/keaunbound/general/get', type: 'GET', dataType: 'json' }).done(function(d) {
@@ -469,11 +471,14 @@ function updateCleanButton(complete, removable) {
 </div>
 
 <div class="content-box" style="padding:10px 15px;">
-    <div>
-        <button id="refreshBtn" class="btn btn-primary btn-sm">
+    <div style="display:flex; align-items:center;">
+        <label style="margin:0; font-weight:normal; color:#777; cursor:pointer;">
+            <input type="checkbox" id="autoRefreshCheck" checked style="margin-right:5px;">
+            Auto-refresh every 30 seconds
+        </label>
+        <button id="refreshBtn" class="btn btn-primary btn-sm" style="margin-left:20px;">
             <i class="fa fa-refresh"></i> Refresh Now
         </button>
-        <small class="text-muted" style="margin-left:12px;">Auto-refresh every 30 seconds</small>
     </div>
     <div style="margin-top:8px;">
         <button id="syncStaticBtn" class="btn btn-default btn-sm" style="display:none;">
