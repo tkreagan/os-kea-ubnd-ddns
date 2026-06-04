@@ -29,6 +29,14 @@
     .stat-card   { text-align: center; padding: 12px 8px; }
     .stat-card h4 { margin: 0 0 4px; font-size: 1.6em; }
     .stat-card small { font-size: 0.8em; }
+    /* Neutral top-info panel: distinguishes the Kea source (left) from this
+       plugin's listener (right) without loud colours that grab the eye. */
+    .ku-topinfo .panel-body { padding: 8px 12px; }
+    .ku-srclabel { font-size: 0.78em; text-transform: uppercase; letter-spacing: 0.04em;
+                   color: #888; margin-bottom: 4px; }
+    .ku-topinfo .ku-row { margin: 2px 0; }
+    .ku-topinfo code { font-size: 0.85em; }
+    @media (min-width: 768px) { .ku-col-plugin { border-left: 1px solid #e6e6e6; } }
 </style>
 
 <script>
@@ -93,6 +101,53 @@ function bucketBadge(status) {
     return '<span class="label ' + b.cls + '">' + b.label + '</span>';
 }
 
+// One "DHCPv4: <method> <path/url>" line with a reachable indicator dot.
+function connLine(label, conn) {
+    if (!conn) return '';
+    let val;
+    if (conn.method === 'unix') {
+        val = '<span class="text-muted">unix socket</span> <code>' + escapeHtml(conn.detail) + '</code>';
+    } else if (conn.method === 'http') {
+        val = '<span class="text-muted">HTTP</span> <code>' + escapeHtml(conn.detail) + '</code>';
+    } else {
+        val = '<span class="text-muted">not resolved</span>';
+    }
+    const dot = conn.reachable
+        ? '<i class="fa fa-circle" title="reachable" style="color:#5cb85c; font-size:0.7em;"></i>'
+        : '<i class="fa fa-circle-o text-muted" title="not responding" style="font-size:0.7em;"></i>';
+    return '<div class="ku-row">' + dot + ' <strong>' + label + ':</strong> ' + val + '</div>';
+}
+
+// Neutral two-column header: Kea (the source we read) vs this plugin (the
+// listener Kea should send DDNS to). Deliberately low-key — no coloured alert.
+function topInfo(data) {
+    const kc = data.kea_control || {};
+    const l  = data.our_listener;
+
+    let left = '<div class="ku-srclabel">Kea DHCP — control channel</div>';
+    left += connLine('DHCPv4', kc.dhcp4);
+    left += connLine('DHCPv6', kc.dhcp6);
+
+    let right = '<div class="ku-srclabel">This plugin — DDNS listener</div>';
+    if (l) {
+        const tsig = l.tsig_enabled
+            ? '<span class="text-muted">TSIG on</span>'
+            : '<span class="text-muted">no TSIG</span>';
+        right += '<div class="ku-row"><strong>Listening on:</strong> <code>' +
+                 escapeHtml(l.address) + ':' + l.port + '</code> &middot; ' + tsig + '</div>';
+    }
+    const d2 = data.d2_reachable
+        ? '<span class="text-success">configured</span>'
+        : '<span class="text-warning">not found</span>';
+    right += '<div class="ku-row"><strong>DHCP-DDNS forward zones:</strong> ' + d2 + '</div>';
+
+    return '<div class="panel panel-default ku-topinfo" style="margin-bottom:12px;">' +
+           '<div class="panel-body"><div class="row">' +
+           '<div class="col-sm-6">' + left + '</div>' +
+           '<div class="col-sm-6 ku-col-plugin">' + right + '</div>' +
+           '</div></div></div>';
+}
+
 function renderKeaConfig(data) {
     const v4  = data.ipv4_subnets || [];
     const v6  = data.ipv6_subnets || [];
@@ -108,18 +163,8 @@ function renderKeaConfig(data) {
 
     let html = '';
 
-    // ── Listener info ─────────────────────────────────────────────────────────
-    if (data.our_listener) {
-        const l = data.our_listener;
-        const tsigInfo = l.tsig_enabled ? ' + TSIG' : ' (no TSIG)';
-        const d2Info = data.d2_reachable
-            ? '<span class="label label-success">Configured</span>'
-            : '<span class="label label-warning">Config not found</span>';
-        html += '<div class="alert alert-info" style="margin-bottom:12px;">' +
-                '<i class="fa fa-info-circle"></i> Plugin listener: ' +
-                '<strong>' + escapeHtml(l.address) + ':' + l.port + '</strong>' + escapeHtml(tsigInfo) +
-                ' &nbsp;|&nbsp; DHCP-DDNS daemon: ' + d2Info + '</div>';
-    }
+    // ── Source / listener info ────────────────────────────────────────────────
+    html += topInfo(data);
 
     // ── Summary stats ─────────────────────────────────────────────────────────
     html += '<div class="row" style="margin-bottom:16px;">';
@@ -133,9 +178,10 @@ function renderKeaConfig(data) {
     if (total === 0) {
         html += '<div class="alert alert-info">No subnets found in Kea DHCP.</div>';
     } else if (ok === total) {
-        html += '<div class="alert alert-success"><i class="fa fa-check-circle"></i> ' +
-                '<strong>All ' + total + ' subnet' + (total !== 1 ? 's are' : ' is') +
-                ' correctly configured</strong> to send DDNS updates to this plugin.</div>';
+        html += '<p class="text-muted" style="margin:2px 0 14px;">' +
+                '<i class="fa fa-check-circle text-success"></i> All ' + total + ' subnet' +
+                (total !== 1 ? 's are' : ' is') +
+                ' correctly configured to send DDNS updates to this plugin.</p>';
     } else {
         let msgs = [];
         if (d2_off  > 0) msgs.push(d2_off  + ' need the DDNS Agent running');

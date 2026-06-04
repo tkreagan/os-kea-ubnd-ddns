@@ -509,6 +509,27 @@ class KcaconfigController extends ApiControllerBase
         ];
     }
 
+    /**
+     * Describe the control channel resolved for a daemon, for display on the
+     * Config Check page. `$reachable` is whether config-get actually succeeded.
+     */
+    private function describeConnection($service, $reachable)
+    {
+        $desc = $this->resolveKeaSocket($service);
+        if ($desc === null) {
+            return ['method' => 'none', 'detail' => null, 'reachable' => $reachable];
+        }
+        if ($desc['type'] === 'unix') {
+            return ['method' => 'unix', 'detail' => $desc['path'], 'reachable' => $reachable];
+        }
+        $scheme = !empty($desc['tls']) ? 'https' : 'http';
+        return [
+            'method'    => 'http',
+            'detail'    => "{$scheme}://{$desc['host']}:{$desc['port']}",
+            'reachable' => $reachable,
+        ];
+    }
+
     // ── Public action ─────────────────────────────────────────────────────────
 
     public function checkAction()
@@ -548,6 +569,12 @@ class KcaconfigController extends ApiControllerBase
         if ($dhcp6 !== null) {
             $result['ipv6_subnets'] = $this->extractSubnets($dhcp6, 'dhcp6', $domain_map, $plugin, $d2_ok);
         }
+
+        // How the plugin is reaching each Kea daemon (for the Config Check page).
+        $result['kea_control'] = [
+            'dhcp4' => $this->describeConnection('dhcp4', $dhcp4 !== null),
+            'dhcp6' => $this->describeConnection('dhcp6', $dhcp6 !== null),
+        ];
 
         return $result;
     }
