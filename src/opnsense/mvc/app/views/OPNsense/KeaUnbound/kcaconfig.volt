@@ -26,20 +26,14 @@
 
 <style>
     .kea-subnet  { font-family: monospace; font-size: 0.9em; }
-    .stat-card   { text-align: center; padding: 12px 8px; }
-    .stat-card h4 { margin: 0 0 4px; font-size: 1.6em; }
-    .stat-card small { font-size: 0.8em; }
-    /* Neutral top-info panel: distinguishes the Kea source (left) from this
-       plugin's listener (right) without loud colours that grab the eye. */
     .ku-topinfo .panel-body { padding: 8px 12px; }
     .ku-srclabel { font-size: 0.78em; text-transform: uppercase; letter-spacing: 0.04em;
                    color: #888; margin-bottom: 4px; }
     .ku-topinfo .ku-row { margin: 2px 0; }
     .ku-topinfo code { font-size: 0.85em; }
-    /* Bootstrap renders <code> in crimson by default — neutralize it on this
-       page so the socket path, listener address, and examples aren't red. */
-    code { color: #444; background-color: #f5f5f5; }
-    @media (min-width: 768px) { .ku-col-plugin { border-left: 1px solid #e6e6e6; } }
+    /* Bootstrap renders <code> in crimson by default — use a muted slate and
+       drop the white box so paths and addresses read inline without visual noise. */
+    code { color: #5a7a9a; background: none; padding: 0; border: none; box-shadow: none; }
 </style>
 
 <script>
@@ -104,13 +98,11 @@ function bucketBadge(status) {
     return '<span class="label ' + b.cls + '">' + b.label + '</span>';
 }
 
-// One "DHCPv4: <method> <path/url>" line with a reachable indicator dot.
-// The dot is only shown for daemons that are enabled in Kea — a disabled
-// service (e.g. DHCPv6 off) is reported as such, not flagged as unreachable.
 function connLine(label, conn) {
     if (!conn) return '';
     if (!conn.enabled) {
-        return '<div class="ku-row"><strong>' + label + ':</strong> ' +
+        const dot = '<i class="fa-regular fa-circle" title="disabled" style="color:#ccc; font-size:0.7em;"></i>';
+        return '<div class="ku-row">' + dot + ' <strong>' + label + ':</strong> ' +
                '<span class="text-muted">service not enabled in Kea</span></div>';
     }
     let val;
@@ -122,39 +114,59 @@ function connLine(label, conn) {
         val = '<span class="text-muted">not resolved</span>';
     }
     const dot = conn.reachable
-        ? '<i class="fa fa-circle" title="reachable" style="color:#5cb85c; font-size:0.7em;"></i>'
-        : '<i class="fa fa-circle-o text-muted" title="not responding" style="font-size:0.7em;"></i>';
+        ? '<i class="fa-solid fa-circle" title="reachable" style="color:#5cb85c; font-size:0.7em;"></i>'
+        : '<i class="fa-regular fa-circle" title="not responding" style="color:#aaa; font-size:0.7em;"></i>';
     return '<div class="ku-row">' + dot + ' <strong>' + label + ':</strong> ' + val + '</div>';
 }
 
-// Neutral two-column header: Kea (the source we read) vs this plugin (the
-// listener Kea should send DDNS to). Deliberately low-key — no coloured alert.
-function topInfo(data) {
+function statusSection(data) {
     const kc = data.kea_control || {};
     const l  = data.our_listener;
 
-    let left = '<div class="ku-srclabel">Kea DHCP — control channel</div>';
-    left += connLine('DHCPv4', kc.dhcp4);
-    left += connLine('DHCPv6', kc.dhcp6);
+    let html = '<div class="panel panel-default ku-topinfo" style="margin-bottom:12px;">' +
+               '<div class="panel-heading" style="padding:8px 12px;">' +
+               '<h4 class="panel-title" style="font-size:1em; font-weight:600;">Kea &amp; Listener Status</h4>' +
+               '</div><div class="panel-body">';
 
-    let right = '<div class="ku-srclabel">This plugin — DDNS listener</div>';
+    html += '<div class="ku-srclabel">Kea DHCP Control Channel</div>';
+    html += connLine('DHCPv4', kc.dhcp4);
+    html += connLine('DHCPv6', kc.dhcp6);
+
+    html += '<div class="ku-srclabel" style="margin-top:10px;">Kea Unbound Plugin &mdash; DDNS Listener Status</div>';
     if (l) {
+        const dot = l.running
+            ? '<i class="fa-solid fa-circle" title="running" style="color:#5cb85c; font-size:0.7em;"></i>'
+            : '<i class="fa-solid fa-circle" title="not running" style="color:#d9534f; font-size:0.7em;"></i>';
         const tsig = l.tsig_enabled
             ? '<span class="text-muted">TSIG on</span>'
             : '<span class="text-muted">no TSIG</span>';
-        right += '<div class="ku-row"><strong>Listening on:</strong> <code>' +
-                 escapeHtml(l.address) + ':' + l.port + '</code> &middot; ' + tsig + '</div>';
+        html += '<div class="ku-row">' + dot + ' <strong>Listening on:</strong> <code>' +
+                escapeHtml(l.address) + ':' + l.port + '</code> &middot; ' + tsig + '</div>';
     }
-    const d2 = data.d2_reachable
-        ? '<span class="text-success">configured</span>'
-        : '<span class="text-warning">not found</span>';
-    right += '<div class="ku-row"><strong>DHCP-DDNS forward zones:</strong> ' + d2 + '</div>';
 
-    return '<div class="panel panel-default ku-topinfo" style="margin-bottom:12px;">' +
-           '<div class="panel-body"><div class="row">' +
-           '<div class="col-sm-6">' + left + '</div>' +
-           '<div class="col-sm-6 ku-col-plugin">' + right + '</div>' +
-           '</div></div></div>';
+    html += '</div></div>';
+    return html;
+}
+
+function ddnsConfigTable(ok, wrong, tsig, no_ddns) {
+    function row(count, label, color) {
+        const dim = count === 0;
+        return '<tr>' +
+               '<td style="width:3em; text-align:right; padding:3px 0; font-size:1.3em; font-weight:bold; color:' +
+               (dim ? '#ccc' : color) + ';">' + count + '</td>' +
+               '<td style="padding:3px 0 3px 14px;' + (dim ? ' color:#bbb;' : '') + '">' + label + '</td>' +
+               '</tr>';
+    }
+    return '<div class="panel panel-default" style="margin-bottom:12px;">' +
+           '<div class="panel-heading" style="padding:8px 12px;">' +
+           '<h4 class="panel-title" style="font-size:1em; font-weight:600;">Kea DDNS Forward Configuration Status</h4>' +
+           '</div><div class="panel-body" style="padding:10px 14px;">' +
+           '<table style="border-collapse:collapse;">' +
+           row(ok,      'Kea-Unbound Configured Subnets',                  '#5cb85c') +
+           row(tsig,    'Kea-Unbound Configured / TSIG Mismatch Subnets', '#f0ad4e') +
+           row(wrong,   'Subnets configured for other zones',              '#f0ad4e') +
+           row(no_ddns, 'No DDNS configuration',                          '#aaa') +
+           '</table></div></div>';
 }
 
 function renderKeaConfig(data) {
@@ -172,26 +184,16 @@ function renderKeaConfig(data) {
 
     let html = '';
 
-    // ── Source / listener info ────────────────────────────────────────────────
-    html += topInfo(data);
+    // ── Kea & Listener Status ─────────────────────────────────────────────────
+    html += statusSection(data);
 
-    // ── Summary stats ─────────────────────────────────────────────────────────
-    html += '<div class="row" style="margin-bottom:16px;">';
-    html += statCard(ok,      'Correctly Configured', 'text-success');
-    html += statCard(wrong,   'Other Target',         'text-warning');
-    html += statCard(tsig + d2_off, 'Needs Attention','text-warning');
-    html += statCard(no_ddns, 'No DDNS',              'text-muted');
-    html += '</div>';
+    // ── Kea DDNS Forward Configuration Status ────────────────────────────────
+    html += ddnsConfigTable(ok, wrong, tsig, no_ddns);
 
     // ── Status alert ──────────────────────────────────────────────────────────
     if (total === 0) {
         html += '<div class="alert alert-info">No subnets found in Kea DHCP.</div>';
-    } else if (ok === total) {
-        html += '<p class="text-muted" style="margin:2px 0 14px;">' +
-                '<i class="fa fa-check-circle text-success"></i> All ' + total + ' subnet' +
-                (total !== 1 ? 's are' : ' is') +
-                ' correctly configured to send DDNS updates to this plugin.</p>';
-    } else {
+    } else if (ok !== total) {
         let msgs = [];
         if (d2_off  > 0) msgs.push(d2_off  + ' need the DDNS Agent running');
         if (wrong   > 0) msgs.push(wrong   + ' sending to a different DNS server/port');
@@ -333,13 +335,6 @@ function subnetPanel(title, subnets) {
            '</table></div></div></div>';
 }
 
-function statCard(count, label, colorClass) {
-    return '<div class="col-xs-4 col-sm-4">' +
-           '<div class="panel panel-default stat-card">' +
-           '<h4 class="' + colorClass + '">' + count + '</h4>' +
-           '<small class="text-muted">' + label + '</small>' +
-           '</div></div>';
-}
 </script>
 
 <div class="content-box" style="padding:10px 15px 5px;">

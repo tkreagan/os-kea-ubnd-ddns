@@ -29,6 +29,7 @@
 namespace OPNsense\KeaUnbound\Api;
 
 use OPNsense\Base\ApiControllerBase;
+use OPNsense\Core\Backend;
 
 /**
  * Check Kea DHCP subnet DDNS configuration against the kea-unbound-ddns plugin.
@@ -509,6 +510,12 @@ class KcaconfigController extends ApiControllerBase
         ];
     }
 
+    private function isListenerRunning()
+    {
+        $response = trim((new Backend())->configdRun('keaunbound status'));
+        return strpos($response, 'is running') !== false;
+    }
+
     // Whether a Kea daemon is enabled in OPNsense (//OPNsense/Kea/<svc>/general/enabled).
     private function isServiceEnabled($service)
     {
@@ -566,6 +573,7 @@ class KcaconfigController extends ApiControllerBase
                 'address'      => $plugin['address'],
                 'port'         => $plugin['port'],
                 'tsig_enabled' => $plugin['tsig_enabled'],
+                'running'      => $this->isListenerRunning(),
             ],
             'd2_reachable'   => $d2_ok,
             'ipv4_subnets'   => [],
