@@ -59,7 +59,7 @@ function loadKeaConfig() {
         },
         error: function(xhr, status) {
             showError(status === 'timeout'
-                ? 'Request timed out — check that Kea Control Agent is running'
+                ? 'Request timed out — check that the Kea DHCP service is running'
                 : 'Failed to load Kea configuration');
         }
     });

@@ -3,7 +3,7 @@
 keaunbound_sync.py -- Shared library for Kea-Unbound sync utilities.
 
 Provides:
-  - Kea control agent API queries (reservations, leases)
+  - Kea queries (reservations, leases) via the transport layer (kea_transport)
   - Unbound control wrapper
   - host_entries.conf parser
   - Stale/orphaned record detection (shared by audit and clean)
@@ -18,17 +18,23 @@ on a stock OPNsense install without extra packages.
 from __future__ import annotations
 
 import ipaddress
-import json
 import logging
 import re
 import subprocess
 import sys
 import syslog
 import time
-import urllib.error
-import urllib.request
 import xml.etree.ElementTree as ET
 from typing import Dict, List, Optional, Set, Tuple
+
+# Kea connection lives in the transport layer (unix socket / HTTP, with the
+# config-reading resolver). The exception types are defined there and re-exported
+# here so existing callers can keep importing them from keaunbound_sync.
+from .kea_transport import (  # noqa: F401
+    KeaUnavailableError,
+    KeaServiceUnavailableError,
+    kea_query,
+)
 
 # Constants
 CONFIG_XML = "/conf/config.xml"
@@ -46,20 +52,6 @@ _LABEL_RE = re.compile(r'^[a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?$')
 
 # Names that are technically valid DNS but meaningless/dangerous for our use.
 _NONSENSE_NAMES = {"", ".", "localhost", "localdomain"}
-
-
-# Custom exception for Kea unavailable
-class KeaUnavailableError(Exception):
-    """Raised when kea-ctrl-agent is not available or not responding."""
-    pass
-
-
-class KeaServiceUnavailableError(KeaUnavailableError):
-    """Raised when the control agent is reachable but a specific service
-    (dhcp4/dhcp6) is offline or a command failed for it. Subclass of
-    KeaUnavailableError so existing handlers still catch it, while callers that
-    want per-service tolerance can catch this and skip just that service."""
-    pass
 
 
 # Map Python logging levels to syslog priorities.
@@ -118,101 +110,19 @@ def setup_logging(verbose: bool = False) -> logging.Logger:
     return logger
 
 
-def get_kea_ctrl_config() -> Tuple[str, int]:
-    """
-    Read the Kea Control Agent endpoint from OPNsense config.xml.
-
-    Reads the real core model: //OPNsense/Kea/ctrl_agent/general with fields
-    enabled, http_host (default 127.0.0.1) and http_port (default 8000).
-    Returns (host, port). Raises KeaUnavailableError if the control agent is
-    not configured/enabled.
-    """
-    try:
-        tree = ET.parse(CONFIG_XML)
-        root = tree.getroot()
-        node = root.find("OPNsense/Kea/ctrl_agent/general")
-
-        if node is None:
-            raise KeaUnavailableError("Kea control agent config not found in config.xml")
-
-        enabled = node.find("enabled")
-        if enabled is None or (enabled.text or "").strip() != "1":
-            raise KeaUnavailableError("Kea control agent is not enabled")
-
-        host_node = node.find("http_host")
-        host = host_node.text.strip() if host_node is not None and host_node.text else "127.0.0.1"
-
-        port_node = node.find("http_port")
-        port = int(port_node.text.strip()) if port_node is not None and port_node.text else 8000
-
-        return host, port
-    except ET.ParseError as e:
-        raise KeaUnavailableError(f"Cannot parse config.xml: {e}")
-    except KeaUnavailableError:
-        raise
-    except Exception as e:
-        raise KeaUnavailableError(f"Error reading kea-ctrl-agent config: {e}")
-
-
 def query_kea_api(command: str, arguments: Optional[Dict] = None,
                   service: str = "dhcp4", timeout: float = 5.0) -> Dict:
     """
-    Query the kea-ctrl-agent REST API using the standard library.
+    Run a Kea command against the given daemon (dhcp4/dhcp6) and return the
+    normalized response map.
 
-    The Control Agent returns a JSON *list* of per-service response maps; this
-    normalizes to the single relevant map and returns it. Raises
-    KeaUnavailableError if the agent is unavailable/unresponsive or the command
-    fails.
+    Thin wrapper over the transport layer (kea_transport.kea_query): the layer
+    resolves the unix-socket/HTTP connection for the service from configuration,
+    sends the command directly to the daemon (no Control Agent, no per-command
+    "service" routing field), and normalizes/validates the response. Raises
+    KeaUnavailableError / KeaServiceUnavailableError on failure.
     """
-    host, port = get_kea_ctrl_config()
-    url = f"http://{host}:{port}/"
-
-    payload: Dict = {"command": command, "service": [service]}
-    if arguments:
-        payload["arguments"] = arguments
-
-    data = json.dumps(payload).encode("utf-8")
-    req = urllib.request.Request(
-        url, data=data,
-        headers={"Content-Type": "application/json"},
-        method="POST",
-    )
-
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            body = resp.read()
-    except urllib.error.HTTPError as e:
-        raise KeaUnavailableError(f"Kea control agent HTTP {e.code}: {e.reason}")
-    except urllib.error.URLError as e:
-        # connection refused, DNS failure, or wrapped socket timeout
-        raise KeaUnavailableError(f"Kea control agent unreachable: {e.reason}")
-    except (TimeoutError, OSError) as e:
-        raise KeaUnavailableError(f"Kea control agent error: {e}")
-
-    try:
-        result = json.loads(body)
-    except json.JSONDecodeError as e:
-        raise KeaUnavailableError(f"Kea control agent returned invalid JSON: {e}")
-
-    # Normalize the list-of-maps response to a single map.
-    if isinstance(result, list):
-        if not result:
-            raise KeaUnavailableError(f"Kea command '{command}' returned an empty response")
-        result = result[0]
-    if not isinstance(result, dict):
-        raise KeaUnavailableError(f"Kea command '{command}' returned an unexpected response")
-
-    # Kea result codes: 0=success, 1=error, 2=unsupported, 3=empty (success,
-    # no data). Treat EMPTY as success; command-level failures are per-service.
-    rc = result.get("result")
-    if rc == 3:
-        return result
-    if rc != 0:
-        raise KeaServiceUnavailableError(
-            f"Kea command '{command}' failed: {result.get('text', 'unknown error')}"
-        )
-
-    return result
+    return kea_query(command, arguments=arguments, service=service, timeout=timeout)
 
 
 def get_system_domain() -> str:

@@ -46,52 +46,160 @@ class KcaconfigController extends ApiControllerBase
     private $config_file     = '/conf/config.xml';
     private $ddns_conf_file  = '/usr/local/etc/kea/kea-dhcp-ddns.conf';
 
-    // ── Kea Control Agent endpoint ────────────────────────────────────────────
+    // Per-service generated Kea config files and their top-level keys, used to
+    // discover each daemon's control socket (the Kea Control Agent is gone).
+    private $conf_files = [
+        'dhcp4' => '/usr/local/etc/kea/kea-dhcp4.conf',
+        'dhcp6' => '/usr/local/etc/kea/kea-dhcp6.conf',
+    ];
+    private $root_keys = [
+        'dhcp4' => 'Dhcp4',
+        'dhcp6' => 'Dhcp6',
+    ];
+    // Hardcoded OPNsense defaults, matching what OPNsense core's KeaCtrl uses.
+    private $default_sockets = [
+        'dhcp4' => '/var/run/kea/kea4-ctrl-socket',
+        'dhcp6' => '/var/run/kea/kea6-ctrl-socket',
+    ];
 
-    private function getKeaEndpoint()
+    // ── Kea daemon control channel ────────────────────────────────────────────
+
+    /**
+     * Resolve how to reach a Kea daemon by reading configuration (never by
+     * probing a running firewall). Mirrors the Python transport resolver:
+     *   1. parse the active Kea conf file's control-socket(s) stanza
+     *   2. else fall back to the hardcoded OPNsense default socket -- unless
+     *      manual configuration is enabled, in which case we do not guess.
+     * Returns ['type'=>'unix','path'=>..] or
+     *         ['type'=>'http','host'=>..,'port'=>..,'tls'=>..,'verify'=>..],
+     * or null if nothing usable could be resolved.
+     */
+    private function resolveKeaSocket($service)
     {
-        $host = '127.0.0.1';
-        $port = 8000;
-        if (file_exists($this->config_file)) {
-            $xml = simplexml_load_file($this->config_file);
-            if ($xml !== false) {
-                $h = $xml->xpath('//OPNsense/Kea/ctrl_agent/general/http_host');
-                if (!empty($h) && (string)$h[0] !== '') {
-                    $host = (string)$h[0];
-                }
-                $p = $xml->xpath('//OPNsense/Kea/ctrl_agent/general/http_port');
-                if (!empty($p) && (string)$p[0] !== '') {
-                    $port = intval((string)$p[0]);
-                }
-            }
+        $desc = $this->parseConfSocket($service);
+        if ($desc !== null) {
+            return $desc;
         }
-        return [$host, $port];
+        if ($this->isManualConfig($service)) {
+            // Admin-owned config and no socket found -- do not guess a default.
+            return null;
+        }
+        if (isset($this->default_sockets[$service])) {
+            return ['type' => 'unix', 'path' => $this->default_sockets[$service]];
+        }
+        return null;
     }
 
+    private function parseConfSocket($service)
+    {
+        $path     = $this->conf_files[$service] ?? null;
+        $root_key = $this->root_keys[$service] ?? null;
+        if ($path === null || $root_key === null || !file_exists($path)) {
+            return null;
+        }
+        $raw = file_get_contents($path);
+        if ($raw === false) {
+            return null;
+        }
+        $conf = json_decode($raw, true);
+        if (!is_array($conf) || !isset($conf[$root_key])) {
+            return null;
+        }
+        $root = $conf[$root_key];
+        if (isset($root['control-sockets']) && is_array($root['control-sockets'])) {
+            $sockets = $root['control-sockets'];
+        } elseif (isset($root['control-socket']) && is_array($root['control-socket'])) {
+            $sockets = [$root['control-socket']];
+        } else {
+            return null;
+        }
+        return $this->selectSocket($sockets);
+    }
+
+    // Prefer an http(s) listener over a unix socket when both are present.
+    private function selectSocket($sockets)
+    {
+        $unix = null;
+        foreach ($sockets as $s) {
+            $stype = strtolower($s['socket-type'] ?? '');
+            if ($stype === 'http' || $stype === 'https') {
+                $desc = $this->descFromSocket($s);
+                if ($desc !== null) {
+                    return $desc;
+                }
+            } elseif ($stype === 'unix' && $unix === null) {
+                $unix = $s;
+            }
+        }
+        return $unix !== null ? $this->descFromSocket($unix) : null;
+    }
+
+    private function descFromSocket($s)
+    {
+        $stype = strtolower($s['socket-type'] ?? '');
+        if ($stype === 'unix') {
+            $name = $s['socket-name'] ?? '';
+            return $name !== '' ? ['type' => 'unix', 'path' => $name] : null;
+        }
+        if ($stype === 'http' || $stype === 'https') {
+            $port = intval($s['socket-port'] ?? 0);
+            if ($port === 0) {
+                return null;
+            }
+            return [
+                'type'   => 'http',
+                'host'   => $s['socket-address'] ?? '127.0.0.1',
+                'port'   => $port,
+                'tls'    => $stype === 'https',
+                'verify' => false,
+            ];
+        }
+        return null;
+    }
+
+    private function isManualConfig($service)
+    {
+        if (!file_exists($this->config_file)) {
+            return false;
+        }
+        $xml = simplexml_load_file($this->config_file);
+        if ($xml === false) {
+            return false;
+        }
+        // Confirmed on OPNsense 26.1: //OPNsense/Kea/dhcp{4,6}/general/manual_config.
+        // Read defensively so a missing path simply means "not manual".
+        $n = $xml->xpath("//OPNsense/Kea/{$service}/general/manual_config");
+        if (empty($n)) {
+            return false;
+        }
+        return in_array(strtolower(trim((string)$n[0])), ['1', 'true', 'yes'], true);
+    }
+
+    /**
+     * Run config-get against a Kea daemon over whichever channel resolveKeaSocket
+     * selected, normalize the response, and return its arguments map (or null if
+     * the daemon is unreachable / offline / rejected the command).
+     */
     private function keaQuery($service)
     {
-        list($host, $port) = $this->getKeaEndpoint();
-        $url = "http://{$host}:{$port}/";
-        $ch  = curl_init($url);
-        curl_setopt($ch, CURLOPT_CUSTOMREQUEST, 'POST');
-        curl_setopt($ch, CURLOPT_POSTFIELDS, json_encode(['command' => 'config-get', 'service' => [$service]]));
-        curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
-        curl_setopt($ch, CURLOPT_HTTPHEADER, ['Content-Type: application/json']);
-        curl_setopt($ch, CURLOPT_TIMEOUT, 5);
-
-        $response   = curl_exec($ch);
-        $http_code  = curl_getinfo($ch, CURLINFO_HTTP_CODE);
-        $curl_errno = curl_errno($ch);
-        curl_close($ch);
-
-        if ($curl_errno !== 0 || $http_code !== 200 || $response === false) {
+        $desc = $this->resolveKeaSocket($service);
+        if ($desc === null) {
+            return null;
+        }
+        // No "service" routing field -- we talk directly to the daemon.
+        $payload  = json_encode(['command' => 'config-get']);
+        $response = $desc['type'] === 'unix'
+            ? $this->keaQueryUnix($desc['path'], $payload)
+            : $this->keaQueryHttp($desc, $payload);
+        if ($response === null) {
             return null;
         }
         $data = json_decode($response, true);
         if ($data === null) {
             return null;
         }
-        // Normalize the list-of-maps response to a single map.
+        // Normalize the list-of-maps response (HTTP wraps in a one-element
+        // array; unix returns a plain object) to a single map.
         if (is_array($data) && isset($data[0]) && is_array($data[0])) {
             $data = $data[0];
         }
@@ -100,6 +208,61 @@ class KcaconfigController extends ApiControllerBase
             return null;
         }
         return $data['arguments'] ?? [];
+    }
+
+    private function keaQueryUnix($path, $payload)
+    {
+        if (!file_exists($path)) {
+            return null;
+        }
+        $sock = @stream_socket_client("unix://{$path}", $errno, $errstr, 5);
+        if ($sock === false) {
+            return null;
+        }
+        stream_set_timeout($sock, 5);
+        // Kea reads until it has a complete JSON object, then responds and closes
+        // the connection, so we write once and read until EOF.
+        fwrite($sock, $payload . "\n");
+        $response = '';
+        while (!feof($sock)) {
+            $chunk = fread($sock, 65536);
+            if ($chunk === false) {
+                break;
+            }
+            $response .= $chunk;
+            $info = stream_get_meta_data($sock);
+            if (!empty($info['timed_out'])) {
+                fclose($sock);
+                return null;
+            }
+        }
+        fclose($sock);
+        return $response !== '' ? $response : null;
+    }
+
+    private function keaQueryHttp($desc, $payload)
+    {
+        $scheme = !empty($desc['tls']) ? 'https' : 'http';
+        $url = "{$scheme}://{$desc['host']}:{$desc['port']}/";
+        $ch  = curl_init($url);
+        curl_setopt($ch, CURLOPT_CUSTOMREQUEST, 'POST');
+        curl_setopt($ch, CURLOPT_POSTFIELDS, $payload);
+        curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+        curl_setopt($ch, CURLOPT_HTTPHEADER, ['Content-Type: application/json']);
+        curl_setopt($ch, CURLOPT_TIMEOUT, 5);
+        if (!empty($desc['tls']) && empty($desc['verify'])) {
+            // OPNsense-generated certs are self-signed; skip verification.
+            curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);
+            curl_setopt($ch, CURLOPT_SSL_VERIFYHOST, 0);
+        }
+        $response   = curl_exec($ch);
+        $http_code  = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        $curl_errno = curl_errno($ch);
+        curl_close($ch);
+        if ($curl_errno !== 0 || $http_code !== 200 || $response === false) {
+            return null;
+        }
+        return $response;
     }
 
     // ── Our plugin settings ───────────────────────────────────────────────────
@@ -140,15 +303,13 @@ class KcaconfigController extends ApiControllerBase
      * Build a lookup map from domain name (normalised, no trailing dot) to its
      * full domain config, read directly from kea-dhcp-ddns.conf.
      *
-     * TODO: revert to querying d2 via the Control Agent once OPNsense fixes
-     * the missing control-socket bug (filed at github.com/opnsense/core/issues).
-     * The correct approach is:
-     *   $d2_args = $this->keaQuery('d2');
-     *   $domains = $d2_args['DhcpDdns']['forward-ddns']['ddns-domains'] ?? [];
-     * This is blocked because OPNsense generates kea-ctrl-agent.conf with a d2
-     * socket entry (/var/run/kea/kea-ddns-ctrl-socket) but does not generate a
-     * matching control-socket section in kea-dhcp-ddns.conf, so the socket is
-     * never created and the Control Agent returns "No such file or directory".
+     * We read the file directly because OPNsense does not generate a
+     * control-socket section in kea-dhcp-ddns.conf, so kea-dhcp-ddns exposes no
+     * control channel to query. If a future OPNsense provisions one, this could
+     * instead resolve a d2 connection (resolveKeaSocket('d2') -- the resolver is
+     * already service-generic) and run:
+     *   $d2 = $this->keaQuery('d2');  // would need 'd2' wired into keaQuery
+     *   $domains = $d2['DhcpDdns']['forward-ddns']['ddns-domains'] ?? [];
      *
      * Returns [map, d2_ok]: map is name→domain, d2_ok is true if the file
      * was readable and parseable.
@@ -377,7 +538,7 @@ class KcaconfigController extends ApiControllerBase
         $dhcp4 = $this->keaQuery('dhcp4');
         if ($dhcp4 === null) {
             $result['status']    = 'error';
-            $result['kea_error'] = 'Unable to query Kea DHCPv4. Check that Kea Control Agent is running.';
+            $result['kea_error'] = 'Unable to query Kea DHCPv4. Check that the Kea DHCPv4 service is running.';
         } else {
             $result['ipv4_subnets'] = $this->extractSubnets($dhcp4, 'dhcp4', $domain_map, $plugin, $d2_ok);
         }

@@ -31,6 +31,28 @@
             formatTokenizersUI();
             $('.selectpicker').selectpicker('refresh');
             updateServiceControlUI('keaunbound');
+
+            // The Kea Connection settings are reserved for a future release —
+            // show them disabled (grayed out) until the manual-override path is
+            // wired in. Purely cosmetic; guarded so it can never break the form.
+            try {
+                var $conn = $("[id^='general.connection.']");
+                $conn.prop('disabled', true);
+                $conn.filter('select').selectpicker('refresh');
+                $("tr[id^='row_general.connection.']").css('opacity', '0.6');
+            } catch (e) { /* non-critical */ }
+
+            // TSIG is not yet tested — grey out its inputs (kept under Advanced
+            // for reference). Disabled inputs are still read by saveFormToEndpoint,
+            // so stored values are preserved on Apply.
+            try {
+                ['enable_tsig', 'tsig_key_name', 'tsig_key_secret', 'tsig_algorithm'].forEach(function(f) {
+                    var $el = $("[id='general.general." + f + "']");
+                    $el.prop('disabled', true);
+                    $el.filter('select').selectpicker('refresh');
+                    $("tr[id='row_general.general." + f + "']").css('opacity', '0.6');
+                });
+            } catch (e) { /* non-critical */ }
         });
 
         $("#reconfigureAct").SimpleActionButton({
