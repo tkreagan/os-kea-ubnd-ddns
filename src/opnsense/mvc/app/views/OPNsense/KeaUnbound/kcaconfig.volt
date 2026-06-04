@@ -36,6 +36,9 @@
                    color: #888; margin-bottom: 4px; }
     .ku-topinfo .ku-row { margin: 2px 0; }
     .ku-topinfo code { font-size: 0.85em; }
+    /* Bootstrap renders <code> in crimson by default — neutralize it on this
+       page so the socket path, listener address, and examples aren't red. */
+    code { color: #444; background-color: #f5f5f5; }
     @media (min-width: 768px) { .ku-col-plugin { border-left: 1px solid #e6e6e6; } }
 </style>
 
@@ -90,10 +93,10 @@ function escapeHtml(text) {
 
 const BUCKET_LABELS = {
     'ok':            { label: 'OK',              cls: 'label-success' },
-    'tsig_mismatch': { label: 'TSIG Mismatch',   cls: 'label-danger'  },
+    'tsig_mismatch': { label: 'TSIG Mismatch',   cls: 'label-warning'  },
     'wrong_target':  { label: 'Other Target',    cls: 'label-warning' },
     'no_ddns':       { label: 'No DDNS',         cls: 'label-default' },
-    'd2_offline':    { label: 'DDNS Agent Down', cls: 'label-danger'  },
+    'd2_offline':    { label: 'DDNS Agent Down', cls: 'label-warning'  },
 };
 
 function bucketBadge(status) {
@@ -112,9 +115,9 @@ function connLine(label, conn) {
     }
     let val;
     if (conn.method === 'unix') {
-        val = '<span class="text-muted">unix socket</span> <code>' + escapeHtml(conn.detail) + '</code>';
+        val = '<span class="text-muted">unix socket:</span> <code>' + escapeHtml(conn.detail) + '</code>';
     } else if (conn.method === 'http') {
-        val = '<span class="text-muted">HTTP</span> <code>' + escapeHtml(conn.detail) + '</code>';
+        val = '<span class="text-muted">HTTP:</span> <code>' + escapeHtml(conn.detail) + '</code>';
     } else {
         val = '<span class="text-muted">not resolved</span>';
     }
@@ -176,7 +179,7 @@ function renderKeaConfig(data) {
     html += '<div class="row" style="margin-bottom:16px;">';
     html += statCard(ok,      'Correctly Configured', 'text-success');
     html += statCard(wrong,   'Other Target',         'text-warning');
-    html += statCard(tsig + d2_off, 'Needs Attention','text-danger');
+    html += statCard(tsig + d2_off, 'Needs Attention','text-warning');
     html += statCard(no_ddns, 'No DDNS',              'text-muted');
     html += '</div>';
 
@@ -221,7 +224,7 @@ function fixGuide(hasWrong, hasTsig, hasNoDdns, hasD2Off, listener) {
                '<div class="panel-body">';
 
     if (hasD2Off) {
-        html += '<h5><span class="label label-danger">DDNS Agent Down</span> &nbsp;Start the Kea DHCP-DDNS daemon</h5>' +
+        html += '<h5><span class="label label-warning">DDNS Agent Down</span> &nbsp;Start the Kea DHCP-DDNS daemon</h5>' +
                 '<ol>' +
                 '<li>Go to <strong>Services → Kea DHCP → DDNS Agent</strong></li>' +
                 '<li>Check <strong>Enabled</strong></li>' +
@@ -275,7 +278,7 @@ function fixGuide(hasWrong, hasTsig, hasNoDdns, hasD2Off, listener) {
     }
 
     if (hasTsig) {
-        html += '<h5><span class="label label-danger">TSIG Mismatch</span> &nbsp;Fix TSIG authentication</h5>' +
+        html += '<h5><span class="label label-warning">TSIG Mismatch</span> &nbsp;Fix TSIG authentication</h5>' +
                 '<p>Both sides must agree on TSIG — either both enabled with matching key, or both disabled.</p>' +
                 '<strong>To enable TSIG on this subnet:</strong>' +
                 '<ol>' +

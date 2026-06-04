@@ -1,3 +1,6 @@
 __pycache__/
 *.pyc
 .DS_Store
+
+# Private agent/dev working notes — not for the repo.
+CLAUDE.md

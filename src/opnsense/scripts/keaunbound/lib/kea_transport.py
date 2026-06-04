@@ -80,6 +80,14 @@ _MANUAL_XPATHS = {
     "dhcp6": "OPNsense/Kea/dhcp6/general/manual_config",
 }
 
+# config.xml enable flags per service: //OPNsense/Kea/dhcp{4,6}/general/enabled.
+# A disabled service has no control socket to reach, so treating its absence as
+# an error is wrong — we skip it (KeaServiceUnavailableError) rather than fail.
+_ENABLED_XPATHS = {
+    "dhcp4": "OPNsense/Kea/dhcp4/general/enabled",
+    "dhcp6": "OPNsense/Kea/dhcp6/general/enabled",
+}
+
 
 class KeaUnavailableError(Exception):
     """Raised when a Kea daemon is not available or not responding."""
@@ -214,6 +222,12 @@ def resolve_kea_connection(service: str, timeout: float = 5.0):
 def _build_connection(service: str, timeout: float):
     log = logging.getLogger(_LOG_TAG)
 
+    # Step -1: if the service is disabled in OPNsense, there is nothing to reach.
+    # Report it as a per-service skip (not a hard error) so callers move on
+    # quietly instead of surfacing a "control socket not found" warning.
+    if not _is_service_enabled(service):
+        raise KeaServiceUnavailableError(f"Kea {service} is not enabled")
+
     # Step 0: explicit plugin override (reserved -- UI fields disabled for now).
     override = _plugin_override(service, timeout)
     if override is not None:
@@ -271,6 +285,22 @@ def _is_manual_config(service: str) -> bool:
     except (OSError, ET.ParseError):
         return False
     return node is not None and (node.text or "").strip() in ("1", "true", "yes")
+
+
+def _is_service_enabled(service: str) -> bool:
+    """True if OPNsense has the Kea service enabled. Defaults to True when the
+    flag is absent so we never wrongly skip a service on a config that lacks it
+    — only an explicit '0' is treated as disabled."""
+    xpath = _ENABLED_XPATHS.get(service)
+    if not xpath:
+        return True
+    try:
+        node = ET.parse(CONFIG_XML).getroot().find(xpath)
+    except (OSError, ET.ParseError):
+        return True
+    if node is None:
+        return True
+    return (node.text or "").strip() in ("1", "true", "yes")
 
 
 def _parse_conf_socket(service: str) -> Optional[Dict]:

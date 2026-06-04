@@ -159,9 +159,10 @@ function escapeHtml(text) {
 }
 
 function flag(on, color) {
-    // Filled circle = present, open circle = absent — in the column's color.
-    return '<span style="color:' + color + '; font-size:1.05em;">' +
-           (on ? '●' : '○') + '</span>';
+    // FontAwesome circles (filled = present, ring = absent) so these and the
+    // PTR-state icons in the same row share one size and baseline.
+    return '<i class="' + (on ? 'fa-solid fa-circle' : 'fa-regular fa-circle') +
+           '" style="color:' + color + ';"></i>';
 }
 
 // Per-host reverse (PTR) state icon.
