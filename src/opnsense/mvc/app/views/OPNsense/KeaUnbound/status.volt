@@ -44,6 +44,11 @@
     .kea-flag            { text-align: center; }
     /* Let the boolean column headers wrap at spaces so the columns stay narrow. */
     th.sortable.kea-flag { white-space: normal; }
+    /* Long IPv6 ip6.arpa reverse names: truncate with ellipsis; click to expand. */
+    .kea-revname { display: inline-block; max-width: 26ch; overflow: hidden;
+                   text-overflow: ellipsis; white-space: nowrap;
+                   vertical-align: bottom; cursor: pointer; }
+    .kea-revname.kea-expanded { max-width: none; white-space: normal; word-break: break-all; }
 </style>
 
 <script>
@@ -64,6 +69,11 @@ $( document ).ready(function() {
         e.preventDefault();
         showDesc = !showDesc;
         applyDescVisibility();
+    });
+
+    // Click a truncated (IPv6) reverse name to expand/collapse it.
+    $(document).on("click", ".kea-revname", function() {
+        $(this).toggleClass("kea-expanded");
     });
 
     $("#cleanBtn").click(function() {
@@ -217,7 +227,7 @@ function renderAuditData(audit) {
     if (!audit.complete && audit.kea_error) {
         html += '<div class="alert alert-warning alert-dismissible" role="alert">' +
                 '<button type="button" class="close" data-dismiss="alert"><span>&times;</span></button>' +
-                '<strong>Warning:</strong> DNS data is incomplete — Kea Control Agent unavailable: ' +
+                '<strong>Warning:</strong> DNS data is incomplete — Kea unavailable: ' +
                 escapeHtml(audit.kea_error) + '</div>';
     }
 
@@ -361,15 +371,20 @@ function renderAuditData(audit) {
                 '<th class="sortable">Reverse Name</th>' +
                 '<th class="sortable">Points To</th>' +
                 '<th class="sortable">TTL</th>' +
-                '<th class="sortable kea-flag">Forward</th>' +
                 '</tr></thead><tbody>';
         ptrs.forEach(function(p) {
+            const tgts = p.targets || [];
+            const pts = tgts.map(function(t) {
+                return '<div>' + fwdIcon(t.fwd_state) + ' ' + escapeHtml(t.target) + '</div>';
+            }).join('');
+            const ttls = tgts.map(function(t) {
+                return '<div>' + escapeHtml(t.ttl != null ? String(t.ttl) : '—') + '</div>';
+            }).join('');
             html += '<tr>' +
-                '<td class="kea-ip">'       + escapeHtml(p.ip ? p.ip : '—') + '</td>' +
-                '<td class="kea-hostname">' + escapeHtml(p.ptr_name) + '</td>' +
-                '<td class="kea-hostname">' + escapeHtml(p.target ? p.target : '—') + '</td>' +
-                '<td>' + escapeHtml(p.ttl != null ? String(p.ttl) : '—') + '</td>' +
-                '<td class="kea-flag">' + fwdIcon(p.fwd_state) + '</td>' +
+                '<td class="kea-ip">' + escapeHtml(p.ip ? p.ip : '—') + '</td>' +
+                '<td><span class="kea-hostname kea-revname" title="' + escapeHtml(p.ptr_name) + '">' + escapeHtml(p.ptr_name) + '</span></td>' +
+                '<td class="kea-hostname">' + pts + '</td>' +
+                '<td>' + ttls + '</td>' +
                 '</tr>';
         });
         html += '</tbody></table></div>' +

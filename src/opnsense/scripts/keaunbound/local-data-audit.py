@@ -155,7 +155,7 @@ def audit_local_data(report_json: bool = False, verbose: bool = False) -> int:
             logger.info(f"Skipping {service}: {e}")
             continue
         except KeaUnavailableError as e:
-            # Control agent unreachable — cannot complete the audit.
+            # Kea daemon unreachable — cannot complete the audit.
             result["complete"] = False
             result["kea_error"] = str(e)
             logger.warning(f"Kea unavailable: {e}")
@@ -336,6 +336,8 @@ def audit_local_data(report_json: bool = False, verbose: bool = False) -> int:
         ip = _ip_from_ptr(ptr_name)
         covered = _ptr_targets(unbound_data, ip) if ip else set()
         uncovered = (names_by_ip.get(ip, set()) - covered) if ip else set()
+        # One entry per reverse name; each target it points to is its own line.
+        targets = []
         for line in unbound_data.get(ptr_name, []):
             parts = line.split()
             if len(parts) < 5 or parts[3] != "PTR":
@@ -350,12 +352,16 @@ def audit_local_data(report_json: bool = False, verbose: bool = False) -> int:
                 fwd_state = "partial"     # amber: other names on this IP have no PTR
             else:
                 fwd_state = "match"       # green: forward matches, full coverage
-            result["ptr_records"].append({
-                "ip": ip,
-                "ptr_name": ptr_name,
+            targets.append({
                 "target": target,
                 "ttl": parts[1],
                 "fwd_state": fwd_state,
+            })
+        if targets:
+            result["ptr_records"].append({
+                "ip": ip,
+                "ptr_name": ptr_name,
+                "targets": targets,
             })
 
     if report_json:
