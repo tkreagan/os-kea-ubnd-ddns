@@ -138,19 +138,90 @@ function keaunbound_cron()
 
 function keaunbound_configure()
 {
+    /*
+     * Every event below either flushes Unbound's runtime local-data
+     * (unbound_configure_do is registered on dns/local/newwanip/unbound_start
+     * in unbound.inc) or signals that Kea data changed (kea_start/kea_sync).
+     * In all cases our Kea-derived records must be re-asserted, because they
+     * live only in Unbound's runtime store and vanish on every reconfigure.
+     *
+     * Rather than run a full reservation+lease sync inline on each event
+     * (wasteful during the boot burst, and racy against a still-restarting
+     * Kea/Unbound), every hook funnels into keaunbound_request_sync(), which
+     * just records a request and kicks the debounce worker (sync-debounce.py).
+     * The worker coalesces the burst, waits until Kea+Unbound are stably up,
+     * then syncs once. See sync-debounce.py for the full rationale.
+     *
+     * bootup still starts the listener daemon (keaunbound_start_do); the
+     * boot-time resync is covered by kea_start/kea_sync.
+     */
     return [
-        'kea_start'     => ['keaunbound_sync_if_enabled:2'],
-        'kea_sync'      => ['keaunbound_sync_if_enabled:2'],
-        'unbound_start' => ['keaunbound_sync_if_enabled'],
+        'kea_start'     => ['keaunbound_request_sync:2'],
+        'kea_sync'      => ['keaunbound_request_sync:2'],
+        'unbound_start' => ['keaunbound_request_sync'],
+        'dns'           => ['keaunbound_request_sync'],
+        'local'         => ['keaunbound_request_sync'],
+        'newwanip'      => ['keaunbound_request_sync:2'],
         'bootup'        => ['keaunbound_start_do:2'],
     ];
+}
+
+function keaunbound_request_sync($verbose = false)
+{
+    /*
+     * Thin, non-blocking request for a resync. Resolves policy UPSTREAM (here,
+     * in PHP) and hands the decision to the debounce worker via a request file —
+     * the worker reads no config.xml of its own.
+     *
+     *   1. Master gate: if the plugin is disabled, do nothing (no marker, no
+     *      worker — the worker never even exists).
+     *   2. Resolve which sync types are enabled (static / dynamic). If neither,
+     *      there is nothing to request.
+     *   3. Write the enabled types into the request file. Writing also bumps the
+     *      file's mtime, which is the "generation" the worker debounces on.
+     *   4. Launch one debounce worker, guarded by flock(1) so concurrent hooks
+     *      in a burst collapse to a single worker (-E 0 makes a lost race a
+     *      silent no-op; -o keeps the lock off any grandchildren). mwexecfb runs
+     *      it detached, so this hook returns immediately and never blocks the
+     *      boot/reconfigure pipeline.
+     */
+    $cfg = new \OPNsense\KeaUnbound\General();
+    if (empty((string)$cfg->general->enabled)) {
+        service_log("KeaUnbound: plugin disabled -- not requesting sync\n", $verbose);
+        return 0;
+    }
+
+    $types = [];
+    if (should_sync_static_reservations()) {
+        $types[] = 'static';
+    }
+    if (should_sync_dynamic_leases()) {
+        $types[] = 'dynamic';
+    }
+    if (empty($types)) {
+        service_log("KeaUnbound: no sync types enabled -- not requesting sync\n", $verbose);
+        return 0;
+    }
+
+    @mkdir('/var/run/keaunbound', 0755, true);
+    @file_put_contents('/var/run/keaunbound/sync.request', implode(' ', $types) . "\n");
+
+    service_log('KeaUnbound: requesting debounced resync (' . implode(' ', $types) . ")...\n", $verbose);
+    mwexecfb('/usr/local/bin/flock -n -E 0 -o /var/run/keaunbound/sync.lock '
+        . '/usr/local/opnsense/scripts/keaunbound/sync-debounce.py');
+
+    return 0;
 }
 
 function keaunbound_sync_if_enabled($verbose = false)
 {
     /*
-     * Sync Kea data to Unbound if configured to do so.
-     * Called from three hooks: kea_start, kea_sync, unbound_start.
+     * Synchronous resync: run the enabled syncs inline and return the result.
+     *
+     * Configure hooks no longer call this directly — they funnel through
+     * keaunbound_request_sync() / the debounce worker instead (see
+     * keaunbound_configure()). This is retained as the direct, blocking path
+     * for manual/diagnostic use where an immediate, in-line result is wanted.
      *
      * Syncs static reservations and/or dynamic leases depending on
      * plugin configuration. Returns 0 if all enabled syncs succeeded,
