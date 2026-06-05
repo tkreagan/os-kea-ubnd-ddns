@@ -6,6 +6,7 @@ __pycache__/
 tests/.env
 tests/results/
 *.txz
+*.pkg
 
 # Private agent/dev working notes — not for the repo.
 CLAUDE.md
