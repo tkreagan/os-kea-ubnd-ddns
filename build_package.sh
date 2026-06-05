@@ -103,7 +103,7 @@ version: ${VERSION}
 origin: opnsense-plugins/${PKGNAME}
 comment: Kea DHCP to Unbound DNS registration (DDNS bridge)
 www: https://github.com/tkreagan/os-kea-unbound
-maintainer: tkr@tkr.net
+maintainer: tk@rgn.ltd
 prefix: /usr/local
 desc: <<EOD
 Automatically registers Kea DHCP leases and static reservations in Unbound DNS.
