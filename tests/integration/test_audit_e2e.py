@@ -4,7 +4,7 @@
 Integration tests — local-data-audit.py end-to-end.
 
 Verifies the JSON output structure and status values against known
-injected state on orbison.
+injected state on the OPNsense box.
 """
 
 from __future__ import annotations

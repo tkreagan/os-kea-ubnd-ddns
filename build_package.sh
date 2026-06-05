@@ -1,13 +1,13 @@
 #!/bin/sh
-# build_package.sh -- Build os-kea-unbound-VERSION.txz on orbison.
+# build_package.sh -- Build os-kea-unbound-VERSION.txz on the OPNsense box.
 #
 # Does NOT require the OPNsense build tools tree (/usr/tools, /usr/plugins).
 # Uses pkg(8) directly with a generated +MANIFEST.
 #
-# Usage (run locally — it SSHes to orbison):
+# Usage (run locally — it SSHes to the OPNsense box):
 #   ./build_package.sh
 #
-# Usage (run directly on orbison as root/sudo):
+# Usage (run directly on the OPNsense box as root/sudo):
 #   sh /usr/local/sbin/build_package.sh    # if deployed
 #   sh build_package.sh                    # from repo root on the box
 #
@@ -17,8 +17,8 @@
 set -e
 
 REPO="$(cd "$(dirname "$0")" && pwd)"
-SSH_USER="${OPNSENSE_SSH_USER:-tkr}"
-HOST="${OPNSENSE_HOST:-orbison.plhm.rgn.cm}"
+SSH_USER="${OPNSENSE_SSH_USER:?OPNSENSE_SSH_USER must be set}"
+HOST="${OPNSENSE_HOST:?OPNSENSE_HOST must be set}"
 
 # ── Read version from Makefile ────────────────────────────────────────────────
 VERSION=$(grep '^PLUGIN_VERSION' "$REPO/Makefile" | awk '{print $NF}')
@@ -27,7 +27,7 @@ OUTFILE="/tmp/${PKGNAME}-${VERSION}.txz"
 
 # ── Check if running on the box or locally ────────────────────────────────────
 if [ "$(uname)" = "FreeBSD" ]; then
-    # Running ON orbison — do the build directly
+    # Running ON the OPNsense box — do the build directly
     _build_on_box
 else
     # Running on macOS — deploy and build remotely

@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: BSD-2-Clause
 # Copyright (c) 2026 Thomas Reagan
 """
-Integration tests — reservation-sync.py and lease-sync.py on orbison.
+Integration tests — reservation-sync.py and lease-sync.py.
 
 Verifies that the configd actions sync_static and sync_dynamic actually
 produce the expected Unbound records, and that the host_entries.conf guard

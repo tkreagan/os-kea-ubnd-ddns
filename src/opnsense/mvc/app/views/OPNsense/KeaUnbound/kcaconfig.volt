@@ -247,7 +247,7 @@ function fixGuide(hasWrong, hasTsig, hasNoDdns, hasD2Off, listener) {
     if (hasNoDdns) {
         html += '<h5><span class="label label-default">No DDNS</span> &nbsp;Enable DDNS for this subnet</h5>' +
                 '<ol>' +
-                '<li>Set <strong>DNS forward zone</strong> to your domain (e.g. <code>plhm.rgn.cm</code>)</li>' +
+                '<li>Set <strong>DNS forward zone</strong> to your domain (e.g. <code>home.example.com</code>)</li>' +
                 '<li>Set <strong>DNS qualifying suffix</strong> to the same value</li>' +
                 '<li>Optionally set <strong>DNS reverse zone</strong> (e.g. <code>1.10.10.in-addr.arpa.</code>)</li>' +
                 '<li>Click <strong>Advanced</strong> and set the following:</li>' +

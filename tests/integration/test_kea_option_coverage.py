@@ -3,7 +3,7 @@
 """
 Integration tests — Kea DHCP/DDNS option coverage audit.
 
-Checks that the Kea configuration on orbison has the DDNS-related options
+Checks that the Kea configuration on the OPNsense box has the DDNS-related options
 set in a way that is compatible with this plugin. This is an audit /
 documentation test: failures are findings to review, not necessarily bugs.
 

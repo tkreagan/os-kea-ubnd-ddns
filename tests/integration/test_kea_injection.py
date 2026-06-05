@@ -10,7 +10,7 @@ the sync scripts, and verifies Unbound state.  All test data uses the
 Prerequisites:
   - dhcp4 running with a subnet that covers 192.168.99.0/24
   - lease_cmds hook loaded in kea-dhcp4 (for lease4-add)
-  - The plugin installed and configured on orbison
+  - The plugin installed and configured on the OPNsense box
 """
 
 from __future__ import annotations
@@ -27,7 +27,7 @@ def dhcp4_subnet_id(kea):
     resp = kea("config-get", service="dhcp4")
     subnets = resp.get("arguments", {}).get("Dhcp4", {}).get("subnet4", [])
     if not subnets:
-        pytest.skip("No DHCPv4 subnets configured on orbison")
+        pytest.skip("No DHCPv4 subnets configured on the OPNsense box")
     return subnets[0]["id"]
 
 

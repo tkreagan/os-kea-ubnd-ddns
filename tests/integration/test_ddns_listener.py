@@ -34,7 +34,7 @@ LISTENER_HOST = "127.0.0.1"
 
 def _send_udp_via_ssh(box, data: bytes) -> bytes:
     """
-    Send a UDP packet to 127.0.0.1:53535 on orbison by running a Python
+    Send a UDP packet to 127.0.0.1:53535 on the OPNsense box by running a Python
     one-liner over SSH (the listener is bound to loopback, not accessible
     from the Mac directly).
     """

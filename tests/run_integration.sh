@@ -1,5 +1,5 @@
 #!/bin/sh
-# Deploy to dev-opnsense and run integration tests.
+# Deploy to the OPNsense box and run integration tests.
 #
 # Connection info comes from tests/.env (copy .env.example and fill it in).
 # Requires: paramiko in the active Python venv (pip install paramiko).
