@@ -7,3 +7,16 @@ lease synchronization, a DNS registration audit view, and scheduled stale-record
 cleanup.
 
 WWW: https://github.com/tkreagan/os-kea-unbound
+
+Plugin Changelog
+================
+
+0.9
+
+* Initial release
+* RFC 2136 DNS UPDATE stub listener bridging kea-dhcp-ddns to Unbound
+* Optional TSIG authentication for DNS UPDATE messages
+* Static reservation sync and dynamic lease sync scripts
+* Lease Audit tab with per-record PTR state tracking
+* Kea Config Check tab (d2 forward zones, TSIG key validation)
+* Scheduled stale-record cleanup

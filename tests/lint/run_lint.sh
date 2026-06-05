@@ -10,6 +10,44 @@ ERRORS=0
 fail() { echo "FAIL: $1"; ERRORS=$((ERRORS + 1)); }
 pass() { echo "ok:   $1"; }
 
+# ── macOS artifact check (must be first — catches the ._General.xml failure) ──
+echo "==> no macOS AppleDouble sidecars in src/:"
+SIDECARS=$(find "$REPO/src" -name '._*' 2>/dev/null)
+if [ -n "$SIDECARS" ]; then
+    echo "$SIDECARS"
+    fail "AppleDouble sidecar files in src/ — delete them and re-tar with COPYFILE_DISABLE=1"
+else
+    pass "no AppleDouble sidecars"
+fi
+
+echo "==> no .DS_Store in src/:"
+DS=$(find "$REPO/src" -name '.DS_Store' 2>/dev/null)
+if [ -n "$DS" ]; then
+    echo "$DS"
+    fail ".DS_Store files in src/"
+else
+    pass "no .DS_Store"
+fi
+
+echo "==> no __pycache__ or .pyc in src/:"
+PYC=$(find "$REPO/src" \( -name '__pycache__' -o -name '*.pyc' \) 2>/dev/null)
+if [ -n "$PYC" ]; then
+    echo "$PYC"
+    fail "__pycache__ or .pyc files in src/ (these get packaged)"
+else
+    pass "no compiled Python artifacts"
+fi
+
+echo "==> model XML filenames are plain (no leading ._):"
+BAD_XML=$(find "$REPO/src/opnsense/mvc/app/models" -name '*.xml' 2>/dev/null \
+    | awk -F/ '{if ($NF ~ /^\._/) print}')
+if [ -n "$BAD_XML" ]; then
+    echo "$BAD_XML"
+    fail "._*.xml model files found — OPNsense ConfigMaintenance::loadModels() will crash"
+else
+    pass "model XML filenames OK"
+fi
+
 # ── Python — PEP 8 / style ────────────────────────────────────────────────────
 if command -v ruff > /dev/null 2>&1; then
     echo "==> ruff"

@@ -401,6 +401,19 @@ class KcaconfigController extends ApiControllerBase
             ];
         }
 
+        // Kea D2 requires the zone name to be an absolute FQDN ending with '.'.
+        // Without the trailing dot, every update is dropped with
+        // DHCP_DDNS_NO_FWD_MATCH_ERROR even though the domain name looks correct.
+        $raw_name = $domain['name'] ?? '';
+        if ($raw_name !== '' && substr($raw_name, -1) !== '.') {
+            return [
+                'ddns_status' => 'wrong_target',
+                'detail'      => "DHCP-DDNS forward zone \"{$raw_name}\" is missing a required trailing dot — "
+                               . "change it to \"{$raw_name}.\" in Services → Kea DHCP → DDNS.",
+                'target'      => null,
+            ];
+        }
+
         // Find a DNS server entry that matches our listener.
         $servers = $domain['dns-servers'] ?? [];
         $our_addr = $plugin['address'];

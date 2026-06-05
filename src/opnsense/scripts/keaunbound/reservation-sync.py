@@ -21,6 +21,7 @@ Usage:
 
 import argparse
 import sys
+import time
 
 # Add parent directory to path so we can import lib
 sys.path.insert(0, "/usr/local/opnsense/scripts/keaunbound")
@@ -53,14 +54,22 @@ def sync_reservations(dry_run: bool = False, verbose: bool = False) -> int:
     try:
         # Query both IPv4 and IPv6 reservations
         for service in ["dhcp4", "dhcp6"]:
-            try:
-                reservations = query_kea_reservations(service=service)
-            except KeaServiceUnavailableError as e:
-                logger.debug(f"Skipping {service}: {e}")
-                continue
-            except KeaUnavailableError as e:
-                logger.warning(f"Kea unavailable for {service}: {e}")
-                errors += 1
+            reservations = None
+            for _attempt in range(3):
+                try:
+                    reservations = query_kea_reservations(service=service)
+                    break
+                except KeaServiceUnavailableError as e:
+                    logger.debug(f"Skipping {service}: {e}")
+                    break
+                except KeaUnavailableError as e:
+                    if _attempt < 2:
+                        logger.debug(f"Kea not ready for {service}, retrying in 5s: {e}")
+                        time.sleep(5)
+                        continue
+                    logger.warning(f"Kea unavailable for {service}: {e}")
+                    errors += 1
+            if reservations is None:
                 continue
 
             for res in reservations:
