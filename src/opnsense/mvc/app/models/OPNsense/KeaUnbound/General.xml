@@ -72,7 +72,7 @@
                  Mappings" (regdhcpstatic) setting — the plugin only fills the
                  gap for reservations OPNsense has not itself registered. -->
             <sync_static_reservations type="BooleanField">
-                <Default>0</Default>
+                <Default>1</Default>
                 <Required>Y</Required>
             </sync_static_reservations>
 
@@ -84,7 +84,7 @@
                  This is called on Unbound startup (to repopulate after reload)
                  and periodically via cron (to keep entries fresh). -->
             <sync_dynamic_leases type="BooleanField">
-                <Default>0</Default>
+                <Default>1</Default>
                 <Required>Y</Required>
             </sync_dynamic_leases>
 
@@ -106,7 +106,7 @@
                  to remove stale records (entries in Unbound that don't match
                  any Kea reservation, lease, or OPNsense-managed entry). -->
             <enable_auto_clean type="BooleanField">
-                <Default>0</Default>
+                <Default>1</Default>
                 <Required>Y</Required>
             </enable_auto_clean>
 
