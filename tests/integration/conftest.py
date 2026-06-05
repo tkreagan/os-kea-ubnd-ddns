@@ -3,28 +3,30 @@
 """
 Integration test conftest — password-based SSH via paramiko.
 
-Infrastructure:
-  dev-opnsense   OPNsense 26.1.9, em1 = 192.168.1.1/24
-                 Plugin installed; build tree at PLUGIN_DIR
-  dev-dhcpclient Debian 13, ens19 = 192.168.1.100 (DHCP from dev-opnsense)
+Requires two machines reachable from the test runner:
+  - An OPNsense box with the plugin installed and a Kea DHCPv4 subnet
+  - A DHCP client box that holds a lease from the OPNsense box
 
-Connection info from tests/.env or environment variables:
+All connection details come from tests/.env (copy .env.example and fill in).
+No hostnames, IPs, usernames, or passwords are hardcoded here.
 
-  OPNSENSE_HOST        hostname / IP of dev-opnsense
-  OPNSENSE_SSH_USER    SSH user (default: dev)
-  OPNSENSE_SSH_PASS    SSH + sudo password (default: dev)
-  OPNSENSE_API_KEY     OPNsense API key ID
-  OPNSENSE_API_SECRET  OPNsense API key secret
-  DHCPCLIENT_HOST      hostname / IP of dev-dhcpclient
-  DHCPCLIENT_SSH_USER  SSH user (default: dev)
-  DHCPCLIENT_SSH_PASS  SSH + sudo password (default: dev)
-  DHCPCLIENT_LAN_IF    DHCP interface on the client (default: ens19)
-  PLUGIN_DIR           Build tree on the OPNsense box
+Environment variables (all required unless noted):
+  OPNSENSE_HOST        hostname / IP of the OPNsense box
+  OPNSENSE_SSH_USER    SSH user
+  OPNSENSE_SSH_PASS    SSH + sudo password
+  OPNSENSE_API_KEY     OPNsense API key ID    (optional — API tests skip if absent)
+  OPNSENSE_API_SECRET  OPNsense API key secret (optional)
+  DHCPCLIENT_HOST      hostname / IP of the DHCP client box
+  DHCPCLIENT_SSH_USER  SSH user on the client
+  DHCPCLIENT_SSH_PASS  SSH + sudo password on the client
+  DHCPCLIENT_LAN_IF    Network interface that holds the DHCP lease
+  DHCPCLIENT_HOSTNAME  Short hostname sent in DHCP requests (no domain)
+  PLUGIN_DIR           Plugin build tree on the OPNsense box
                        (default: /usr/plugins/net/kea-unbound)
-
-Test data:
-  Injected leases/reservations use 192.168.1.201-254 (inside the subnet but
-  outside the DHCP pool of .100-.200) and hostname prefix "testhost-".
+  TEST_IP_PREFIX       IP prefix for injected test data, e.g. "192.168.1."
+                       (default: "192.168.99." — safe for any network)
+  TEST_IP_START        First octet of test range, e.g. 201
+                       (default: 200)
 """
 
 from __future__ import annotations
@@ -43,13 +45,10 @@ from requests.auth import HTTPDigestAuth
 
 REPO = pathlib.Path(__file__).parents[2]
 
-# Test-data allocation
-TEST_IP_PREFIX = "192.168.1."
-TEST_IP_START  = 201          # .201–.254: in subnet, outside DHCP pool
+# Test-data allocation — read from .env / environment so no topology is
+# hardcoded in source.  Defaults are safe for any network (192.168.99.x
+# is accepted by lease4-add even when out of the configured DHCP pool).
 TEST_HOST_PREFIX = "testhost-"
-
-_ip_counter   = TEST_IP_START
-_host_counter = 0
 
 PLUGIN_DIR_DEFAULT = "/usr/plugins/net/kea-unbound"
 
@@ -67,6 +66,24 @@ def _load_env() -> None:
 
 
 _load_env()
+
+# Resolve test IP range after env is loaded.
+TEST_IP_PREFIX = os.environ.get("TEST_IP_PREFIX", "192.168.99.")
+try:
+    TEST_IP_START = int(os.environ.get("TEST_IP_START", "200"))
+except ValueError:
+    TEST_IP_START = 200
+
+_ip_counter   = TEST_IP_START
+_host_counter = 0
+
+
+def _require_env(name: str, skip_msg: str | None = None) -> str:
+    """Return env var value, or pytest.skip if missing/empty."""
+    val = os.environ.get(name, "").strip()
+    if not val:
+        pytest.skip(skip_msg or f"{name} not set — skipping integration tests")
+    return val
 
 
 # ── Paramiko SSH session ──────────────────────────────────────────────────────
@@ -158,15 +175,12 @@ class SSHSession:
 
 @pytest.fixture(scope="session")
 def opnsense_info():
-    host = os.environ.get("OPNSENSE_HOST")
-    if not host:
-        pytest.skip("OPNSENSE_HOST not set — skipping integration tests")
     return {
-        "host":       host,
-        "user":       os.environ.get("OPNSENSE_SSH_USER",    "dev"),
-        "password":   os.environ.get("OPNSENSE_SSH_PASS",    "dev"),
-        "api_key":    os.environ.get("OPNSENSE_API_KEY",     ""),
-        "api_secret": os.environ.get("OPNSENSE_API_SECRET",  ""),
+        "host":       _require_env("OPNSENSE_HOST"),
+        "user":       _require_env("OPNSENSE_SSH_USER"),
+        "password":   _require_env("OPNSENSE_SSH_PASS"),
+        "api_key":    os.environ.get("OPNSENSE_API_KEY",    ""),
+        "api_secret": os.environ.get("OPNSENSE_API_SECRET", ""),
         "plugin_dir": os.environ.get("PLUGIN_DIR", PLUGIN_DIR_DEFAULT),
     }
 
@@ -179,14 +193,13 @@ def box(opnsense_info):
 
 @pytest.fixture(scope="session")
 def dhcpclient_info():
-    host = os.environ.get("DHCPCLIENT_HOST")
-    if not host:
-        pytest.skip("DHCPCLIENT_HOST not set — skipping DHCP client tests")
     return {
-        "host":     host,
-        "user":     os.environ.get("DHCPCLIENT_SSH_USER", "dev"),
-        "password": os.environ.get("DHCPCLIENT_SSH_PASS", "dev"),
-        "lan_if":   os.environ.get("DHCPCLIENT_LAN_IF",  "ens19"),
+        "host":     _require_env("DHCPCLIENT_HOST",
+                                  "DHCPCLIENT_HOST not set — skipping DHCP client tests"),
+        "user":     _require_env("DHCPCLIENT_SSH_USER"),
+        "password": _require_env("DHCPCLIENT_SSH_PASS"),
+        "lan_if":   _require_env("DHCPCLIENT_LAN_IF"),
+        "hostname": _require_env("DHCPCLIENT_HOSTNAME"),
     }
 
 
@@ -194,7 +207,7 @@ def dhcpclient_info():
 
 @pytest.fixture(scope="session")
 def ssh(opnsense_info) -> SSHSession:
-    """Authenticated SSH session to dev-opnsense (password, sudo included)."""
+    """Authenticated SSH session to the OPNsense box (password, sudo included)."""
     s = SSHSession(
         opnsense_info["host"],
         opnsense_info["user"],
@@ -206,7 +219,7 @@ def ssh(opnsense_info) -> SSHSession:
 
 @pytest.fixture(scope="session")
 def dhcpclient(dhcpclient_info) -> SSHSession:
-    """Authenticated SSH session to dev-dhcpclient (password, sudo included)."""
+    """Authenticated SSH session to the DHCP client box (password, sudo included)."""
     s = SSHSession(
         dhcpclient_info["host"],
         dhcpclient_info["user"],
@@ -391,7 +404,7 @@ def dhcp4_subnet_id(kea):
     resp = kea("config-get", service="dhcp4")
     subnets = resp.get("arguments", {}).get("Dhcp4", {}).get("subnet4", [])
     if not subnets:
-        pytest.skip("No DHCPv4 subnets configured on dev-opnsense")
+        pytest.skip("No DHCPv4 subnets configured on the OPNsense box")
     return subnets[0]["id"]
 
 
@@ -400,11 +413,11 @@ def dhcp4_subnet_id(kea):
 @pytest.fixture(scope="session")
 def deploy(ssh: SSHSession, opnsense_info):
     """
-    Upload the working tree to dev-opnsense and run `make upgrade`.
+    Upload the working tree to the OPNsense box and run `make upgrade`.
 
     Steps:
       1. Build a clean tarball of src/ locally (COPYFILE_DISABLE=1, no xattrs).
-      2. Upload via SFTP to /tmp/keaunbound-src.tar.gz on dev-opnsense.
+      2. Upload via SFTP to /tmp/keaunbound-src.tar.gz on the OPNsense box.
       3. Extract into the plugin build tree src/ directory.
       4. Run `make upgrade` (rebuilds .pkg and upgrades the installed package).
     """
