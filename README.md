@@ -105,15 +105,15 @@ that should register DNS entries, and switch to **Advanced** mode. Under the
 | Field | Value | Notes |
 |---|---|---|
 | DNS forward zone | `home.lan.` | **Trailing dot required** — see note below |
-| DNS reverse zone | *(leave blank unless needed)* | Custom reverse zones are not tested in v0.9 |
+| DNS reverse zone | e.g. `1.168.192.in-addr.arpa.` | Set (with trailing dot) to register PTR records — required for reverse DNS. Verified working in v0.9 testing. |
 | DNS qualifying suffix | `home.lan` | No trailing dot — appended to bare hostnames (e.g. `myhost` → `myhost.home.lan`) |
 | DNS server address | `127.0.0.1` | |
 | DNS server port | `53535` | Must match the plugin's listen port (configurable in **Settings**) |
 | TSIG key name / secret / algorithm | *(leave blank)* | Not tested in v0.9 |
-| Override no update | *(optional)* | Not tested in v0.9 |
-| Override client update | *(optional)* | Not tested in v0.9 |
-| Update on renew | *(optional)* | Not tested in v0.9 |
-| Conflict resolution mode | `check-with-dhcid (default)` | Alternative modes not tested in v0.9 |
+| Override no update | **On** (recommended) | Server registers DNS even if the client requests no updates. **Implies "Override client update"** — see below. |
+| Override client update | **On** (recommended) | Server owns the forward (A) record. Recommended: there is no external DDNS server for clients to self-register against. |
+| Update on renew | **On** (recommended) | Re-asserts DNS on lease renewal — self-heals if Unbound's runtime data is lost. Subject to the lease-cache caveat below. |
+| Conflict resolution mode | `check-with-dhcid` (default) | Default verified in v0.9. Alternative modes depend on listener prerequisite handling — pending a future listener test round. |
 
 Save and apply after editing each subnet.
 
@@ -121,6 +121,28 @@ Save and apply after editing each subnet.
 > end with a trailing dot — `home.lan.` not `home.lan`. Without it, kea-dhcp-ddns
 > silently drops every DNS UPDATE and nothing is registered. This is the most
 > common configuration mistake. The **Kea Config Check** tab detects and flags it.
+
+> **Recommended DDNS settings (verified in v0.9 testing):** For this plugin's
+> architecture — Unbound is updated via the bridge and there is no external DDNS
+> server — enable **all three** override options together:
+>
+> - **Override client update = On** — the server assumes the forward (A) update.
+>   Without it, a client that asks to do its own update (FQDN `S=0`) leaves *no* A
+>   record, because it has nowhere to register.
+> - **Override no update = On** — every device is registered (visibility / reverse
+>   lookups) even if it requests no updates. **This should imply Override client
+>   update:** enabling it while leaving Override client update *off* is an incoherent
+>   combination — the server overrides the *stronger* "no updates" request but honors
+>   the *weaker* "I'll do my own A" request (backwards). Always enable both together.
+> - **Update on renew = On** — re-registers on renewal so records self-heal.
+>   **Caveat:** Kea's lease caching (`cache-threshold`, default `0.25`) reuses a lease
+>   renewed within `0.25 × valid-lifetime` and performs *no* DDNS, so DNS is only
+>   refreshed on renewals outside that window (~1000s with a 4000s lease). A normal
+>   renewal at half the lease lifetime is outside the window and works.
+>
+> **Known gap:** these options only act when the client sends a name. Clients that
+> send no hostname/FQDN at all (e.g. MAC-randomizing phones) get no record; closing
+> that would require `ddns-generated-prefix` + `ddns-replace-client-name`.
 
 ### Step 2 — Enable kea-dhcp-ddns
 
@@ -234,10 +256,15 @@ OPNsense 26.1 with Kea DHCP4:
 
 - **TSIG not tested** — the implementation should be complete but has not been
   validated with a live kea-dhcp-ddns signing updates. Disabled for v0.9.
-- **Custom reverse zones not tested** — the DNS reverse zone field in subnet DDNS
-  settings has not been tested or validated; feedback welcome.
-- **Advanced update options not fully tested** — Advanced subnet update options like "Update on renew" and non-default
-  conflict resolution modes have not been tested in v0.9.
+- **Reverse zones verified** — the DNS reverse zone field is tested and working;
+  PTR records register correctly when it is set (with a trailing dot).
+- **Override options verified** — `override-no-update`, `override-client-update`,
+  and `update-on-renew` were validated end-to-end in v0.9 testing and behave per the
+  recommended-settings note above (including the `override-no-update ⇒
+  override-client-update` constraint and the lease-cache interaction with
+  `update-on-renew`). Non-default **conflict-resolution modes** remain untested —
+  their effect depends on the listener honoring RFC 2136 prerequisites and is
+  deferred to a future listener test round.
 - **Kea connection override not yet active** — the advanced Kea Service Control
   Connection fields in Settings are placeholders for a future release; the plugin
   currently auto-detects control sockets from the running Kea configuration.  It is not clear if these

@@ -301,6 +301,21 @@ function fixGuide(hasWrong, hasTsig, hasNoDdns, hasD2Off, listener) {
     return html;
 }
 
+function advisoriesHtml(arr) {
+    if (!arr || !arr.length) { return ''; }
+    let h = '';
+    arr.forEach(function(a) {
+        const warn = a.level === 'warning';
+        const icon = warn
+            ? '<i class="fa fa-exclamation-triangle"></i> '
+            : '<i class="fa fa-info-circle"></i> ';
+        const color = warn ? '#8a6d3b' : '#31708f';
+        h += '<div style="margin-top:4px; font-size:0.85em; color:' + color + ';">' +
+             icon + escapeHtml(a.message) + '</div>';
+    });
+    return h;
+}
+
 function subnetPanel(title, subnets) {
     if (subnets.length === 0) {
         return '<div class="panel panel-default" style="margin-bottom:12px;">' +
@@ -321,7 +336,7 @@ function subnetPanel(title, subnets) {
         rows += '<tr>' +
                 '<td class="kea-subnet">'  + escapeHtml(s.subnet)       + '</td>' +
                 '<td>'                     + bucketBadge(s.ddns_status)  + '</td>' +
-                '<td class="text-muted" style="font-size:0.9em;">' + escapeHtml(s.detail || '') + '</td>' +
+                '<td class="text-muted" style="font-size:0.9em;">' + escapeHtml(s.detail || '') + advisoriesHtml(s.advisories) + '</td>' +
                 '<td>'                     + target                      + '</td>' +
                 '<td>'                     + comment                     + '</td>' +
                 '</tr>';

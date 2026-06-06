@@ -514,14 +514,70 @@ class KcaconfigController extends ApiControllerBase
     private function buildSubnetEntry($subnet, $global_sfx, $domain_map, $plugin, $d2_ok)
     {
         $classified = $this->classifySubnet($subnet, $global_sfx, $domain_map, $plugin, $d2_ok);
+        $ddns_enabled = isset($subnet['ddns-send-updates']) && $subnet['ddns-send-updates'] === true;
         return [
             'subnet'      => $subnet['subnet'] ?? 'unknown',
-            'ddns_enabled'=> isset($subnet['ddns-send-updates']) && $subnet['ddns-send-updates'] === true,
+            'ddns_enabled'=> $ddns_enabled,
             'ddns_status' => $classified['ddns_status'],
             'detail'      => $classified['detail'],
             'target'      => $classified['target'],
             'comment'     => $subnet['comment'] ?? null,
+            'advisories'  => $this->ddnsAdvisories($subnet, $ddns_enabled),
         ];
+    }
+
+    /**
+     * Recommend the DDNS override settings for this plugin's architecture and flag the
+     * incoherent "override no update without override client update" combination.
+     *
+     * These three options are evaluated by Kea/D2 from the subnet flags (before the
+     * plugin's listener is involved); behaviour validated 2026-06 on the dev rig.
+     * Recommended posture for the Unbound-bridge setup (no external DDNS server):
+     * override-client-update, override-no-update, and update-on-renew all ON.
+     *
+     * @return array list of ['level' => 'warning'|'info', 'message' => string]
+     */
+    private function ddnsAdvisories($subnet, $ddns_enabled)
+    {
+        if (!$ddns_enabled) {
+            return [];
+        }
+        $onu = ($subnet['ddns-override-no-update'] ?? false) === true;
+        $ocu = ($subnet['ddns-override-client-update'] ?? false) === true;
+        $uor = ($subnet['ddns-update-on-renew'] ?? false) === true;
+        $out = [];
+
+        // Incoherent: overrides the strong "no updates" opt-out (N) but honors the
+        // weaker "I'll do my own A" opt-out (S=0). Combine warning + recommendation.
+        if ($onu && !$ocu) {
+            $out[] = [
+                'level'   => 'warning',
+                'message' => 'Incoherent: override-no-update is on but override-client-update is off. '
+                           . 'Recommend enabling override-client-update to avoid this conflict.',
+            ];
+        } elseif (!$ocu) {
+            // Only show the info recommendation if the warning was not triggered.
+            $out[] = [
+                'level'   => 'info',
+                'message' => 'Recommend enabling override-client-update.',
+            ];
+        }
+
+        if (!$onu) {
+            $out[] = [
+                'level'   => 'info',
+                'message' => 'Recommend enabling override-no-update.',
+            ];
+        }
+
+        if (!$uor) {
+            $out[] = [
+                'level'   => 'info',
+                'message' => 'Recommend enabling update-on-renew.',
+            ];
+        }
+
+        return $out;
     }
 
     private function isListenerRunning()
