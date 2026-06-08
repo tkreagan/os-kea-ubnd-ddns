@@ -155,3 +155,22 @@ def test_clean_host_refuses_to_remove_last_record(mock_kea, mock_rhe, mock_ld, m
     assert rc == 0
     calls = [str(c) for c in mock_uc.call_args_list]
     assert not any("local_data_remove" in c for c in calls)
+
+
+# ── synthesis-aware pass-through ──────────────────────────────────────────────
+
+@mock.patch.object(clean, "unbound_control", return_value=True)
+@mock.patch.object(clean, "find_stale_records", return_value=(set(), set()))
+@mock.patch.object(clean, "collect_kea_pairs", return_value=set())
+@mock.patch.object(clean, "unbound_list_local_data", return_value={})
+@mock.patch.object(clean, "read_host_entries", return_value={})
+@mock.patch.object(clean, "read_d2_reverse_zones", return_value={"1.168.192.in-addr.arpa"})
+@mock.patch.object(clean, "get_synthesize_ptr", return_value=False)
+def test_bulk_passes_synthesize_flag_to_find_stale(
+        mock_gsp, mock_rdz, mock_rhe, mock_ld, mock_ckp, mock_fsr, mock_uc):
+    """clean_stale_records reads synthesize_ptr + d2_reverse_zones and forwards them."""
+    clean.clean_stale_records()
+    mock_fsr.assert_called_once()
+    _, kwargs = mock_fsr.call_args
+    assert kwargs.get("synthesize_ptr") is False
+    assert kwargs.get("d2_reverse_zones") == {"1.168.192.in-addr.arpa"}

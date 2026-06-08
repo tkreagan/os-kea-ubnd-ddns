@@ -55,6 +55,8 @@ from lib.keaunbound_sync import (
     query_kea_leases,
     reverse_ptr,
     is_in_host_entries,
+    get_synthesize_ptr,
+    read_d2_reverse_zones,
 )
 
 
@@ -230,7 +232,12 @@ def clean_stale_records(interactive: bool = False, dry_run: bool = False, verbos
         logger.error("Cannot safely identify stale records without Kea data — aborting")
         return 1
 
-    stale_names, orphaned_ptrs = find_stale_records(unbound_data, kea_pairs, host_entries)
+    synthesize_ptr = get_synthesize_ptr()
+    d2_reverse_zones = read_d2_reverse_zones()
+    stale_names, orphaned_ptrs = find_stale_records(
+        unbound_data, kea_pairs, host_entries,
+        synthesize_ptr=synthesize_ptr, d2_reverse_zones=d2_reverse_zones,
+    )
 
     total_stale = len(stale_names) + len(orphaned_ptrs)
 

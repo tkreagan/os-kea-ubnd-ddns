@@ -101,6 +101,22 @@
                 <Required>Y</Required>
             </aggressive_cleanup>
 
+            <!-- Synthesize PTR (reverse) records from forward A/AAAA DDNS updates.
+                 When enabled (default), the DDNS listener automatically creates the
+                 standard in-addr.arpa / ip6.arpa PTR record for every A/AAAA ADD it
+                 receives from kea-dhcp-ddns. This works whether or not a reverse zone
+                 is configured in kea-dhcp-ddns.
+
+                 Disable this only if you manage reverse DNS separately (e.g., another
+                 authoritative server for in-addr.arpa) and do not want this plugin to
+                 write or delete PTR records via the live path. Explicit PTR NCRs from
+                 kea-dhcp-ddns (reverse-ddns zone configured) are always applied
+                 regardless of this setting. -->
+            <synthesize_ptr type="BooleanField">
+                <Default>1</Default>
+                <Required>Y</Required>
+            </synthesize_ptr>
+
             <!-- Automatically clean stale DNS records from Unbound.
                  When enabled, the local-data-clean.py script runs periodically
                  to remove stale records (entries in Unbound that don't match

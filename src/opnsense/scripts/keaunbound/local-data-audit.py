@@ -57,6 +57,8 @@ from lib.keaunbound_sync import (
     is_ptr_name,
     find_stale_records,
     setup_logging,
+    get_synthesize_ptr,
+    read_d2_reverse_zones,
 )
 
 
@@ -222,7 +224,12 @@ def audit_local_data(report_json: bool = False, verbose: bool = False) -> int:
     stale_names = set()
     orphaned_ptr_names = set()
     if result["complete"]:
-        stale_names, orphaned_ptr_names = find_stale_records(unbound_data, kea_pairs, host_entries)
+        synthesize_ptr = get_synthesize_ptr()
+        d2_reverse_zones = read_d2_reverse_zones()
+        stale_names, orphaned_ptr_names = find_stale_records(
+            unbound_data, kea_pairs, host_entries,
+            synthesize_ptr=synthesize_ptr, d2_reverse_zones=d2_reverse_zones,
+        )
 
     all_hostnames = (set(res_ips_by_host) | set(lease_ips_by_host)
                      | set(unbound_ips_by_host) | set(host_ips_by_host))

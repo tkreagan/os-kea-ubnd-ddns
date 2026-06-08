@@ -19,13 +19,17 @@ from lib import keaunbound_sync
 from lib.keaunbound_sync import (
     KeaServiceUnavailableError,
     KeaUnavailableError,
+    _arpa_to_ip,
     find_stale_records,
+    get_synthesize_ptr,
+    ip_covered_by_d2_reverse,
     is_in_host_entries,
     is_ptr_name,
     is_sane_name,
     qualify_hostname,
     query_kea_leases,
     query_kea_reservations,
+    read_d2_reverse_zones,
     read_host_entries,
     reverse_ptr,
     unbound_list_local_data,
@@ -379,3 +383,220 @@ def test_query_kea_leases_infinite_expiry(mock_dom, mock_api):
     leases = query_kea_leases("dhcp4")
     assert len(leases) == 1
     assert leases[0]["expires"] > int(time.time())
+
+
+# ── get_synthesize_ptr ────────────────────────────────────────────────────────
+
+def test_get_synthesize_ptr_default_when_missing(tmp_path, monkeypatch):
+    xml = "<opnsense><OPNsense><KeaUnbound><general></general></KeaUnbound></OPNsense></opnsense>"
+    f = tmp_path / "config.xml"
+    f.write_text(xml)
+    monkeypatch.setattr(keaunbound_sync, "CONFIG_XML", str(f))
+    assert get_synthesize_ptr() is True
+
+
+def test_get_synthesize_ptr_returns_true_when_one(tmp_path, monkeypatch):
+    xml = "<opnsense><OPNsense><KeaUnbound><general><synthesize_ptr>1</synthesize_ptr></general></KeaUnbound></OPNsense></opnsense>"
+    f = tmp_path / "config.xml"
+    f.write_text(xml)
+    monkeypatch.setattr(keaunbound_sync, "CONFIG_XML", str(f))
+    assert get_synthesize_ptr() is True
+
+
+def test_get_synthesize_ptr_returns_false_when_zero(tmp_path, monkeypatch):
+    xml = "<opnsense><OPNsense><KeaUnbound><general><synthesize_ptr>0</synthesize_ptr></general></KeaUnbound></OPNsense></opnsense>"
+    f = tmp_path / "config.xml"
+    f.write_text(xml)
+    monkeypatch.setattr(keaunbound_sync, "CONFIG_XML", str(f))
+    assert get_synthesize_ptr() is False
+
+
+def test_get_synthesize_ptr_default_on_bad_xml(tmp_path, monkeypatch):
+    f = tmp_path / "config.xml"
+    f.write_text("not xml")
+    monkeypatch.setattr(keaunbound_sync, "CONFIG_XML", str(f))
+    assert get_synthesize_ptr() is True
+
+
+# ── _arpa_to_ip ───────────────────────────────────────────────────────────────
+
+@pytest.mark.parametrize("name,expected", [
+    ("1.1.168.192.in-addr.arpa",   "192.168.1.1"),
+    ("100.1.168.192.in-addr.arpa", "192.168.1.100"),
+    ("1.0.0.0.ip6.arpa",           ""),   # only 4 nibbles — not a full PTR owner
+    ("myhost.lan",                 ""),
+    ("",                           ""),
+    ("1.1.168.192.in-addr.arpa.",  "192.168.1.1"),  # trailing dot stripped
+])
+def test_arpa_to_ip_ipv4(name, expected):
+    assert _arpa_to_ip(name) == expected
+
+
+def test_arpa_to_ip_ipv6():
+    # ::1 arpa form has 32 nibbles
+    arpa = "1." + "0." * 31 + "ip6.arpa"
+    result = _arpa_to_ip(arpa)
+    assert result == "::1"
+
+
+# ── read_d2_reverse_zones ─────────────────────────────────────────────────────
+
+def test_read_d2_reverse_zones_parses(tmp_path, monkeypatch):
+    conf = {
+        "DhcpDdns": {
+            "reverse-ddns": {
+                "ddns-domains": [
+                    {"name": "1.168.192.in-addr.arpa.", "dns-servers": []},
+                    {"name": "2.168.192.in-addr.arpa.", "dns-servers": []},
+                ]
+            }
+        }
+    }
+    import json
+    f = tmp_path / "kea-dhcp-ddns.conf"
+    f.write_text(json.dumps(conf))
+    monkeypatch.setattr(keaunbound_sync, "D2_CONF", str(f))
+    zones = read_d2_reverse_zones()
+    assert "1.168.192.in-addr.arpa" in zones
+    assert "2.168.192.in-addr.arpa" in zones
+
+
+def test_read_d2_reverse_zones_absent_file(monkeypatch):
+    monkeypatch.setattr(keaunbound_sync, "D2_CONF", "/nonexistent/kea-dhcp-ddns.conf")
+    assert read_d2_reverse_zones() == set()
+
+
+def test_read_d2_reverse_zones_no_reverse_domains(tmp_path, monkeypatch):
+    conf = {"DhcpDdns": {"forward-ddns": {"ddns-domains": []}}}
+    import json
+    f = tmp_path / "kea-dhcp-ddns.conf"
+    f.write_text(json.dumps(conf))
+    monkeypatch.setattr(keaunbound_sync, "D2_CONF", str(f))
+    assert read_d2_reverse_zones() == set()
+
+
+# ── ip_covered_by_d2_reverse ──────────────────────────────────────────────────
+
+def test_ip_covered_by_d2_reverse_v4_covered():
+    zones = {"1.168.192.in-addr.arpa"}
+    assert ip_covered_by_d2_reverse("192.168.1.100", zones) is True
+
+
+def test_ip_covered_by_d2_reverse_v4_not_covered():
+    zones = {"2.168.192.in-addr.arpa"}
+    assert ip_covered_by_d2_reverse("192.168.1.100", zones) is False
+
+
+def test_ip_covered_by_d2_reverse_empty_zones():
+    assert ip_covered_by_d2_reverse("192.168.1.1", set()) is False
+
+
+def test_ip_covered_by_d2_reverse_v6_covered():
+    # 2001:db8::1 arpa: 1.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.8.b.d.0.1.0.0.2.ip6.arpa
+    # A /32 zone would be "8.b.d.0.1.0.0.2.ip6.arpa"
+    # We test with the exact /128 zone so the arpa == zone check fires.
+    arpa = reverse_ptr("2001:db8::1")
+    zones = {arpa}
+    assert ip_covered_by_d2_reverse("2001:db8::1", zones) is True
+
+
+def test_ip_covered_by_d2_reverse_invalid_ip():
+    zones = {"1.168.192.in-addr.arpa"}
+    assert ip_covered_by_d2_reverse("not-an-ip", zones) is False
+
+
+# ── find_stale_records — synthesis-aware cleanup matrix ──────────────────────
+
+def test_find_stale_records_synthesis_on_keeps_active_lease_ptr():
+    """synthesize_ptr=True (default): PTR backed by live forward → kept."""
+    unbound = _unbound_data(
+        "live.lan. 300 IN A 192.168.1.10",
+        "10.1.168.192.in-addr.arpa. 300 IN PTR live.lan.",
+    )
+    kea_pairs = {("live.lan", "192.168.1.10")}
+    stale, orphans = find_stale_records(unbound, kea_pairs, {}, synthesize_ptr=True)
+    assert "live.lan" not in stale
+    assert "10.1.168.192.in-addr.arpa" not in orphans
+
+
+def test_find_stale_records_synthesis_off_no_d2_removes_ptr():
+    """synthesize_ptr=False + no D2 zone: PTR is unconditionally orphaned even with live forward."""
+    unbound = _unbound_data(
+        "live.lan. 300 IN A 192.168.1.10",
+        "10.1.168.192.in-addr.arpa. 300 IN PTR live.lan.",
+    )
+    kea_pairs = {("live.lan", "192.168.1.10")}
+    stale, orphans = find_stale_records(
+        unbound, kea_pairs, {}, synthesize_ptr=False, d2_reverse_zones=set()
+    )
+    assert "live.lan" not in stale          # forward kept — Kea still backs it
+    assert "10.1.168.192.in-addr.arpa" in orphans  # PTR unconditionally removed
+
+
+def test_find_stale_records_synthesis_off_d2_covers_ip_keeps_ptr():
+    """synthesize_ptr=False + D2 zone covers the IP: PTR is D2-managed, leave it."""
+    unbound = _unbound_data(
+        "live.lan. 300 IN A 192.168.1.10",
+        "10.1.168.192.in-addr.arpa. 300 IN PTR live.lan.",
+    )
+    kea_pairs = {("live.lan", "192.168.1.10")}
+    stale, orphans = find_stale_records(
+        unbound, kea_pairs, {},
+        synthesize_ptr=False,
+        d2_reverse_zones={"1.168.192.in-addr.arpa"},
+    )
+    assert "10.1.168.192.in-addr.arpa" not in orphans
+
+
+def test_find_stale_records_host_override_ptr_preserved_synthesis_on():
+    """Host-override PTR (IP-keyed in host_entries) is never flagged regardless of synthesis."""
+    unbound = _unbound_data(
+        "router.lan. 300 IN A 192.168.1.1",
+        "1.1.168.192.in-addr.arpa. 300 IN PTR router.lan.",
+    )
+    kea_pairs = set()  # not in Kea — OPNsense manages this
+    # host_entries is IP-keyed for PTRs (the realistic format)
+    host_entries = {
+        "router.lan": ["local-data: \"router.lan. IN A 192.168.1.1\""],
+        "192.168.1.1": ["local-data-ptr: \"192.168.1.1 router.lan.\""],
+    }
+    stale, orphans = find_stale_records(
+        unbound, kea_pairs, host_entries, synthesize_ptr=True
+    )
+    assert "router.lan" not in stale
+    assert "1.1.168.192.in-addr.arpa" not in orphans
+
+
+def test_find_stale_records_host_override_ptr_preserved_synthesis_off():
+    """Host-override PTR preserved even when synthesis is OFF and no D2 zone."""
+    unbound = _unbound_data(
+        "router.lan. 300 IN A 192.168.1.1",
+        "1.1.168.192.in-addr.arpa. 300 IN PTR router.lan.",
+    )
+    kea_pairs = set()
+    host_entries = {
+        "router.lan": ["local-data: \"router.lan. IN A 192.168.1.1\""],
+        "192.168.1.1": ["local-data-ptr: \"192.168.1.1 router.lan.\""],
+    }
+    stale, orphans = find_stale_records(
+        unbound, kea_pairs, host_entries,
+        synthesize_ptr=False, d2_reverse_zones=set()
+    )
+    assert "router.lan" not in stale
+    assert "1.1.168.192.in-addr.arpa" not in orphans
+
+
+def test_find_stale_records_synthesis_off_v6_removes_ptr():
+    """Same rule applies for ip6.arpa PTRs."""
+    v6_arpa = reverse_ptr("2001:db8::1")
+    assert v6_arpa is not None
+    unbound = _unbound_data(
+        f"v6host.lan. 300 IN AAAA 2001:db8::1",
+        f"{v6_arpa}. 300 IN PTR v6host.lan.",
+    )
+    kea_pairs = {("v6host.lan", "2001:db8::1")}
+    stale, orphans = find_stale_records(
+        unbound, kea_pairs, {}, synthesize_ptr=False, d2_reverse_zones=set()
+    )
+    assert "v6host.lan" not in stale
+    assert v6_arpa in orphans

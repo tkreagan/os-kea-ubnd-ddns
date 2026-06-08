@@ -204,6 +204,72 @@ def test_start_includes_tsig_args(mock_run, tmp_path, monkeypatch):
     assert "--tsig-algorithm" in cmd
 
 
+# ── start.py — synthesize_ptr flag ───────────────────────────────────────────
+
+def test_get_config_synthesize_ptr_default(tmp_path, monkeypatch):
+    """synthesize_ptr defaults to '1' when absent from config.xml."""
+    xml = "<opnsense><OPNsense><KeaUnbound><general><enabled>1</enabled></general></KeaUnbound></OPNsense></opnsense>"
+    cfg_file = tmp_path / "config.xml"
+    cfg_file.write_text(xml)
+    monkeypatch.setattr(start, "CONFIG_XML", str(cfg_file))
+    cfg = start.get_config()
+    assert cfg["synthesize_ptr"] == "1"
+
+
+def _make_start_xml(tmp_path, extra=""):
+    xml = f"""<opnsense><OPNsense><KeaUnbound><general>
+        <enabled>1</enabled><port>53535</port>
+        <enable_tsig>0</enable_tsig>
+        <aggressive_cleanup>0</aggressive_cleanup>
+        {extra}
+        </general></KeaUnbound></OPNsense></opnsense>"""
+    p = tmp_path / "config.xml"
+    p.write_text(xml)
+    return p
+
+
+@mock.patch("subprocess.run")
+def test_start_no_synthesize_ptr_arg_when_disabled(mock_run, tmp_path, monkeypatch):
+    """synthesize_ptr=0 in config → --no-synthesize-ptr passed to daemon."""
+    mock_run.return_value = mock.Mock(returncode=0)
+    cfg = _make_start_xml(tmp_path, "<synthesize_ptr>0</synthesize_ptr>")
+    monkeypatch.setattr(start, "CONFIG_XML", str(cfg))
+    monkeypatch.setattr(start, "SUPERVISOR_PIDFILE", str(tmp_path / "nonexistent.pid"))
+    monkeypatch.setattr(start, "PIDFILE", str(tmp_path / "child.pid"))
+    monkeypatch.setattr(start, "_port_in_use", lambda p: False)
+    start.main()
+    cmd = mock_run.call_args[0][0]
+    assert "--no-synthesize-ptr" in cmd
+
+
+@mock.patch("subprocess.run")
+def test_start_no_synthesize_ptr_arg_absent_when_enabled(mock_run, tmp_path, monkeypatch):
+    """synthesize_ptr=1 in config → --no-synthesize-ptr NOT passed (default ON)."""
+    mock_run.return_value = mock.Mock(returncode=0)
+    cfg = _make_start_xml(tmp_path, "<synthesize_ptr>1</synthesize_ptr>")
+    monkeypatch.setattr(start, "CONFIG_XML", str(cfg))
+    monkeypatch.setattr(start, "SUPERVISOR_PIDFILE", str(tmp_path / "nonexistent.pid"))
+    monkeypatch.setattr(start, "PIDFILE", str(tmp_path / "child.pid"))
+    monkeypatch.setattr(start, "_port_in_use", lambda p: False)
+    start.main()
+    cmd = mock_run.call_args[0][0]
+    assert "--no-synthesize-ptr" not in cmd
+
+
+@mock.patch("subprocess.run")
+def test_start_no_synthesize_ptr_arg_absent_by_default(mock_run, tmp_path, monkeypatch):
+    """No synthesize_ptr in config → --no-synthesize-ptr NOT passed (default ON)."""
+    mock_run.return_value = mock.Mock(returncode=0)
+    cfg = _make_start_xml(tmp_path)  # no synthesize_ptr element
+    monkeypatch.setattr(start, "CONFIG_XML", str(cfg))
+    monkeypatch.setattr(start, "SUPERVISOR_PIDFILE", str(tmp_path / "nonexistent.pid"))
+    monkeypatch.setattr(start, "PIDFILE", str(tmp_path / "child.pid"))
+    monkeypatch.setattr(start, "_port_in_use", lambda p: False)
+    start.main()
+    cmd = mock_run.call_args[0][0]
+    assert "--no-synthesize-ptr" not in cmd
+
+
 # ── stop.py — _read_pid ───────────────────────────────────────────────────────
 
 def test_read_pid_parses_integer(tmp_path):

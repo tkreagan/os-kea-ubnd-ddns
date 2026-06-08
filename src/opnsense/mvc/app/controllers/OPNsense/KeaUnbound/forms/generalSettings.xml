@@ -96,6 +96,12 @@ tab shows a full preview of what each cleanup would remove.</p>
         <help>When a new DHCP lease is registered via DDNS UPDATE, remove any previous IP addresses for that hostname that are no longer in Kea's lease or reservation table. This handles the common case where Kea issues a client a new IP without sending a DNS DELETE for the old one (standard Kea behaviour on IP change). Best-effort: the ADD is always recorded and the DDNS response is always sent regardless of whether cleanup succeeds. Requires Kea to be reachable at the time of the update. Records managed by Unbound Host Overrides are never touched.</help>
     </field>
     <field>
+        <id>general.general.synthesize_ptr</id>
+        <label>Synthesize PTR records from DDNS updates</label>
+        <type>checkbox</type>
+        <help>Automatically create the standard in-addr.arpa / ip6.arpa PTR (reverse) record for every A/AAAA update received from kea-dhcp-ddns. Enabled by default — PTRs work immediately without needing a reverse zone in kea-dhcp-ddns. Disable only if you manage reverse DNS separately (e.g. another authoritative server for in-addr.arpa). Explicit PTR updates from kea-dhcp-ddns are always applied regardless of this setting. Note: if a reverse zone is configured in kea-dhcp-ddns but it uses a non-standard name (not in-addr.arpa / ip6.arpa), the synthesized PTR at in-addr.arpa may become orphaned after a lease expires — see the Kea Config Check tab for details.</help>
+    </field>
+    <field>
         <id>general.general.enable_auto_clean</id>
         <label>Automatically clean stale DNS records</label>
         <type>checkbox</type>

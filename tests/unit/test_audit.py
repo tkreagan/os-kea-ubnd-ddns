@@ -225,3 +225,29 @@ def test_audit_json_output_has_required_keys():
     )
     for key in ("complete", "kea_error", "records", "orphaned_ptrs", "ptr_records"):
         assert key in result, f"Missing key: {key}"
+
+
+# ── synthesis-aware pass-through ──────────────────────────────────────────────
+
+def test_audit_passes_synthesize_flag_to_find_stale():
+    """audit_local_data reads synthesize_ptr + d2_reverse_zones and forwards them."""
+    from io import StringIO
+
+    with mock.patch.object(audit, "read_host_entries", return_value={}), \
+         mock.patch.object(audit, "unbound_list_local_data", return_value={}), \
+         mock.patch.object(audit, "query_kea_reservations",
+                           side_effect=[[], KeaServiceUnavailableError("off")]), \
+         mock.patch.object(audit, "query_kea_leases",
+                           side_effect=[[], KeaServiceUnavailableError("off")]), \
+         mock.patch.object(audit, "get_synthesize_ptr", return_value=False) as mock_gsp, \
+         mock.patch.object(audit, "read_d2_reverse_zones",
+                           return_value={"1.168.192.in-addr.arpa"}) as mock_rdz, \
+         mock.patch.object(audit, "find_stale_records",
+                           return_value=(set(), set())) as mock_fsr, \
+         mock.patch("sys.stdout", StringIO()):
+        audit.audit_local_data(report_json=True)
+
+    mock_fsr.assert_called_once()
+    _, kwargs = mock_fsr.call_args
+    assert kwargs.get("synthesize_ptr") is False
+    assert kwargs.get("d2_reverse_zones") == {"1.168.192.in-addr.arpa"}

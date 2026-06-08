@@ -102,7 +102,7 @@ except ImportError:
 # (daemon, sync/audit/clean scripts, start.py) logs with one program tag to the
 # single keaunbound log. The plugin always installs both halves together.
 sys.path.insert(0, "/usr/local/opnsense/scripts/keaunbound")
-from lib.keaunbound_sync import setup_logging  # noqa: E402
+from lib.keaunbound_sync import _arpa_to_ip, setup_logging  # noqa: E402
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 DEFAULT_PORT         = 53535
@@ -134,6 +134,13 @@ def parse_args():
                    help="After a successful A/AAAA ADD, remove stale IPs for "
                         "that hostname from Unbound (IPs no longer in Kea). "
                         "Best-effort: ADD outcome is unaffected if cleanup fails.")
+    p.add_argument("--no-synthesize-ptr", action="store_true",
+                   help="Do not synthesize PTR (reverse) records from forward A/AAAA ADDs. "
+                        "By default the listener synthesizes the standard in-addr.arpa / "
+                        "ip6.arpa PTR on every A/AAAA ADD, independent of D2 reverse zones. "
+                        "Disable this if you manage reverse DNS elsewhere and do not want "
+                        "the plugin to create or remove PTR records via the live path. "
+                        "Explicit PTR NCRs from kea-dhcp-ddns are still applied regardless.")
     p.add_argument("--dry-run", "-n", action="store_true",
                    help="Parse and log updates but do not call unbound-control")
     p.add_argument("--verbose", "-v", action="store_true",
@@ -262,26 +269,38 @@ def is_static_entry(name: str, rdtype: str, logger: logging.Logger,
       - Forward records: local-data: "name ... IN TYPE ..."
       - PTR records:     local-data-ptr: "ip ..."
     """
-    # For PTR records the name IS the PTR (e.g. 1.0.168.192.in-addr.arpa)
-    # For forward records check for the FQDN in a local-data line
+    # Forward record check: look for local-data: "name ... IN TYPE ..."
+    # Used for both A/AAAA (name = FQDN) and PTR (name = arpa name, type PTR).
     forward_pattern = re.compile(
         r'^local-data:\s+"' + re.escape(name) +
         rf'\.?\s+.*\bIN\s+{re.escape(rdtype)}\b',
         re.IGNORECASE
     )
-    # PTR guard: for A/AAAA this checks the reverse PTR name;
-    # for PTR records it checks the name directly as a local-data-ptr entry
+    # PTR guard: check for OPNsense's IP-keyed form: local-data-ptr: "ip ..."
+    # as well as the less common arpa-name-keyed form: local-data-ptr: "arpa.name ..."
+    # OPNsense always writes IP-keyed form (e.g. local-data-ptr: "192.168.1.1 host.")
+    # while the arpa-name form is included for completeness.
+    # When name is an arpa name (e.g. "1.1.168.192.in-addr.arpa"), decode it to
+    # an IP so the IP-keyed form is matched.  When name is a plain FQDN (forward
+    # A/AAAA calls), _arpa_to_ip returns '' and ip_ptr_pattern is None.
     ptr_pattern = re.compile(
         r'^local-data-ptr:\s+"' + re.escape(name) + r'\b',
         re.IGNORECASE
     )
+    _ip = _arpa_to_ip(name)
+    ip_ptr_pattern = re.compile(
+        r'^local-data-ptr:\s+"' + re.escape(_ip) + r'\b',
+        re.IGNORECASE
+    ) if _ip else None
 
     for filepath in static_files:
         try:
             with open(filepath) as f:
                 for line in f:
                     line = line.strip()
-                    if forward_pattern.match(line) or ptr_pattern.match(line):
+                    if (forward_pattern.match(line)
+                            or ptr_pattern.match(line)
+                            or (ip_ptr_pattern and ip_ptr_pattern.match(line))):
                         logger.info(
                             "Skipping %s %s — static entry found in %s",
                             rdtype, name, filepath
@@ -389,14 +408,16 @@ def _cleanup_host(hostname: str, new_ip: str, logger: logging.Logger) -> None:
 def process_update(msg: dns.message.Message, unbound_conf: str,
                    dry_run: bool, logger: logging.Logger,
                    static_files: list[str],
-                   aggressive_cleanup: bool = False) -> int:
+                   aggressive_cleanup: bool = False,
+                   synthesize_ptr: bool = True) -> int:
     """
     Process a DNS UPDATE message. Returns DNS RCODE to send back.
     Update section lives in msg.authority for dnspython parsed UPDATE messages.
 
     Handles:
       - A, AAAA: forward record add/remove with dual-stack preservation and
-                 automatic PTR add/remove for both IPv4 and IPv6
+                 automatic PTR add/remove for both IPv4 and IPv6 when
+                 synthesize_ptr is True (the default)
       - PTR: direct add/remove, no secondary effects
         Note: standalone PTR deletes are not expected from kea-dhcp-ddns in
         normal operation — PTRs are always cleaned up as a side effect of
@@ -473,12 +494,17 @@ def process_update(msg: dns.message.Message, unbound_conf: str,
                 ok = unbound_control(["local_data_remove", name],
                                      unbound_conf, dry_run, logger)
                 if ok:
-                    # Remove PTR records for the deleted address(es)
-                    for ptr in current_ptrs:
-                        if not is_static_entry(ptr, "PTR", logger, static_files):
-                            logger.info("Remove PTR: %s", ptr)
-                            unbound_control(["local_data_remove", ptr],
-                                            unbound_conf, dry_run, logger)
+                    # Remove PTR records for the deleted address(es).
+                    # Only attempt removal when synthesize_ptr is on — if synthesis
+                    # was disabled, no PTR was ever added by this path, so there
+                    # is nothing to clean up (an explicit reverse NCR, Path 2, is
+                    # handled independently in the PTR branch below).
+                    if synthesize_ptr:
+                        for ptr in current_ptrs:
+                            if not is_static_entry(ptr, "PTR", logger, static_files):
+                                logger.info("Remove PTR: %s", ptr)
+                                unbound_control(["local_data_remove", ptr],
+                                                unbound_conf, dry_run, logger)
                     # Re-add preserved other-family forward and PTR records,
                     # carrying the original TTL so dynamic leases keep expiring.
                     for ip, ttl in preserved:
@@ -486,7 +512,8 @@ def process_update(msg: dns.message.Message, unbound_conf: str,
                         logger.info("Restore %s: %s -> %s (TTL %ds)", other_type, name, ip, ttl)
                         unbound_control(["local_data", f"{name} {ttl} IN {other_type} {ip}"],
                                         unbound_conf, dry_run, logger)
-                        if ptr and not is_static_entry(ptr, "PTR", logger, static_files):
+                        if synthesize_ptr and ptr and \
+                                not is_static_entry(ptr, "PTR", logger, static_files):
                             logger.info("Restore PTR: %s -> %s", ptr, name)
                             unbound_control(["local_data", f"{ptr} {ttl} IN PTR {name}."],
                                             unbound_conf, dry_run, logger)
@@ -517,13 +544,16 @@ def process_update(msg: dns.message.Message, unbound_conf: str,
                     ok = unbound_control(["local_data", record],
                                          unbound_conf, dry_run, logger)
                     if ok:
-                        # Add PTR — works for both IPv4 and IPv6 via reverse_ptr()
-                        ptr = reverse_ptr(rdata)
-                        if ptr and not is_static_entry(ptr, "PTR", logger, static_files):
-                            ptr_record = f"{ptr} {rrset.ttl} IN PTR {name}."
-                            logger.info("Add PTR: %s", ptr_record)
-                            unbound_control(["local_data", ptr_record],
-                                            unbound_conf, dry_run, logger)
+                        # Synthesize PTR (Path 1) — works for both IPv4 (in-addr.arpa)
+                        # and IPv6 (ip6.arpa). Skipped when --no-synthesize-ptr is set
+                        # or when the PTR is owned by a static Unbound entry.
+                        if synthesize_ptr:
+                            ptr = reverse_ptr(rdata)
+                            if ptr and not is_static_entry(ptr, "PTR", logger, static_files):
+                                ptr_record = f"{ptr} {rrset.ttl} IN PTR {name}."
+                                logger.info("Add PTR: %s", ptr_record)
+                                unbound_control(["local_data", ptr_record],
+                                                unbound_conf, dry_run, logger)
                         added += 1
                         # After registering the new IP, remove any stale IPs
                         # for this hostname that Kea did not DELETE (e.g. when
@@ -667,7 +697,8 @@ def main():
 
         # Process the update
         rcode = process_update(msg, args.unbound_conf, args.dry_run, logger,
-                               static_files, args.aggressive_cleanup)
+                               static_files, args.aggressive_cleanup,
+                               synthesize_ptr=not args.no_synthesize_ptr)
 
         # Send response
         try:

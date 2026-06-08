@@ -70,6 +70,7 @@ def get_config():
         "tsig_key_secret":            "",
         "tsig_algorithm":             "HMAC-SHA256",
         "aggressive_cleanup":         "0",
+        "synthesize_ptr":             "1",
     }
     try:
         tree = ET.parse(CONFIG_XML)
@@ -144,6 +145,9 @@ def main():
 
     if cfg["aggressive_cleanup"] == "1":
         script_args.append("--aggressive-cleanup")
+
+    if cfg["synthesize_ptr"] != "1":
+        script_args.append("--no-synthesize-ptr")
 
     # Launch via daemon(8): -f forks to background, -p writes the child PID,
     # -P writes the supervisor PID (so stop/restart can signal the supervisor),

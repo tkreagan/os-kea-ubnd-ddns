@@ -116,3 +116,38 @@ def test_sync_leases_kea_unavailable_counts_error(mock_qkl, mock_rhe, mock_uc):
     ]
     rc = lsync.sync_leases()
     assert rc == 1
+
+
+# ── synthesize_ptr flag ───────────────────────────────────────────────────────
+
+@mock.patch.object(lsync, "unbound_control", return_value=True)
+@mock.patch.object(lsync, "read_host_entries", return_value={})
+@mock.patch.object(lsync, "query_kea_leases")
+def test_sync_leases_no_ptr_when_synthesize_off(mock_qkl, mock_rhe, mock_uc):
+    """synthesize_ptr=False → forward A is written but no PTR record."""
+    future = int(time.time()) + 3600
+    mock_qkl.side_effect = [
+        [_lease("client.lan", "192.168.1.200", future)],
+        KeaServiceUnavailableError("off"),
+    ]
+    rc = lsync.sync_leases(synthesize_ptr=False)
+    assert rc == 0
+    calls = [str(c) for c in mock_uc.call_args_list]
+    assert any("192.168.1.200" in c for c in calls)  # A record present
+    assert not any("PTR" in c for c in calls)          # no PTR
+
+
+@mock.patch.object(lsync, "unbound_control", return_value=True)
+@mock.patch.object(lsync, "read_host_entries", return_value={})
+@mock.patch.object(lsync, "query_kea_leases")
+def test_sync_leases_ptr_written_when_synthesize_on(mock_qkl, mock_rhe, mock_uc):
+    """synthesize_ptr=True (default) → both A and PTR records are written."""
+    future = int(time.time()) + 3600
+    mock_qkl.side_effect = [
+        [_lease("client.lan", "192.168.1.200", future)],
+        KeaServiceUnavailableError("off"),
+    ]
+    rc = lsync.sync_leases(synthesize_ptr=True)
+    assert rc == 0
+    calls = [str(c) for c in mock_uc.call_args_list]
+    assert any("PTR" in c for c in calls)

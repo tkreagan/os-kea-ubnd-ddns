@@ -139,6 +139,90 @@ def get_system_domain() -> str:
         return ""
 
 
+def get_synthesize_ptr() -> bool:
+    """Return the synthesize_ptr plugin setting (default True when absent)."""
+    try:
+        node = ET.parse(CONFIG_XML).getroot().find(
+            "OPNsense/KeaUnbound/general/synthesize_ptr"
+        )
+        if node is not None and node.text:
+            return node.text.strip() == "1"
+    except Exception:
+        pass
+    return True
+
+
+# Path to kea-dhcp-ddns.conf — read directly because D2 has no control socket
+# in the OPNsense provisioning (same approach as KcaconfigController.php).
+D2_CONF = "/usr/local/etc/kea/kea-dhcp-ddns.conf"
+
+
+def _arpa_to_ip(ptr_name: str) -> str:
+    """
+    Decode a reverse-DNS name (in-addr.arpa / ip6.arpa) back to its IP address
+    string, or '' if the name is not a full, parseable PTR owner name.
+
+    Used to bridge OPNsense's IP-keyed local-data-ptr format:
+      local-data-ptr: "192.168.1.1 hostname."
+    when the caller holds only the arpa form "1.1.168.192.in-addr.arpa".
+    """
+    import ipaddress as _ipaddress
+    name = ptr_name.rstrip(".")
+    if name.endswith(".in-addr.arpa"):
+        labels = name[:-len(".in-addr.arpa")].split(".")
+        if len(labels) == 4 and all(l.isdigit() for l in labels):
+            return ".".join(reversed(labels))
+    elif name.endswith(".ip6.arpa"):
+        nibbles = name[:-len(".ip6.arpa")].split(".")
+        if len(nibbles) == 32 and all(len(n) == 1 for n in nibbles):
+            rev = "".join(reversed(nibbles))
+            groups = [rev[i:i + 4] for i in range(0, 32, 4)]
+            try:
+                return str(_ipaddress.ip_address(":".join(groups)))
+            except ValueError:
+                return ""
+    return ""
+
+
+def read_d2_reverse_zones() -> Set[str]:
+    """
+    Return the set of reverse-DNS zone names configured in kea-dhcp-ddns.conf
+    (from reverse-ddns.ddns-domains[].name, trailing dot stripped).
+
+    Returns empty set if the file is absent, unparseable, or has no reverse
+    domains. Callers treat an empty set as "D2 is not managing any reverse zones."
+    """
+    try:
+        import json as _json
+        with open(D2_CONF) as f:
+            conf = _json.load(f)
+        domains = conf.get("DhcpDdns", {}).get("reverse-ddns", {}).get("ddns-domains", [])
+        return {d["name"].rstrip(".") for d in domains if d.get("name")}
+    except Exception:
+        return set()
+
+
+def ip_covered_by_d2_reverse(ip: str, zones: Set[str]) -> bool:
+    """
+    Return True if the given IP's arpa form (in-addr.arpa / ip6.arpa) is a
+    sub-domain of any zone in *zones*.
+
+    D2 matches reverse zones by suffix: 192.168.1.1 → "1.1.168.192.in-addr.arpa"
+    is covered by zone "1.168.192.in-addr.arpa" (192.168.1.0/24 delegation).
+    """
+    if not zones:
+        return False
+    arpa = reverse_ptr(ip)
+    if not arpa:
+        return False
+    arpa = arpa.rstrip(".")
+    for zone in zones:
+        zone = zone.rstrip(".")
+        if arpa == zone or arpa.endswith("." + zone):
+            return True
+    return False
+
+
 def qualify_hostname(hostname: str, suffix: str) -> str:
     """
     Return an FQDN for a (possibly bare) hostname so the sync path produces the
@@ -446,7 +530,9 @@ def _forward_ips(unbound_data: Dict[str, List[str]]) -> Dict[str, Set[str]]:
 
 def find_stale_records(unbound_data: Dict[str, List[str]],
                        kea_pairs: Set[Tuple[str, str]],
-                       host_entries: Dict[str, List[str]]) -> Tuple[Set[str], Set[str]]:
+                       host_entries: Dict[str, List[str]],
+                       synthesize_ptr: bool = True,
+                       d2_reverse_zones: Optional[Set[str]] = None) -> Tuple[Set[str], Set[str]]:
     """
     Single source of truth for what cleanup removes — used by both the audit
     (to show the preview) and the clean script (to act). Returns
@@ -456,7 +542,9 @@ def find_stale_records(unbound_data: Dict[str, List[str]],
                        known to Kea and which are not OPNsense-managed.
       orphaned_ptrs -- PTR owner names not backed by a *surviving* forward
                        record (i.e. no forward maps to them once stale forwards
-                       are removed), and not OPNsense-managed.
+                       are removed), not OPNsense-managed, and (when
+                       synthesize_ptr is False) not covered by a D2 reverse
+                       zone (those are D2's responsibility, not ours).
 
     Using per-(hostname, ip) pairs rather than a flat IP set means a record like
     "host-A → IP-X" is correctly flagged stale when Kea's IP-X is leased to a
@@ -465,7 +553,18 @@ def find_stale_records(unbound_data: Dict[str, List[str]],
     Computing orphans against surviving forwards means a PTR whose only forward
     is itself stale is correctly flagged for removal alongside it, while a PTR
     backed by a live record is preserved.
+
+    Synthesis-aware PTR cleanup rules (applied only to PTR records):
+      1. OPNsense host-override guard: skip if arpa name OR decoded IP appears
+         in host_entries (host_entries is IP-keyed for PTRs; the arpa check is a
+         belt-and-suspenders fallback).
+      2. If synthesize_ptr is False AND the PTR's IP is not covered by any D2
+         reverse zone: orphan unconditionally — neither synthesis nor D2 should
+         be producing it, so it is a leftover that must be removed.
+      3. Otherwise: orphan only if no surviving forward record points to it.
     """
+    _d2_zones: Set[str] = d2_reverse_zones if d2_reverse_zones is not None else set()
+
     forward_ips = _forward_ips(unbound_data)
 
     # Stale forwards: no (name, ip) pair backed by Kea, not OPNsense-managed.
@@ -490,8 +589,24 @@ def find_stale_records(unbound_data: Dict[str, List[str]],
     for name in unbound_data:
         if not is_ptr_name(name):
             continue
+
+        # Host-override guard: host_entries PTRs are IP-keyed (e.g. "192.168.1.1"),
+        # not arpa-keyed, so we must decode the arpa name back to an IP to match.
+        # Keep the arpa-name check too as a belt-and-suspenders fallback.
         if is_in_host_entries(name, host_entries):
             continue
+        decoded_ip = _arpa_to_ip(name)
+        if decoded_ip and is_in_host_entries(decoded_ip, host_entries):
+            continue
+
+        # Synthesis-aware unconditional orphan: if synthesis is OFF and D2 does
+        # not cover this IP, there is no legitimate source for this PTR — remove
+        # it even if a forward record still exists.
+        if not synthesize_ptr and not ip_covered_by_d2_reverse(decoded_ip, _d2_zones):
+            orphaned_ptrs.add(name)
+            continue
+
+        # Original rule: orphan if no surviving forward points to this PTR.
         if name not in surviving_ptr_names:
             orphaned_ptrs.add(name)
 

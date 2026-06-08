@@ -142,3 +142,36 @@ def test_sync_reservations_unbound_failure_returns_one(mock_qkr, mock_rhe, mock_
     ]
     rc = rsync.sync_reservations()
     assert rc == 1
+
+
+# ── synthesize_ptr flag ───────────────────────────────────────────────────────
+
+@mock.patch.object(rsync, "unbound_control", return_value=True)
+@mock.patch.object(rsync, "read_host_entries", return_value={})
+@mock.patch.object(rsync, "query_kea_reservations")
+def test_sync_reservations_no_ptr_when_synthesize_off(mock_qkr, mock_rhe, mock_uc):
+    """synthesize_ptr=False → forward A is written but no PTR record."""
+    mock_qkr.side_effect = [
+        [_res("myhost.lan", "192.168.1.100")],
+        KeaServiceUnavailableError("off"),
+    ]
+    rc = rsync.sync_reservations(synthesize_ptr=False)
+    assert rc == 0
+    calls = [str(c) for c in mock_uc.call_args_list]
+    assert any("192.168.1.100" in c for c in calls)  # A record present
+    assert not any("PTR" in c for c in calls)          # no PTR
+
+
+@mock.patch.object(rsync, "unbound_control", return_value=True)
+@mock.patch.object(rsync, "read_host_entries", return_value={})
+@mock.patch.object(rsync, "query_kea_reservations")
+def test_sync_reservations_ptr_written_when_synthesize_on(mock_qkr, mock_rhe, mock_uc):
+    """synthesize_ptr=True (default) → both A and PTR records are written."""
+    mock_qkr.side_effect = [
+        [_res("myhost.lan", "192.168.1.100")],
+        KeaServiceUnavailableError("off"),
+    ]
+    rc = rsync.sync_reservations(synthesize_ptr=True)
+    assert rc == 0
+    calls = [str(c) for c in mock_uc.call_args_list]
+    assert any("PTR" in c for c in calls)

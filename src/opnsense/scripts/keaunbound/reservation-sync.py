@@ -36,9 +36,11 @@ from lib.keaunbound_sync import (
     is_in_host_entries,
     is_sane_name,
     setup_logging,
+    get_synthesize_ptr,
 )
 
-def sync_reservations(dry_run: bool = False, verbose: bool = False) -> int:
+def sync_reservations(dry_run: bool = False, verbose: bool = False,
+                      synthesize_ptr: bool = True) -> int:
     """
     Sync all Kea static reservations to Unbound.
     Returns 0 on success, non-zero on error.
@@ -104,20 +106,21 @@ def sync_reservations(dry_run: bool = False, verbose: bool = False) -> int:
                         logger.error(f"Failed to add {record_type}: {hostname}")
                         errors += 1
 
-                # Add PTR record (unless already in host_entries)
-                ptr_name = reverse_ptr(ip)
-                if ptr_name and not is_in_host_entries(ptr_name, host_entries):
-                    ptr_record = f"{ptr_name} IN PTR {hostname}."
+                # Add PTR record (unless synthesis disabled or already in host_entries)
+                if synthesize_ptr:
+                    ptr_name = reverse_ptr(ip)
+                    if ptr_name and not is_in_host_entries(ptr_name, host_entries):
+                        ptr_record = f"{ptr_name} IN PTR {hostname}."
 
-                    if dry_run:
-                        logger.info(f"[dry-run] would add: local_data {ptr_record}")
-                    else:
-                        if unbound_control(["local_data", ptr_record]):
-                            logger.info(f"Added PTR: {ptr_name} -> {hostname}")
-                            added += 1
+                        if dry_run:
+                            logger.info(f"[dry-run] would add: local_data {ptr_record}")
                         else:
-                            logger.error(f"Failed to add PTR: {ptr_name}")
-                            errors += 1
+                            if unbound_control(["local_data", ptr_record]):
+                                logger.info(f"Added PTR: {ptr_name} -> {hostname}")
+                                added += 1
+                            else:
+                                logger.error(f"Failed to add PTR: {ptr_name}")
+                                errors += 1
 
         logger.info(f"Reservation sync complete: added={added} skipped={skipped} errors={errors}")
         return 0 if errors == 0 else 1
@@ -132,9 +135,14 @@ def main():
                         help="Log what would be done without making changes")
     parser.add_argument("--verbose", "-v", action="store_true",
                         help="Log additional details to stderr")
+    parser.add_argument("--no-synthesize-ptr", dest="no_synthesize_ptr",
+                        action="store_true",
+                        help="Skip synthesizing PTR records (overrides config.xml)")
     args = parser.parse_args()
 
-    return sync_reservations(dry_run=args.dry_run, verbose=args.verbose)
+    synthesize_ptr = get_synthesize_ptr() and not args.no_synthesize_ptr
+    return sync_reservations(dry_run=args.dry_run, verbose=args.verbose,
+                              synthesize_ptr=synthesize_ptr)
 
 if __name__ == "__main__":
     sys.exit(main())

@@ -296,6 +296,8 @@ class KcaconfigController extends ApiControllerBase
             $settings['tsig_enabled'] = true;
             $settings['tsig_key']     = trim((string)($g->tsig_key_name ?? ''));
         }
+        // synthesize_ptr defaults to true (1) when missing.
+        $settings['synthesize_ptr'] = (string)($g->synthesize_ptr ?? '1') !== '0';
         return $settings;
     }
 
@@ -303,7 +305,8 @@ class KcaconfigController extends ApiControllerBase
 
     /**
      * Build a lookup map from domain name (normalised, no trailing dot) to its
-     * full domain config, read directly from kea-dhcp-ddns.conf.
+     * full domain config, read directly from kea-dhcp-ddns.conf. Also returns
+     * the set of reverse zone names (normalised, no trailing dot).
      *
      * We read the file directly because OPNsense does not generate a
      * control-socket section in kea-dhcp-ddns.conf, so kea-dhcp-ddns exposes no
@@ -313,22 +316,25 @@ class KcaconfigController extends ApiControllerBase
      *   $d2 = $this->keaQuery('d2');  // would need 'd2' wired into keaQuery
      *   $domains = $d2['DhcpDdns']['forward-ddns']['ddns-domains'] ?? [];
      *
-     * Returns [map, d2_ok]: map is name→domain, d2_ok is true if the file
-     * was readable and parseable.
+     * Returns [forward_map, reverse_zones, d2_ok]:
+     *   forward_map   name→domain for forward-ddns zones
+     *   reverse_zones array of normalised reverse zone names (no trailing dot)
+     *   d2_ok         true if the file was readable and parseable
      */
     private function buildDomainMap()
     {
-        $map = [];
+        $map    = [];
+        $revset = [];
         if (!file_exists($this->ddns_conf_file)) {
-            return [$map, false];
+            return [$map, $revset, false];
         }
         $raw = file_get_contents($this->ddns_conf_file);
         if ($raw === false) {
-            return [$map, false];
+            return [$map, $revset, false];
         }
         $conf = json_decode($raw, true);
         if (!is_array($conf)) {
-            return [$map, false];
+            return [$map, $revset, false];
         }
         $domains = $conf['DhcpDdns']['forward-ddns']['ddns-domains'] ?? [];
         foreach ($domains as $domain) {
@@ -337,7 +343,68 @@ class KcaconfigController extends ApiControllerBase
                 $map[$name] = $domain;
             }
         }
-        return [$map, true];
+        $rev_domains = $conf['DhcpDdns']['reverse-ddns']['ddns-domains'] ?? [];
+        foreach ($rev_domains as $domain) {
+            $name = rtrim($domain['name'] ?? '', '.');
+            if ($name !== '') {
+                $revset[] = $name;
+            }
+        }
+        return [$map, $revset, true];
+    }
+
+    /**
+     * Return the arpa (reverse-DNS) form of an IP address, for zone-coverage
+     * checks. Supports both IPv4 (in-addr.arpa) and IPv6 (ip6.arpa).
+     * Returns '' on failure.
+     */
+    private function ipArpa($ip)
+    {
+        if (strpos($ip, ':') === false) {
+            // IPv4: reverse the octets and append .in-addr.arpa
+            $parts = explode('.', $ip);
+            if (count($parts) !== 4) {
+                return '';
+            }
+            return implode('.', array_reverse($parts)) . '.in-addr.arpa';
+        }
+        // IPv6: expand to full 128 bits, then reverse nibble-by-nibble and
+        // append .ip6.arpa
+        $binary = @inet_pton($ip);
+        if ($binary === false || strlen($binary) !== 16) {
+            return '';
+        }
+        $hex      = bin2hex($binary);
+        $nibbles  = str_split($hex);
+        $reversed = array_reverse($nibbles);
+        return implode('.', $reversed) . '.ip6.arpa';
+    }
+
+    /**
+     * Return true if the network address of $cidr falls within any of the
+     * given $reverseZones (arpa suffix match, same logic as the Python helper).
+     */
+    private function subnetCoveredByReverse($cidr, $reverseZones)
+    {
+        if (empty($reverseZones)) {
+            return false;
+        }
+        $parts   = explode('/', $cidr);
+        $netAddr = trim($parts[0] ?? '');
+        if ($netAddr === '') {
+            return false;
+        }
+        $arpa = $this->ipArpa($netAddr);
+        if ($arpa === '') {
+            return false;
+        }
+        foreach ($reverseZones as $zone) {
+            $zone = rtrim($zone, '.');
+            if ($arpa === $zone || str_ends_with($arpa, '.' . $zone)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     // ── Subnet classification ─────────────────────────────────────────────────
@@ -477,7 +544,8 @@ class KcaconfigController extends ApiControllerBase
 
     // ── Subnet extraction ─────────────────────────────────────────────────────
 
-    private function extractSubnets($dhcp_args, $daemon, $domain_map, $plugin, $d2_ok)
+    private function extractSubnets($dhcp_args, $daemon, $domain_map, $plugin, $d2_ok,
+                                    $reverseZones = [], $synthesizePtr = true)
     {
         $key        = $daemon === 'dhcp4' ? 'Dhcp4' : 'Dhcp6';
         $subnet_key = $daemon === 'dhcp4' ? 'subnet4' : 'subnet6';
@@ -491,7 +559,10 @@ class KcaconfigController extends ApiControllerBase
 
         // Top-level subnets
         foreach ($dhcp_config[$subnet_key] ?? [] as $subnet) {
-            $subnets[] = $this->buildSubnetEntry($subnet, $global_sfx, $domain_map, $plugin, $d2_ok);
+            $subnets[] = $this->buildSubnetEntry(
+                $subnet, $global_sfx, $domain_map, $plugin, $d2_ok,
+                $reverseZones, $synthesizePtr
+            );
         }
         // Shared-network subnets
         foreach ($dhcp_config['shared-networks'] ?? [] as $net) {
@@ -504,17 +575,22 @@ class KcaconfigController extends ApiControllerBase
                     $global_sfx,
                     $domain_map,
                     $plugin,
-                    $d2_ok
+                    $d2_ok,
+                    $reverseZones,
+                    $synthesizePtr
                 );
             }
         }
         return $subnets;
     }
 
-    private function buildSubnetEntry($subnet, $global_sfx, $domain_map, $plugin, $d2_ok)
+    private function buildSubnetEntry($subnet, $global_sfx, $domain_map, $plugin, $d2_ok,
+                                      $reverseZones = [], $synthesizePtr = true)
     {
         $classified = $this->classifySubnet($subnet, $global_sfx, $domain_map, $plugin, $d2_ok);
         $ddns_enabled = isset($subnet['ddns-send-updates']) && $subnet['ddns-send-updates'] === true;
+        // Raw (unstripped) effective suffix for trailing-dot advisory.
+        $raw_sfx = $subnet['ddns-qualifying-suffix'] ?? $subnet['_effective_sfx'] ?? $global_sfx ?? '';
         return [
             'subnet'      => $subnet['subnet'] ?? 'unknown',
             'ddns_enabled'=> $ddns_enabled,
@@ -522,7 +598,10 @@ class KcaconfigController extends ApiControllerBase
             'detail'      => $classified['detail'],
             'target'      => $classified['target'],
             'comment'     => $subnet['comment'] ?? null,
-            'advisories'  => $this->ddnsAdvisories($subnet, $ddns_enabled),
+            'advisories'  => $this->ddnsAdvisories(
+                $subnet, $ddns_enabled, $raw_sfx,
+                $reverseZones, $synthesizePtr
+            ),
         ];
     }
 
@@ -535,9 +614,13 @@ class KcaconfigController extends ApiControllerBase
      * Recommended posture for the Unbound-bridge setup (no external DDNS server):
      * override-client-update, override-no-update, and update-on-renew all ON.
      *
+     * $reverseZones  list of normalised reverse zone names from kea-dhcp-ddns.conf
+     * $synthesizePtr whether the plugin's "synthesize PTR records" setting is on
+     *
      * @return array list of ['level' => 'warning'|'info', 'message' => string]
      */
-    private function ddnsAdvisories($subnet, $ddns_enabled)
+    private function ddnsAdvisories($subnet, $ddns_enabled, $raw_sfx = '',
+                                    $reverseZones = [], $synthesizePtr = true)
     {
         if (!$ddns_enabled) {
             return [];
@@ -546,6 +629,18 @@ class KcaconfigController extends ApiControllerBase
         $ocu = ($subnet['ddns-override-client-update'] ?? false) === true;
         $uor = ($subnet['ddns-update-on-renew'] ?? false) === true;
         $out = [];
+
+        // Trailing dot on qualifying-suffix causes Kea to treat every hostname as
+        // already absolute, skipping suffix appending entirely. Single-label clients
+        // get no DNS record. Confirmed by Phase 1 testing (2026-06-08).
+        if ($raw_sfx !== '' && substr($raw_sfx, -1) === '.') {
+            $out[] = [
+                'level'   => 'warning',
+                'message' => 'Qualifying suffix "' . htmlspecialchars($raw_sfx) . '" ends with a trailing dot — '
+                           . 'Kea treats single-label hostnames as already absolute and skips appending the suffix. '
+                           . 'DNS records will not be registered for single-label hostnames. Remove the trailing dot.',
+            ];
+        }
 
         // Incoherent: overrides the strong "no updates" opt-out (N) but honors the
         // weaker "I'll do my own A" opt-out (S=0). Combine warning + recommendation.
@@ -574,6 +669,48 @@ class KcaconfigController extends ApiControllerBase
             $out[] = [
                 'level'   => 'info',
                 'message' => 'Recommend enabling update-on-renew.',
+            ];
+        }
+
+        // If option 15 (domain-name) differs from the qualifying suffix, clients that
+        // construct their FQDN by combining their hostname with the option 15 domain
+        // will send FQDNs that D2 cannot route. Only option 12 (bare hostname) clients
+        // are unaffected — Kea qualifies those with the suffix internally.
+        $sfx_clean = rtrim($raw_sfx, '.');
+        if ($sfx_clean !== '') {
+            $opt15 = null;
+            foreach ($subnet['option-data'] ?? [] as $opt) {
+                if (($opt['name'] ?? '') === 'domain-name' || ($opt['code'] ?? 0) === 15) {
+                    $opt15 = rtrim($opt['data'] ?? '', '.');
+                    break;
+                }
+            }
+            if ($opt15 !== null && $opt15 !== $sfx_clean) {
+                $out[] = [
+                    'level'   => 'info',
+                    'message' => 'option 15 domain-name "' . htmlspecialchars($opt15) . '" differs from '
+                               . 'ddns-qualifying-suffix "' . htmlspecialchars($sfx_clean) . '". '
+                               . 'Clients that construct their FQDN from option 15 and send it via option 81 '
+                               . 'will send names D2 cannot route — those clients will not get DNS records. '
+                               . 'Recommended fix: set option 15 to match the qualifying suffix '
+                               . '("' . htmlspecialchars($sfx_clean) . '"). '
+                               . 'If you also need clients to search a broader domain (e.g. the parent zone), '
+                               . 'add option 119 (Domain Search List) with both domains. '
+                               . 'Clients that send only option 12 (bare hostname) are unaffected — '
+                               . 'Kea qualifies those with the suffix before sending to D2.',
+                ];
+            }
+        }
+
+        // Duplicate-PTR advisory: synthesis ON + D2 has a reverse zone covering
+        // this subnet → both paths produce identical PTRs (harmless, but redundant).
+        if ($synthesizePtr && $this->subnetCoveredByReverse($subnet['subnet'] ?? '', $reverseZones)) {
+            $out[] = [
+                'level'   => 'info',
+                'message' => 'PTRs for this subnet are written by both the plugin (PTR synthesis) and '
+                           . 'Kea DHCP-DDNS (reverse zone configured) — this is harmless, but redundant. '
+                           . 'Disable <strong>Synthesize PTR records</strong> in plugin Settings '
+                           . 'if Kea DHCP-DDNS manages all reverse DNS for this subnet.',
             ];
         }
 
@@ -634,7 +771,9 @@ class KcaconfigController extends ApiControllerBase
         // file. Kea's Control Agent cannot talk to d2 unless d2 has a
         // control-socket configured — which OPNsense does not generate.
         // Reading the file is simpler and always works while the daemon is up.
-        list($domain_map, $d2_ok) = $this->buildDomainMap();
+        list($domain_map, $reverse_zones, $d2_ok) = $this->buildDomainMap();
+
+        $synthesize_ptr = $plugin['synthesize_ptr'];
 
         $result = [
             'status'         => 'ok',
@@ -656,13 +795,19 @@ class KcaconfigController extends ApiControllerBase
             $result['status']    = 'error';
             $result['kea_error'] = 'Unable to query Kea DHCPv4. Check that the Kea DHCPv4 service is running.';
         } else {
-            $result['ipv4_subnets'] = $this->extractSubnets($dhcp4, 'dhcp4', $domain_map, $plugin, $d2_ok);
+            $result['ipv4_subnets'] = $this->extractSubnets(
+                $dhcp4, 'dhcp4', $domain_map, $plugin, $d2_ok,
+                $reverse_zones, $synthesize_ptr
+            );
         }
 
         // IPv6 (offline is not an error)
         $dhcp6 = $this->keaQuery('dhcp6');
         if ($dhcp6 !== null) {
-            $result['ipv6_subnets'] = $this->extractSubnets($dhcp6, 'dhcp6', $domain_map, $plugin, $d2_ok);
+            $result['ipv6_subnets'] = $this->extractSubnets(
+                $dhcp6, 'dhcp6', $domain_map, $plugin, $d2_ok,
+                $reverse_zones, $synthesize_ptr
+            );
         }
 
         // How the plugin is reaching each Kea daemon (for the Config Check page).

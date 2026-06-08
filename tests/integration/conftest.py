@@ -459,3 +459,61 @@ def deploy(ssh: SSHSession, opnsense_info):
 
     finally:
         tarball.unlink(missing_ok=True)
+
+
+# ── DHCPv6 subnet-ID discovery ────────────────────────────────────────────────
+
+@pytest.fixture(scope="session")
+def kea6(kea):
+    """
+    Thin wrapper over the `kea` fixture for DHCPv6 operations.
+    Skips if kea-dhcp6 socket is not present (daemon not running).
+    """
+    # Probe kea-dhcp6 availability immediately
+    kea("config-get", service="dhcp6")
+    # Return the same callable, but callers know the service is available
+    return kea
+
+
+@pytest.fixture(scope="session")
+def dhcp6_subnet_id(kea6):
+    resp = kea6("config-get", service="dhcp6")
+    subnets = resp.get("arguments", {}).get("Dhcp6", {}).get("subnet6", [])
+    if not subnets:
+        pytest.skip("No DHCPv6 subnets configured on the OPNsense box")
+    return subnets[0]["id"]
+
+
+# ── Unique IPv6 test-address allocator ───────────────────────────────────────
+# Allocates addresses in a configurable ULA range so v6 tests have unique IPs
+# without conflicting with the DHCPv6 lease pool.
+_v6_prefix = os.environ.get("TEST_IPV6_PREFIX", "fd00:db8:test::")
+_v6_counter = 0
+
+
+@pytest.fixture
+def test_host_v6():
+    """Allocate a unique (hostname, v6_ip) pair for one test."""
+    global _v6_counter, _host_counter
+    _v6_counter += 1
+    _host_counter += 1
+    hostname = f"{TEST_HOST_PREFIX}v6-{_host_counter:03d}.lan"
+    ip = f"{_v6_prefix}{_v6_counter}"
+    return {"hostname": hostname, "ip": ip}
+
+
+# ── v6 lease release helper ───────────────────────────────────────────────────
+
+@pytest.fixture(scope="session")
+def v6_lease_release(kea6):
+    """
+    Release a DHCPv6 lease by its address, using the kea-dhcp6 control socket.
+    Returns True if the delete succeeded; False if the lease was not found.
+    """
+    def _release(ip: str) -> bool:
+        resp = kea6("lease6-del",
+                    service="dhcp6",
+                    arguments={"ip-address": ip, "type": "IA_NA"})
+        return resp.get("result", -1) == 0
+
+    return _release
