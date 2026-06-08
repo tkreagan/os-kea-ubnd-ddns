@@ -99,7 +99,7 @@ tab shows a full preview of what each cleanup would remove.</p>
         <id>general.general.synthesize_ptr</id>
         <label>Synthesize PTR records from DDNS updates</label>
         <type>checkbox</type>
-        <help>Automatically create the standard in-addr.arpa / ip6.arpa PTR (reverse) record for every A/AAAA update received from kea-dhcp-ddns. Enabled by default — PTRs work immediately without needing a reverse zone in kea-dhcp-ddns. Disable only if you manage reverse DNS separately (e.g. another authoritative server for in-addr.arpa). Explicit PTR updates from kea-dhcp-ddns are always applied regardless of this setting. Note: if a reverse zone is configured in kea-dhcp-ddns but it uses a non-standard name (not in-addr.arpa / ip6.arpa), the synthesized PTR at in-addr.arpa may become orphaned after a lease expires — see the Kea Config Check tab for details.</help>
+        <help>Automatically create the standard in-addr.arpa / ip6.arpa PTR (reverse) record for every A/AAAA update received from kea-dhcp-ddns. Enabled by default — PTRs work immediately without needing a reverse zone in kea-dhcp-ddns. Disable only if you manage reverse DNS separately (e.g. another authoritative server for in-addr.arpa). Explicit PTR updates from kea-dhcp-ddns are always applied regardless of this setting. When both this option and a kea-dhcp-ddns reverse zone are configured for a subnet, PTRs are written by both paths — harmless, but the Kea Config Check tab will flag it per subnet.</help>
     </field>
     <field>
         <id>general.general.enable_auto_clean</id>

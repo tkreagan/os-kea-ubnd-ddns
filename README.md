@@ -182,6 +182,7 @@ so leaving the built-in setting on is safe if you prefer a gradual transition.
 | Sync Kea static reservations | **on** | Registers reservations in Unbound at startup and on demand |
 | Sync Kea active leases | **on** | Registers active leases; TTL = remaining lease time |
 | Clean up old IPs on lease update | **on** | After a new IP is registered via DDNS UPDATE, removes any previous IPs for that hostname no longer in Kea — see warning below |
+| Synthesize PTR records | **on** | Automatically create the `in-addr.arpa`/`ip6.arpa` PTR for every A/AAAA update. Works without a reverse zone in kea-dhcp-ddns. Disable only if you manage reverse DNS separately — explicit PTR updates from kea-dhcp-ddns are always applied regardless |
 | Automatically clean stale DNS records | **on** | Scheduled bulk removal of entries not backed by Kea — see warning below |
 | Auto-clean frequency | **6 hours** | How often the scheduled bulk cleanup runs |
 | Port *(advanced)* | `53535` | UDP port for DNS UPDATE packets from kea-dhcp-ddns |
@@ -288,7 +289,7 @@ cp tests/.env.example tests/.env
 ./tests/run_integration.sh
 ```
 
-The test suite has 181 unit and integration tests. Integration tests deploy the
+The test suite has 235 unit tests. Integration tests deploy the
 current source to the target box via SFTP and run against a live Kea installation.
 See [`tests/.env.example`](tests/.env.example) for the full list of required
 variables.
