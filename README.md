@@ -43,7 +43,8 @@ never touched by either path.
 
 ## Requirements
 
-- OPNsense 24.7 or later
+- OPNsense 26.1 or later (OPNsense 24.7+ should have the necessary capabilities,
+  but nothing prior to 26.1 has been tested)
 - Kea DHCP4 and/or Kea DHCP6 (built into OPNsense)
 - `kea-dhcp-ddns` configured and running (for the dynamic path; the static sync
   path works without it)
