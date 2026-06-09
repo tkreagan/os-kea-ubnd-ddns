@@ -31,6 +31,10 @@ namespace OPNsense\KeaUnbound\Api;
 
 use OPNsense\Base\ApiControllerBase;
 use OPNsense\Core\Backend;
+use OPNsense\Core\Config;
+use OPNsense\Kea\KeaDhcpv4;
+use OPNsense\Kea\KeaDhcpv6;
+use OPNsense\Kea\KeaDdns;
 
 /**
  * Check Kea DHCP subnet DDNS configuration against the kea-unbound-ddns plugin.
@@ -272,10 +276,12 @@ class KcaconfigController extends ApiControllerBase
     private function getPluginSettings()
     {
         $settings = [
-            'address'      => '127.0.0.1',
-            'port'         => 53535,
-            'tsig_enabled' => false,
-            'tsig_key'     => '',
+            'address'        => '127.0.0.1',
+            'port'           => 53535,
+            'tsig_enabled'   => false,
+            'tsig_key'       => '',
+            'tsig_secret'    => '',
+            'tsig_algorithm' => '',
         ];
         if (!file_exists($this->config_file)) {
             return $settings;
@@ -293,12 +299,93 @@ class KcaconfigController extends ApiControllerBase
             $settings['port'] = intval((string)$g->port);
         }
         if ((string)$g->enable_tsig === '1') {
-            $settings['tsig_enabled'] = true;
-            $settings['tsig_key']     = trim((string)($g->tsig_key_name ?? ''));
+            $settings['tsig_enabled']   = true;
+            $settings['tsig_key']       = trim((string)($g->tsig_key_name ?? ''));
+            $settings['tsig_secret']    = trim((string)($g->tsig_key_secret ?? ''));
+            $settings['tsig_algorithm'] = trim((string)($g->tsig_algorithm ?? ''));
         }
         // synthesize_ptr defaults to true (1) when missing.
         $settings['synthesize_ptr'] = (string)($g->synthesize_ptr ?? '1') !== '0';
         return $settings;
+    }
+
+    // The OPNsense system domain (//system/domain), used as the last-resort
+    // domain basis for filling an empty qualifying suffix. Returns '' when no
+    // system domain is configured, so callers can decide to skip rather than guess.
+    private function getSystemDomain()
+    {
+        if (!file_exists($this->config_file)) {
+            return '';
+        }
+        $xml = simplexml_load_file($this->config_file);
+        if ($xml === false) {
+            return '';
+        }
+        $n = $xml->xpath('//system/domain');
+        return empty($n) ? '' : trim((string)$n[0]);
+    }
+
+    /**
+     * Index the config.xml subnet nodes for a service, keyed by CIDR. Config Check
+     * status comes from live Kea (config-get), but the push needs the OPNsense
+     * UUID and the stored DDNS fields, which live in config.xml only.
+     * Returns map: cidr => [uuid, suffix, forward_zone, option15].
+     */
+    private function loadSubnetIndex($service)
+    {
+        $idx = [];
+        if (!file_exists($this->config_file)) {
+            return $idx;
+        }
+        $xml = simplexml_load_file($this->config_file);
+        if ($xml === false) {
+            return $idx;
+        }
+        $subnet_key = $service === 'dhcp4' ? 'subnet4' : 'subnet6';
+        $nodes = $xml->xpath("//OPNsense/Kea/{$service}/subnets/{$subnet_key}");
+        if (empty($nodes)) {
+            return $idx;
+        }
+        foreach ($nodes as $node) {
+            $cidr = trim((string)$node->subnet);
+            if ($cidr === '') {
+                continue;
+            }
+            $opt15 = '';
+            if (isset($node->option_data) && isset($node->option_data->domain_name)) {
+                $opt15 = trim((string)$node->option_data->domain_name);
+            }
+            $idx[$cidr] = [
+                'uuid'         => (string)$node['uuid'],
+                'suffix'       => trim((string)$node->ddns_qualifying_suffix),
+                'forward_zone' => trim((string)$node->ddns_forward_zone),
+                'option15'     => $opt15,
+            ];
+        }
+        return $idx;
+    }
+
+    /**
+     * Resolve the "domain basis" used to fill an EMPTY qualifying suffix and/or
+     * forward zone, and report where it came from. Order: existing suffix →
+     * existing forward zone (dot stripped) → subnet option 15 → system domain →
+     * none. Returns [basis (bare, no trailing dot), source].
+     */
+    private function resolveDomainBasis($entry, $system_domain)
+    {
+        if (!empty($entry['suffix'])) {
+            return [rtrim($entry['suffix'], '.'), 'existing-suffix'];
+        }
+        if (!empty($entry['forward_zone'])) {
+            return [rtrim($entry['forward_zone'], '.'), 'existing-forward'];
+        }
+        if (!empty($entry['option15'])) {
+            return [rtrim($entry['option15'], '.'), 'option15'];
+        }
+        if ($system_domain !== '') {
+            return [rtrim($system_domain, '.'), 'system'];
+        }
+        return ['', 'none'];
     }
 
     // ── DHCP-DDNS domain index ────────────────────────────────────────────────
@@ -545,7 +632,8 @@ class KcaconfigController extends ApiControllerBase
     // ── Subnet extraction ─────────────────────────────────────────────────────
 
     private function extractSubnets($dhcp_args, $daemon, $domain_map, $plugin, $d2_ok,
-                                    $reverseZones = [], $synthesizePtr = true)
+                                    $reverseZones = [], $synthesizePtr = true,
+                                    $subnetIndex = [], $system_domain = '')
     {
         $key        = $daemon === 'dhcp4' ? 'Dhcp4' : 'Dhcp6';
         $subnet_key = $daemon === 'dhcp4' ? 'subnet4' : 'subnet6';
@@ -561,7 +649,7 @@ class KcaconfigController extends ApiControllerBase
         foreach ($dhcp_config[$subnet_key] ?? [] as $subnet) {
             $subnets[] = $this->buildSubnetEntry(
                 $subnet, $global_sfx, $domain_map, $plugin, $d2_ok,
-                $reverseZones, $synthesizePtr
+                $reverseZones, $synthesizePtr, $daemon, $subnetIndex, $system_domain
             );
         }
         // Shared-network subnets
@@ -577,7 +665,10 @@ class KcaconfigController extends ApiControllerBase
                     $plugin,
                     $d2_ok,
                     $reverseZones,
-                    $synthesizePtr
+                    $synthesizePtr,
+                    $daemon,
+                    $subnetIndex,
+                    $system_domain
                 );
             }
         }
@@ -585,20 +676,38 @@ class KcaconfigController extends ApiControllerBase
     }
 
     private function buildSubnetEntry($subnet, $global_sfx, $domain_map, $plugin, $d2_ok,
-                                      $reverseZones = [], $synthesizePtr = true)
+                                      $reverseZones = [], $synthesizePtr = true,
+                                      $service = 'dhcp4', $subnetIndex = [], $system_domain = '')
     {
         $classified = $this->classifySubnet($subnet, $global_sfx, $domain_map, $plugin, $d2_ok);
         $ddns_enabled = isset($subnet['ddns-send-updates']) && $subnet['ddns-send-updates'] === true;
         // Raw (unstripped) effective suffix for trailing-dot advisory.
         $raw_sfx = $subnet['ddns-qualifying-suffix'] ?? $subnet['_effective_sfx'] ?? $global_sfx ?? '';
+
+        // Push metadata: match this live-Kea subnet back to its config.xml node
+        // (by CIDR) to recover the OPNsense UUID and resolve the domain basis the
+        // push would apply to an empty suffix/forward zone.
+        $cidr  = $subnet['subnet'] ?? '';
+        $cfg   = $subnetIndex[$cidr] ?? null;
+        $uuid  = $cfg['uuid'] ?? '';
+        $suffix_set = $cfg !== null && $cfg['suffix'] !== '';
+        list($domain_basis, $domain_source) = $cfg !== null
+            ? $this->resolveDomainBasis($cfg, $system_domain)
+            : ['', 'none'];
+
         return [
-            'subnet'      => $subnet['subnet'] ?? 'unknown',
-            'ddns_enabled'=> $ddns_enabled,
-            'ddns_status' => $classified['ddns_status'],
-            'detail'      => $classified['detail'],
-            'target'      => $classified['target'],
-            'comment'     => $subnet['comment'] ?? null,
-            'advisories'  => $this->ddnsAdvisories(
+            'subnet'        => $cidr !== '' ? $cidr : 'unknown',
+            'service'       => $service,
+            'opnsense_uuid' => $uuid,
+            'suffix_set'    => $suffix_set,
+            'domain_basis'  => $domain_basis,
+            'domain_source' => $domain_source,
+            'ddns_enabled'  => $ddns_enabled,
+            'ddns_status'   => $classified['ddns_status'],
+            'detail'        => $classified['detail'],
+            'target'        => $classified['target'],
+            'comment'       => $subnet['comment'] ?? null,
+            'advisories'    => $this->ddnsAdvisories(
                 $subnet, $ddns_enabled, $raw_sfx,
                 $reverseZones, $synthesizePtr
             ),
@@ -761,6 +870,210 @@ class KcaconfigController extends ApiControllerBase
         return $base + ['method' => 'http', 'detail' => "{$scheme}://{$desc['host']}:{$desc['port']}"];
     }
 
+    // ── Push recommended settings ─────────────────────────────────────────────
+
+    /**
+     * The recommended DDNS posture for the Unbound-bridge architecture, applied
+     * to each targeted subnet's config.xml node. The suffix/forward-zone pair is
+     * filled only when empty (handled in applyRecommendedToNode); everything here
+     * is set unconditionally.
+     */
+    private function recommendedFlags()
+    {
+        return [
+            'ddns_override_no_update'      => '1',
+            'ddns_override_client_update'  => '1',
+            'ddns_update_on_renew'         => '1',
+            'ddns_conflict_resolution_mode' => 'no-check-without-dhcid',
+        ];
+    }
+
+    /**
+     * Apply the recommended DDNS settings to a single subnet model node.
+     *
+     * Sets dns-server/port + the recommended flags unconditionally. Fills
+     * ddns_qualifying_suffix and ddns_forward_zone only when they are empty,
+     * deriving both from one domain basis so they stay consistent. Never
+     * overwrites an existing suffix or forward zone.
+     *
+     * @return array ['action' => 'changed'|'skipped', 'reason' => string]
+     */
+    private function applyRecommendedToNode($node, $plugin, $system_domain, $domain_override = '')
+    {
+        $suffix  = trim((string)$node->ddns_qualifying_suffix);
+        $forward = trim((string)$node->ddns_forward_zone);
+        $opt15   = '';
+        if (isset($node->option_data) && isset($node->option_data->domain_name)) {
+            $opt15 = trim((string)$node->option_data->domain_name);
+        }
+
+        // Resolve a domain basis only if we actually need to fill something.
+        $need_fill = ($suffix === '' || $forward === '');
+        $basis = '';
+        if ($need_fill) {
+            if ($domain_override !== '') {
+                $basis = rtrim($domain_override, '.');
+            } else {
+                list($basis, $source) = $this->resolveDomainBasis(
+                    ['suffix' => $suffix, 'forward_zone' => $forward, 'option15' => $opt15],
+                    $system_domain
+                );
+                if ($source === 'none') {
+                    return ['action' => 'skipped', 'reason' => 'no domain configured (no suffix, forward zone, option 15, or system domain)'];
+                }
+            }
+        }
+
+        // Point DDNS at our listener and enable it (non-empty dns-server = enabled).
+        $node->ddns_dns_server = $plugin['address'];
+        $node->ddns_dns_port   = (string)$plugin['port'];
+        foreach ($this->recommendedFlags() as $field => $value) {
+            $node->$field = $value;
+        }
+
+        // Fill domain fields only when empty; keep them matching.
+        if ($suffix === '') {
+            $node->ddns_qualifying_suffix = $basis;
+        }
+        if ($forward === '') {
+            $node->ddns_forward_zone = $basis . '.';
+        }
+
+        // TSIG: mirror the plugin's key onto the subnet when TSIG is enabled.
+        if ($plugin['tsig_enabled'] && $plugin['tsig_key'] !== '') {
+            $node->ddns_domain_key_name      = $plugin['tsig_key'];
+            $node->ddns_domain_key_secret    = $plugin['tsig_secret'];
+            $node->ddns_domain_key_algorithm = $plugin['tsig_algorithm'];
+        }
+
+        return ['action' => 'changed', 'reason' => ''];
+    }
+
+    /**
+     * POST /api/keaunbound/kcaconfig/push_settings
+     *
+     * Write the recommended DDNS settings into config.xml (via the core Kea
+     * models) for one subnet (scope=subnet) or every subnet (scope=all), then
+     * regenerate Kea config and restart. Gated by the plugin ACL (api/keaunbound/*).
+     */
+    public function pushSettingsAction()
+    {
+        if (!$this->request->isPost()) {
+            return ['status' => 'error', 'message' => 'POST request required'];
+        }
+        $body  = $this->request->getJsonRawBody(true) ?: [];
+        $scope = $body['scope'] ?? '';
+
+        // The kea_sync hook only writes kea-dhcp-ddns.conf when the DDNS Agent is
+        // enabled, so a push is a no-op without it. Fail fast with guidance — the
+        // Config Check page already shows "DDNS Agent Down" with enable steps.
+        if (!(new KeaDdns())->isEnabled()) {
+            return [
+                'status'  => 'error',
+                'message' => 'The Kea DDNS Agent is not enabled. Enable it under '
+                           . 'Services → Kea DHCP → DDNS Agent, then push again.',
+            ];
+        }
+
+        $plugin        = $this->getPluginSettings();
+        $system_domain = $this->getSystemDomain();
+
+        $changed = [];
+        $skipped = [];
+        $errors  = [];
+
+        // (service => model) for the services we will touch this call.
+        $models = [];
+        if ($scope === 'subnet') {
+            $service = $body['service'] ?? '';
+            $uuid    = $body['uuid'] ?? '';
+            if (!in_array($service, ['dhcp4', 'dhcp6'], true) || $uuid === '') {
+                return ['status' => 'error', 'message' => 'scope=subnet requires a valid service and uuid'];
+            }
+            if ($this->isManualConfig($service)) {
+                return ['status' => 'error', 'message' => "Kea {$service} is in manual configuration mode — edit the config file directly"];
+            }
+            $mdl  = $service === 'dhcp4' ? new KeaDhcpv4() : new KeaDhcpv6();
+            $ref  = 'subnets.' . ($service === 'dhcp4' ? 'subnet4' : 'subnet6') . '.' . $uuid;
+            $node = $mdl->getNodeByReference($ref);
+            if ($node === null) {
+                return ['status' => 'error', 'message' => 'subnet not found'];
+            }
+            $models[$service] = $mdl;
+            $res  = $this->applyRecommendedToNode($node, $plugin, $system_domain, $body['domain'] ?? '');
+            $cidr = (string)$node->subnet;
+            if ($res['action'] === 'changed') {
+                $changed[] = $cidr;
+            } else {
+                $skipped[] = ['subnet' => $cidr, 'reason' => $res['reason']];
+            }
+        } elseif ($scope === 'all') {
+            foreach (['dhcp4' => 'subnet4', 'dhcp6' => 'subnet6'] as $service => $subnet_key) {
+                if ($this->isManualConfig($service)) {
+                    // Manual-config service: leave it entirely alone.
+                    continue;
+                }
+                $mdl = $service === 'dhcp4' ? new KeaDhcpv4() : new KeaDhcpv6();
+                $models[$service] = $mdl;
+                foreach ($mdl->subnets->$subnet_key->iterateItems() as $node) {
+                    $cidr = (string)$node->subnet;
+                    $res  = $this->applyRecommendedToNode($node, $plugin, $system_domain);
+                    if ($res['action'] === 'changed') {
+                        $changed[] = $cidr;
+                    } else {
+                        $skipped[] = ['subnet' => $cidr, 'reason' => $res['reason']];
+                    }
+                }
+            }
+        } else {
+            return ['status' => 'error', 'message' => 'scope must be "all" or "subnet"'];
+        }
+
+        if (empty($changed)) {
+            // Nothing written — report skips/errors without touching config or restarting.
+            return [
+                'status'  => empty($skipped) ? 'error' : 'ok',
+                'changed' => [],
+                'skipped' => $skipped,
+                'errors'  => empty($skipped)
+                    ? [['subnet' => '*', 'message' => 'no subnets matched']]
+                    : [],
+            ];
+        }
+
+        // Validate every touched model before persisting.
+        foreach ($models as $service => $mdl) {
+            $msgs = $mdl->performValidation();
+            foreach ($msgs as $msg) {
+                $errors[] = ['subnet' => $service, 'message' => $msg->getField() . ': ' . $msg->getMessage()];
+            }
+        }
+        if (!empty($errors)) {
+            return ['status' => 'error', 'changed' => [], 'skipped' => $skipped, 'errors' => $errors];
+        }
+
+        // Persist all touched subnet models.
+        foreach ($models as $mdl) {
+            $mdl->serializeToConfig();
+        }
+        Config::getInstance()->save();
+
+        // Apply: the 'kea restart' configd action runs Kea's own reconfigure
+        // (the kea_sync hook → regenerates kea-dhcp{4,6}.conf and
+        // kea-dhcp-ddns.conf) and then reloads the daemons. We drive it via
+        // configd from PHP rather than shelling pluginctl ourselves. (Calling
+        // plugins_configure('kea_sync') directly does not dispatch from an MVC
+        // controller context — verified on OPNsense 26.1.)
+        (new Backend())->configdRun('kea restart');
+
+        return [
+            'status'  => 'ok',
+            'changed' => $changed,
+            'skipped' => $skipped,
+            'errors'  => [],
+        ];
+    }
+
     // ── Public action ─────────────────────────────────────────────────────────
 
     public function checkAction()
@@ -774,6 +1087,11 @@ class KcaconfigController extends ApiControllerBase
         list($domain_map, $reverse_zones, $d2_ok) = $this->buildDomainMap();
 
         $synthesize_ptr = $plugin['synthesize_ptr'];
+
+        // config.xml-derived push metadata: UUID + stored DDNS fields per subnet.
+        $system_domain = $this->getSystemDomain();
+        $idx4 = $this->loadSubnetIndex('dhcp4');
+        $idx6 = $this->loadSubnetIndex('dhcp6');
 
         $result = [
             'status'         => 'ok',
@@ -797,7 +1115,7 @@ class KcaconfigController extends ApiControllerBase
         } else {
             $result['ipv4_subnets'] = $this->extractSubnets(
                 $dhcp4, 'dhcp4', $domain_map, $plugin, $d2_ok,
-                $reverse_zones, $synthesize_ptr
+                $reverse_zones, $synthesize_ptr, $idx4, $system_domain
             );
         }
 
@@ -806,7 +1124,7 @@ class KcaconfigController extends ApiControllerBase
         if ($dhcp6 !== null) {
             $result['ipv6_subnets'] = $this->extractSubnets(
                 $dhcp6, 'dhcp6', $domain_map, $plugin, $d2_ok,
-                $reverse_zones, $synthesize_ptr
+                $reverse_zones, $synthesize_ptr, $idx6, $system_domain
             );
         }
 
