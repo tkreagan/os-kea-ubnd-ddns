@@ -30,42 +30,7 @@
 namespace OPNsense\KeaUnbound;
 
 use OPNsense\Base\BaseModel;
-use OPNsense\Base\Messages\Message;
 
 class General extends BaseModel
 {
-    /**
-     * When TSIG authentication is enabled, the key name and a base64 secret are
-     * mandatory. Blocking the save here (fail closed) keeps the saved config and
-     * the daemon in agreement — start.py refuses to launch the listener if TSIG
-     * is enabled without a usable key.
-     */
-    public function performValidation($validateFullModel = false)
-    {
-        $messages = parent::performValidation($validateFullModel);
-
-        if ((string)$this->general->enable_tsig == '1') {
-            if (trim((string)$this->general->tsig_key_name) == '') {
-                $messages->appendMessage(new Message(
-                    gettext('A TSIG key name is required when TSIG authentication is enabled.'),
-                    $this->general->tsig_key_name->__reference()
-                ));
-            }
-
-            $secret = trim((string)$this->general->tsig_key_secret);
-            if ($secret === '') {
-                $messages->appendMessage(new Message(
-                    gettext('A TSIG key secret is required when TSIG authentication is enabled.'),
-                    $this->general->tsig_key_secret->__reference()
-                ));
-            } elseif (base64_decode($secret, true) === false) {
-                $messages->appendMessage(new Message(
-                    gettext('The TSIG key secret must be base64-encoded.'),
-                    $this->general->tsig_key_secret->__reference()
-                ));
-            }
-        }
-
-        return $messages;
-    }
 }

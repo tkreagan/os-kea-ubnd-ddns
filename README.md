@@ -188,7 +188,6 @@ so leaving the built-in setting on is safe if you prefer a gradual transition.
 | Automatically clean stale DNS records | **on** | Scheduled bulk removal of entries not backed by Kea — see warning below |
 | Auto-clean frequency | **6 hours** | How often the scheduled bulk cleanup runs |
 | Port *(advanced)* | `53535` | UDP port for DNS UPDATE packets from kea-dhcp-ddns |
-| TSIG authentication *(advanced)* | **off** | See [TSIG](#tsig-authentication) |
 
 #### Warning: settings that can remove DNS entries from other sources
 
@@ -221,22 +220,17 @@ before enabling either cleanup setting.
 
 ### TSIG authentication
 
-> **Note:** TSIG end-to-end authentication has not been tested in this release
-> and is disabled by default. The listener only accepts connections from
-> `127.0.0.1`, so unsigned updates from kea-dhcp-ddns are safe on a single host.
-> Leaving TSIG disabled is recommended for v0.9.
-
-The TSIG fields under the **Advanced** section allow the plugin to require TSIG
-signatures on DNS UPDATE packets from kea-dhcp-ddns. When enabled, kea-dhcp-ddns
-must be configured to sign updates with the matching key name, secret, and
-algorithm. The TSIG key secret is stored in OPNsense's `config.xml` — ensure
-appropriate access controls on your config backups.
+TSIG support is partially implemented in the daemon (`kea-unbound-ddns.py`) and
+daemon-start code, but has not been tested end-to-end and is not configurable via
+the Settings UI. It is a planned roadmap item. The listener only accepts
+connections from `127.0.0.1`, so unsigned updates from kea-dhcp-ddns are safe
+for the standard single-host deployment.
 
 ## UI tabs
 
 | Tab | Purpose |
 |---|---|
-| **Settings** | Enable/disable the plugin; configure sync, cleanup, TSIG, and listen port |
+| **Settings** | Enable/disable the plugin; configure sync, cleanup, and listen port |
 | **Kea Config Check** | Verify DDNS is configured in each Kea subnet; shows the kea-dhcp-ddns listener state and flags common mistakes (missing trailing dots, missing forward zones) |
 | **Lease Audit** | Full view of all DNS records across Kea reservations, active leases, Unbound local_data, and Host Overrides; previews what cleanup would remove; manual sync/clean buttons |
 | **Log File** | Unified log for the daemon, sync, audit, and cleanup scripts |
@@ -257,8 +251,7 @@ OPNsense 26.1 with Kea DHCP4:
 
 ## Known issues and roadmap
 
-- **TSIG not tested** — the implementation should be complete but has not been
-  validated with a live kea-dhcp-ddns signing updates. Disabled for v0.9.
+- **TSIG authentication** — partially implemented in the listener and startup code; not tested end-to-end, not configurable via Settings UI. Planned for a future release.
 - **Reverse zones verified** — the DNS reverse zone field is tested and working;
   PTR records register correctly when it is set (with a trailing dot).
 - **Override options verified** — `override-no-update`, `override-client-update`,
@@ -276,11 +269,8 @@ OPNsense 26.1 with Kea DHCP4:
   `kea-dhcp-ddns.conf` causes D2 to refuse to start entirely (`TCP is not yet
   supported`). UDP is the only supported protocol. kea-dhcp4 continues to serve leases
   with no log warning when D2 is down; monitor D2 separately.
-- **Kea connection override not yet active** — the advanced Kea Service Control
-  Connection fields in Settings are placeholders for a future release; the plugin
-  currently auto-detects control sockets from the running Kea configuration.  It is not clear if these
-  override fields are actually necessary, as the plugin should be able to detect the control socket automatically.
-- **Single TSIG key** — one key covers all updates; per-zone keys are not supported.
+- **Kea connection auto-discovery** — the plugin reads each Kea daemon's active config file to find its control socket (unix or HTTP) and falls back to the standard OPNsense socket paths. Manual connection override is not exposed in the UI and is deferred; it may not be necessary given reliable auto-discovery. HTTP socket support is deferred until OPNsense enables HTTP control sockets or deprecates unix sockets.
+- **kea-dhcp-ddns connection** — the Kea Config Check tab reads `kea-dhcp-ddns.conf` directly rather than querying a control socket, because OPNsense does not provision a control socket or HTTP listener for `kea-dhcp-ddns` (it is not exposed in the web GUI and requires a manual config edit to enable).
 - **Not yet in OPNsense community plugins** — installation is manual for now (see
   [Installation](#installation)).
 

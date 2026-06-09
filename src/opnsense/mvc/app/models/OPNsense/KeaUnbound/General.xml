@@ -22,47 +22,6 @@
                 <MaximumValue>65535</MaximumValue>
             </port>
 
-            <!-- Enable TSIG authentication for DNS UPDATE packets.
-                 When disabled, packets are accepted unsigned (safe since the
-                 listener only accepts connections from 127.0.0.1). When enabled,
-                 kea-dhcp-ddns must be configured to sign updates with the
-                 matching key name and algorithm. -->
-            <enable_tsig type="BooleanField">
-                <Default>0</Default>
-                <Required>Y</Required>
-            </enable_tsig>
-
-            <!-- TSIG key name for authenticating DNS UPDATE packets from
-                 kea-dhcp-ddns. Only used when enable_tsig is enabled.
-                 kea-dhcp-ddns must be configured to sign updates with the
-                 matching key. -->
-            <tsig_key_name type="TextField">
-                <Required>N</Required>
-            </tsig_key_name>
-
-            <!-- TSIG shared secret (base64-encoded HMAC key). Only used when
-                 tsig_key_name is set. Stored in config.xml — ensure appropriate
-                 access controls on the OPNsense config backup. -->
-            <tsig_key_secret type="TextField">
-                <Required>N</Required>
-            </tsig_key_secret>
-
-            <!-- TSIG algorithm. Must match the algorithm configured in
-                 kea-dhcp-ddns for the same key. HMAC-SHA256 is recommended —
-                 MD5 and SHA1 are cryptographically weak. -->
-            <tsig_algorithm type="OptionField">
-                <Required>N</Required>
-                <Default>HMAC-SHA256</Default>
-                <OptionValues>
-                    <HMAC-MD5>HMAC-MD5 (not recommended)</HMAC-MD5>
-                    <HMAC-SHA1>HMAC-SHA1 (not recommended)</HMAC-SHA1>
-                    <HMAC-SHA224>HMAC-SHA224</HMAC-SHA224>
-                    <HMAC-SHA256>HMAC-SHA256 (recommended)</HMAC-SHA256>
-                    <HMAC-SHA384>HMAC-SHA384</HMAC-SHA384>
-                    <HMAC-SHA512>HMAC-SHA512</HMAC-SHA512>
-                </OptionValues>
-            </tsig_algorithm>
-
             <!-- Sync static reservations from Kea to Unbound.
                  When enabled, static reservations from Kea are registered in
                  Unbound's local_data via the reservation-sync.py script, making
@@ -158,67 +117,5 @@
                 </OptionValues>
             </auto_clean_interval>
         </general>
-
-        <!-- Kea connection settings.
-             RESERVED FOR FUTURE USE. The plugin currently resolves how to reach
-             each Kea daemon automatically (it reads the active Kea configuration
-             and falls back to the standard OPNsense control sockets), so these
-             fields are shown disabled in the UI and are not yet honored. They
-             define the data shape for a future release that lets the connection
-             be overridden manually — see kea_transport.resolve_kea_connection()
-             Step 0 (_plugin_override), which currently always falls through. -->
-        <connection>
-            <!-- auto: resolve from Kea config; unix/http: force a transport. -->
-            <mode type="OptionField">
-                <Required>N</Required>
-                <Default>auto</Default>
-                <OptionValues>
-                    <auto>Auto-detect (read Kea configuration)</auto>
-                    <unix>Unix socket</unix>
-                    <http>HTTP / HTTPS</http>
-                </OptionValues>
-            </mode>
-            <!-- Per-service unix socket paths (used when mode=unix). -->
-            <dhcp4_socket type="TextField">
-                <Required>N</Required>
-                <Default>/var/run/kea/kea4-ctrl-socket</Default>
-            </dhcp4_socket>
-            <dhcp6_socket type="TextField">
-                <Required>N</Required>
-                <Default>/var/run/kea/kea6-ctrl-socket</Default>
-            </dhcp6_socket>
-            <!-- Per-service HTTP host/port (used when mode=http). -->
-            <dhcp4_http_host type="TextField">
-                <Required>N</Required>
-                <Default>127.0.0.1</Default>
-            </dhcp4_http_host>
-            <dhcp4_http_port type="IntegerField">
-                <Required>N</Required>
-                <Default>8004</Default>
-                <MinimumValue>1</MinimumValue>
-                <MaximumValue>65535</MaximumValue>
-            </dhcp4_http_port>
-            <dhcp6_http_host type="TextField">
-                <Required>N</Required>
-                <Default>127.0.0.1</Default>
-            </dhcp6_http_host>
-            <dhcp6_http_port type="IntegerField">
-                <Required>N</Required>
-                <Default>8006</Default>
-                <MinimumValue>1</MinimumValue>
-                <MaximumValue>65535</MaximumValue>
-            </dhcp6_http_port>
-            <!-- TLS options for HTTP mode. -->
-            <http_tls type="BooleanField">
-                <Required>N</Required>
-                <Default>0</Default>
-            </http_tls>
-            <!-- Verify the daemon's TLS certificate. Off by default since
-                 OPNsense-generated control certs are typically self-signed. -->
-            <http_tls_verify type="BooleanField">
-                <Required>N</Required>
-                <Default>0</Default>
-            </http_tls_verify>
-        </connection>
     </items>
 </model>
