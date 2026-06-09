@@ -117,6 +117,26 @@
                 <Required>Y</Required>
             </synthesize_ptr>
 
+            <!-- How to handle a DDNS registration for a hostname that is already
+                 registered to a different IP address.
+                 allow:       both records coexist in Unbound (round-robin). Default.
+                 first_wins:  existing record is kept; the new registrant is rejected
+                              (YXRRSET returned to kea-dhcp-ddns only when Kea is in a
+                              check-with-dhcid or check-exists-with-dhcid mode, i.e. when
+                              RFC 2136 prerequisite records are present). Static reservations
+                              are always loaded before dynamic leases, so first_wins
+                              naturally protects reservations from being overwritten.
+                 last_wins:   existing record is replaced by the new one. -->
+            <collision_policy type="OptionField">
+                <Required>Y</Required>
+                <Default>allow</Default>
+                <OptionValues>
+                    <allow>Allow (both records coexist)</allow>
+                    <first_wins>First wins (keep existing, reject new registrant)</first_wins>
+                    <last_wins>Last wins (replace existing with new record)</last_wins>
+                </OptionValues>
+            </collision_policy>
+
             <!-- Automatically clean stale DNS records from Unbound.
                  When enabled, the local-data-clean.py script runs periodically
                  to remove stale records (entries in Unbound that don't match

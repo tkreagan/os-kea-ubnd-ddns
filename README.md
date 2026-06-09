@@ -114,7 +114,7 @@ that should register DNS entries, and switch to **Advanced** mode. Under the
 | Override no update | **On** (recommended) | Server registers DNS even if the client requests no updates. **Implies "Override client update"** — see below. |
 | Override client update | **On** (recommended) | Server owns the forward (A) record. Recommended: there is no external DDNS server for clients to self-register against. |
 | Update on renew | **On** (recommended) | Re-asserts DNS on lease renewal — self-heals if Unbound's runtime data is lost. Subject to the lease-cache caveat below. |
-| Conflict resolution mode | `check-with-dhcid` (default) | Default verified in v0.9. Alternative modes depend on listener prerequisite handling — pending a future listener test round. |
+| Conflict resolution mode | `no-check-without-dhcid` (recommended) | All four modes tested in v0.9 — the plugin silently ignores DHCID and prerequisites regardless of which mode is set, so the mode only affects what D2 includes in the packet. `no-check-without-dhcid` is cleanest: no DHCID records sent. Collision protection is handled by the plugin's own **Hostname collision policy** setting (below), not by this Kea field. |
 
 Save and apply after editing each subnet.
 
@@ -184,6 +184,7 @@ so leaving the built-in setting on is safe if you prefer a gradual transition.
 | Sync Kea active leases | **on** | Registers active leases; TTL = remaining lease time |
 | Clean up old IPs on lease update | **on** | After a new IP is registered via DDNS UPDATE, removes any previous IPs for that hostname no longer in Kea — see warning below |
 | Synthesize PTR records | **on** | Automatically create the `in-addr.arpa`/`ip6.arpa` PTR for every A/AAAA update. Works without a reverse zone in kea-dhcp-ddns. Disable only if you manage reverse DNS separately — explicit PTR updates from kea-dhcp-ddns are always applied regardless |
+| Hostname collision policy | **Allow** | Action when a DHCP client registers a hostname already registered to a different IP. **Allow**: both records coexist (Unbound round-robins them). **First wins**: existing record is kept; the new registrant's A and PTR are rejected — YXRRSET is returned to D2 only if Kea is in a `check-*` conflict-resolution mode. **Last wins**: existing record is replaced. Static reservations are always loaded before dynamic leases, so **First wins** naturally protects reserved hosts. |
 | Automatically clean stale DNS records | **on** | Scheduled bulk removal of entries not backed by Kea — see warning below |
 | Auto-clean frequency | **6 hours** | How often the scheduled bulk cleanup runs |
 | Port *(advanced)* | `53535` | UDP port for DNS UPDATE packets from kea-dhcp-ddns |
@@ -262,11 +263,19 @@ OPNsense 26.1 with Kea DHCP4:
   PTR records register correctly when it is set (with a trailing dot).
 - **Override options verified** — `override-no-update`, `override-client-update`,
   and `update-on-renew` were validated end-to-end in v0.9 testing and behave per the
-  recommended-settings note above (including the `override-no-update ⇒
-  override-client-update` constraint and the lease-cache interaction with
-  `update-on-renew`). Non-default **conflict-resolution modes** remain untested —
-  their effect depends on the listener honoring RFC 2136 prerequisites and is
-  deferred to a future listener test round.
+  recommended-settings note above.
+- **All four conflict-resolution modes tested** — the plugin silently ignores DHCID
+  records and RFC 2136 prerequisites in all modes; all four produce identical A + PTR
+  registration. The plugin's own **Hostname collision policy** setting is the correct
+  way to control same-name conflict handling. Recommended mode: `no-check-without-dhcid`.
+- **DHCID records not stored** — the plugin accepts and silently skips DHCID records
+  in RFC 2136 UPDATE packets; hostname ownership is tracked via the plugin's collision
+  policy, not via DHCID. This is an intentional design decision for Unbound-only
+  deployments where the plugin is the sole DNS writer.
+- **`ncr-protocol: TCP` hard-fails D2** — setting `ncr-protocol: TCP` in
+  `kea-dhcp-ddns.conf` causes D2 to refuse to start entirely (`TCP is not yet
+  supported`). UDP is the only supported protocol. kea-dhcp4 continues to serve leases
+  with no log warning when D2 is down; monitor D2 separately.
 - **Kea connection override not yet active** — the advanced Kea Service Control
   Connection fields in Settings are placeholders for a future release; the plugin
   currently auto-detects control sockets from the running Kea configuration.  It is not clear if these

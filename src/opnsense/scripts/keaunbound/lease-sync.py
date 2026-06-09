@@ -34,10 +34,13 @@ from lib.keaunbound_sync import (
     read_host_entries,
     reverse_ptr,
     unbound_control,
+    unbound_list_local_data,
     is_in_host_entries,
     is_sane_name,
     setup_logging,
     get_synthesize_ptr,
+    get_collision_policy,
+    _forward_ips,
 )
 
 def sync_leases(dry_run: bool = False, verbose: bool = False,
@@ -50,6 +53,11 @@ def sync_leases(dry_run: bool = False, verbose: bool = False,
     logger.info("Starting lease sync")
 
     host_entries = read_host_entries()
+    collision_policy = get_collision_policy()
+    # Snapshot Unbound state once for collision checks; also track names added
+    # during this run so same-FQDN conflicts within the sync are detected.
+    unbound_fwd = _forward_ips(unbound_list_local_data()) if collision_policy != "allow" else {}
+    added_this_run: dict = {}  # name.lower() -> ip
     added = 0
     skipped = 0
     errors = 0
@@ -76,6 +84,11 @@ def sync_leases(dry_run: bool = False, verbose: bool = False,
             if leases is None:
                 continue
 
+            # Sort by acquisition time (expires - valid_lifetime) ascending so
+            # that in first_wins mode the oldest active lease wins name conflicts,
+            # and in last_wins mode the most recently acquired lease wins.
+            leases.sort(key=lambda r: r.get("expires", 0) - r.get("valid_lifetime", 0))
+
             for lease in leases:
                 hostname = lease["hostname"]
                 ip = lease["ip"] if service == "dhcp4" else lease["ipv6"]
@@ -100,6 +113,33 @@ def sync_leases(dry_run: bool = False, verbose: bool = False,
 
                 # Add A/AAAA record
                 record_type = "A" if service == "dhcp4" else "AAAA"
+
+                # Collision check: same name already registered to a different IP
+                if collision_policy != "allow":
+                    key = hostname.lower()
+                    existing_ips = (unbound_fwd.get(key, set())
+                                    | ({added_this_run[key]} if key in added_this_run else set()))
+                    conflict_ips = existing_ips - {ip}
+                    if conflict_ips:
+                        if collision_policy == "first_wins":
+                            logger.info(
+                                f"Collision: {hostname} already has {conflict_ips}; "
+                                f"skipping {ip} (first_wins)"
+                            )
+                            skipped += 1
+                            continue
+                        elif collision_policy == "last_wins":
+                            logger.info(
+                                f"Collision: {hostname} replacing {conflict_ips} with {ip} (last_wins)"
+                            )
+                            if not dry_run:
+                                unbound_control(["local_data_remove", hostname])
+                                if synthesize_ptr:
+                                    for old_ip in conflict_ips:
+                                        ptr = reverse_ptr(old_ip)
+                                        if ptr:
+                                            unbound_control(["local_data_remove", ptr])
+
                 record = f"{hostname} {ttl} IN {record_type} {ip}"
 
                 if dry_run:
@@ -108,6 +148,8 @@ def sync_leases(dry_run: bool = False, verbose: bool = False,
                     if unbound_control(["local_data", record]):
                         logger.info(f"Added {record_type}: {hostname} -> {ip} (TTL {ttl}s)")
                         added += 1
+                        if collision_policy != "allow":
+                            added_this_run[hostname.lower()] = ip
                     else:
                         logger.error(f"Failed to add {record_type}: {hostname}")
                         errors += 1

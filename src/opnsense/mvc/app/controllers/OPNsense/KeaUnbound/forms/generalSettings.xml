@@ -102,6 +102,25 @@ tab shows a full preview of what each cleanup would remove.</p>
         <help>Automatically create the standard in-addr.arpa / ip6.arpa PTR (reverse) record for every A/AAAA update received from kea-dhcp-ddns. Enabled by default — PTRs work immediately without needing a reverse zone in kea-dhcp-ddns. Disable only if you manage reverse DNS separately (e.g. another authoritative server for in-addr.arpa). Explicit PTR updates from kea-dhcp-ddns are always applied regardless of this setting. When both this option and a kea-dhcp-ddns reverse zone are configured for a subnet, PTRs are written by both paths — harmless, but the Kea Config Check tab will flag it per subnet.</help>
     </field>
     <field>
+        <id>general.general.collision_policy</id>
+        <label>Hostname collision policy</label>
+        <type>dropdown</type>
+        <help><![CDATA[Action when a hostname is already registered in Unbound for a
+        different IP address.<br><br>
+        <b>Allow</b>: both records coexist — Unbound will round-robin between them.<br>
+        <b>First wins</b>: the existing record is kept; the new registrant is rejected.
+        For live DDNS updates, rejection (YXRRSET) is only sent back to kea-dhcp-ddns
+        when Kea is configured with a <code>check-with-dhcid</code> or
+        <code>check-exists-with-dhcid</code> conflict-resolution mode (i.e. when RFC 2136
+        prerequisite records are present in the update packet). The colliding client still
+        receives a DHCP lease — only their DNS registration is blocked. Static reservations
+        are always synced before dynamic leases, so <b>First wins</b> naturally protects
+        static reservation DNS entries from being overwritten by dynamic clients.<br>
+        <b>Last wins</b>: the existing record is removed and replaced by the new one.<br><br>
+        Note: this plugin does not store or validate DHCID records. Collision detection
+        is based on name-to-IP conflicts in Unbound, not client identity.]]></help>
+    </field>
+    <field>
         <id>general.general.enable_auto_clean</id>
         <label>Automatically clean stale DNS records</label>
         <type>checkbox</type>

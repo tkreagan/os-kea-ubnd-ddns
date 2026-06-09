@@ -152,6 +152,20 @@ def get_synthesize_ptr() -> bool:
     return True
 
 
+def get_collision_policy() -> str:
+    """Return the collision_policy setting: 'allow', 'first_wins', or 'last_wins'.
+    Defaults to 'allow' (current additive behaviour) when absent."""
+    try:
+        node = ET.parse(CONFIG_XML).getroot().find(
+            "OPNsense/KeaUnbound/general/collision_policy"
+        )
+        if node is not None and node.text:
+            return node.text.strip()
+    except Exception:
+        pass
+    return "allow"
+
+
 # Path to kea-dhcp-ddns.conf — read directly because D2 has no control socket
 # in the OPNsense provisioning (same approach as KcaconfigController.php).
 D2_CONF = "/usr/local/etc/kea/kea-dhcp-ddns.conf"
@@ -357,11 +371,17 @@ def query_kea_leases(service: str = "dhcp4") -> List[Dict]:
             expires = expire
 
         suffix = suffix_by_subnet.get(lease.get("subnet-id"), default_suffix)
+        try:
+            valid_lifetime = int(lease.get("valid-lft", 0))
+        except (TypeError, ValueError):
+            valid_lifetime = 0
+
         lease_dict = {
             "hostname": qualify_hostname(lease.get("hostname", ""), suffix),
             "ip": None,
             "ipv6": None,
             "expires": expires,
+            "valid_lifetime": valid_lifetime,
         }
 
         if service == "dhcp4":

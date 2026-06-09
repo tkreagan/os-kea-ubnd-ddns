@@ -102,7 +102,7 @@ except ImportError:
 # (daemon, sync/audit/clean scripts, start.py) logs with one program tag to the
 # single keaunbound log. The plugin always installs both halves together.
 sys.path.insert(0, "/usr/local/opnsense/scripts/keaunbound")
-from lib.keaunbound_sync import _arpa_to_ip, setup_logging  # noqa: E402
+from lib.keaunbound_sync import _arpa_to_ip, setup_logging, get_collision_policy  # noqa: E402
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 DEFAULT_PORT         = 53535
@@ -409,7 +409,8 @@ def process_update(msg: dns.message.Message, unbound_conf: str,
                    dry_run: bool, logger: logging.Logger,
                    static_files: list[str],
                    aggressive_cleanup: bool = False,
-                   synthesize_ptr: bool = True) -> int:
+                   synthesize_ptr: bool = True,
+                   collision_policy: str = "allow") -> int:
     """
     Process a DNS UPDATE message. Returns DNS RCODE to send back.
     Update section lives in msg.authority for dnspython parsed UPDATE messages.
@@ -539,6 +540,64 @@ def process_update(msg: dns.message.Message, unbound_conf: str,
                 rdata = str(rr)
 
                 if rdtype in ("A", "AAAA"):
+                    # Collision check: same name already registered to a different IP
+                    if collision_policy != "allow":
+                        existing = query_unbound(name, rdtype, logger, unbound_conf)
+                        conflict_ips = {ip for ip, _ttl in existing if ip != rdata}
+                        if conflict_ips:
+                            if collision_policy == "first_wins":
+                                # Block the new registrant unconditionally.
+                                # If prereqs are present (D2 is in check-* mode), return YXRRSET
+                                # so D2 knows the registration failed. If no prereqs (no-check
+                                # mode), silently skip the add and return NOERROR — D2 won't
+                                # retry and the client still has their lease.
+                                logger.info(
+                                    "Collision: %s already has %s; blocking %s (first_wins%s)",
+                                    name, conflict_ips, rdata,
+                                    ", returning YXRRSET" if len(msg.answer) > 0 else ""
+                                )
+                                skipped += 1
+                                if len(msg.answer) > 0:
+                                    logger.info(
+                                        "Update complete: added=%d removed=%d skipped=%d errors=%d",
+                                        added, removed, skipped, errors
+                                    )
+                                    return dns.rcode.YXRRSET
+                                continue  # no prereqs: skip add, continue processing
+                            elif collision_policy == "last_wins":
+                                # Replace: preserve other address family, remove old records,
+                                # clean up stale PTRs, restore the other family, then fall
+                                # through to add the new record normally below.
+                                other_type = OTHER_FAMILY[rdtype]
+                                preserved = query_unbound(name, other_type, logger, unbound_conf)
+                                all_old_ips = {ip for ip, _ttl in existing}
+                                logger.info(
+                                    "Collision: %s replacing %s with %s (last_wins)",
+                                    name, conflict_ips, rdata
+                                )
+                                unbound_control(["local_data_remove", name],
+                                                unbound_conf, dry_run, logger)
+                                if synthesize_ptr:
+                                    for old_ip in all_old_ips:
+                                        old_ptr = reverse_ptr(old_ip)
+                                        if old_ptr and not is_static_entry(
+                                                old_ptr, "PTR", logger, static_files):
+                                            unbound_control(["local_data_remove", old_ptr],
+                                                            unbound_conf, dry_run, logger)
+                                for old_ip, old_ttl in preserved:
+                                    unbound_control(
+                                        ["local_data", f"{name} {old_ttl} IN {other_type} {old_ip}"],
+                                        unbound_conf, dry_run, logger
+                                    )
+                                    if synthesize_ptr:
+                                        old_ptr = reverse_ptr(old_ip)
+                                        if old_ptr and not is_static_entry(
+                                                old_ptr, "PTR", logger, static_files):
+                                            unbound_control(
+                                                ["local_data", f"{old_ptr} {old_ttl} IN PTR {name}."],
+                                                unbound_conf, dry_run, logger
+                                            )
+
                     record = f"{name} {rrset.ttl} IN {rdtype} {rdata}"
                     logger.info("Add: %s", record)
                     ok = unbound_control(["local_data", record],
@@ -569,6 +628,30 @@ def process_update(msg: dns.message.Message, unbound_conf: str,
                     # Not expected in normal operation (we generate PTRs
                     # automatically from A/AAAA adds) but handled for
                     # correctness if kea-dhcp-ddns is configured to send them.
+
+                    # Collision guard: if first_wins, skip PTR when the target
+                    # name is already registered to a different IP — meaning the
+                    # corresponding A ADD was also blocked for this IP.
+                    if collision_policy == "first_wins":
+                        ptr_ip = _arpa_to_ip(name)
+                        target = rdata.rstrip(".")
+                        if ptr_ip and target:
+                            existing_fwd = (
+                                query_unbound(target, "A", logger, unbound_conf) +
+                                query_unbound(target, "AAAA", logger, unbound_conf)
+                            )
+                            if existing_fwd and not any(
+                                ip == ptr_ip for ip, _ttl in existing_fwd
+                            ):
+                                logger.info(
+                                    "Collision: PTR %s skipped; %s already registered"
+                                    " to %s (first_wins)",
+                                    name, target,
+                                    {ip for ip, _ in existing_fwd}
+                                )
+                                skipped += 1
+                                continue
+
                     record = f"{name} {rrset.ttl} IN PTR {rdata}"
                     logger.info("Add PTR (explicit): %s", record)
                     ok = unbound_control(["local_data", record],
@@ -644,6 +727,7 @@ def main():
         sys.exit(1)
 
     static_files = [args.host_entries]
+    collision_policy = get_collision_policy()
 
     logger.info("Listening on 127.0.0.1:%d dry_run=%s tsig=%s host_entries=%s",
                 args.port, args.dry_run,
@@ -698,7 +782,8 @@ def main():
         # Process the update
         rcode = process_update(msg, args.unbound_conf, args.dry_run, logger,
                                static_files, args.aggressive_cleanup,
-                               synthesize_ptr=not args.no_synthesize_ptr)
+                               synthesize_ptr=not args.no_synthesize_ptr,
+                               collision_policy=collision_policy)
 
         # Send response
         try:
