@@ -23,9 +23,9 @@ def test_api_general_get_returns_schema(api, deploy, test_log):
     test_log("observed", {"keys": list(result.keys())})
     assert "general" in result
     general = result["general"]
-    for field in ("enabled", "port", "enable_tsig", "tsig_algorithm",
-                  "aggressive_cleanup", "sync_static_reservations",
-                  "sync_dynamic_leases", "enable_auto_clean", "auto_clean_interval"):
+    for field in ("enabled", "port", "aggressive_cleanup", "sync_static_reservations",
+                  "sync_dynamic_leases", "collision_policy",
+                  "enable_auto_clean", "auto_clean_interval"):
         assert field in general, f"Missing field in general/get: {field}"
 
 
@@ -95,22 +95,6 @@ def test_api_kcaconfig_check(api, test_log):
     # Exact fields depend on KcaconfigController implementation;
     # at minimum it should not 404 or raise
     assert isinstance(result, dict)
-
-
-def test_api_tsig_fields_exposed_when_toggled(api, test_log):
-    """TSIG enabled flag must surface in get response."""
-    api.api_post("general/set", {"general": {"enable_tsig": "1",
-                                              "tsig_key_name": "testkey",
-                                              "tsig_key_secret": "dGVzdA=="}})
-    result = api.api_get("general/get")
-    g = result["general"]
-    test_log("observed", {"enable_tsig": g.get("enable_tsig")})
-    assert g.get("enable_tsig") in ("1", 1, True)
-
-    api.api_post("general/set", {"general": {"enable_tsig": "0",
-                                              "tsig_key_name": "",
-                                              "tsig_key_secret": ""}})
-    test_log("cleaned", True)
 
 
 def test_api_invalid_port_rejected(api, test_log):
