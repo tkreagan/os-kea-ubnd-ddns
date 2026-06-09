@@ -194,6 +194,9 @@ function renderKeaConfig(data) {
     // ── Kea DDNS Forward Configuration Status ────────────────────────────────
     html += ddnsConfigTable(ok, wrong, tsig, no_ddns);
 
+    // ── Summary advisories (global reservations, shared networks) ─────────────
+    html += summaryAdvisoriesHtml(data.summary_advisories);
+
     // ── Apply-all action ──────────────────────────────────────────────────────
     if (total > 0) {
         const port = data.our_listener ? data.our_listener.port : 53535;
@@ -461,6 +464,18 @@ function fixGuide(hasWrong, hasTsig, hasNoDdns, hasD2Off, listener) {
 
     html += '</div></div></div>';
     return html;
+}
+
+function summaryAdvisoriesHtml(advisories) {
+    if (!advisories || !advisories.length) return '';
+    return advisories.map(function(a) {
+        const warn = a.level === 'warning';
+        const cls  = warn ? 'alert-warning' : 'alert-info';
+        const icon = warn ? 'fa-exclamation-triangle' : 'fa-info-circle';
+        return '<div class="alert ' + cls + '" style="margin-bottom:8px;">' +
+               '<strong><i class="fa ' + icon + '"></i> ' + escapeHtml(a.heading) + ':</strong> ' +
+               escapeHtml(a.message) + '</div>';
+    }).join('');
 }
 
 function advisoriesHtml(arr) {

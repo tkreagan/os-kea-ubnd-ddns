@@ -654,11 +654,12 @@ class KcaconfigController extends ApiControllerBase
         }
         // Shared-network subnets
         foreach ($dhcp_config['shared-networks'] ?? [] as $net) {
-            $net_sfx = $net['ddns-qualifying-suffix'] ?? $global_sfx;
+            $net_sfx  = $net['ddns-qualifying-suffix'] ?? $global_sfx;
+            $net_name = $net['name'] ?? 'unnamed';
             foreach ($net[$subnet_key] ?? [] as $subnet) {
                 // Shared-network suffix overrides global but subnet suffix takes priority
                 $effective_sfx = $subnet['ddns-qualifying-suffix'] ?? $net_sfx;
-                $subnets[] = $this->buildSubnetEntry(
+                $entry = $this->buildSubnetEntry(
                     array_merge($subnet, ['_effective_sfx' => $effective_sfx]),
                     $global_sfx,
                     $domain_map,
@@ -670,6 +671,15 @@ class KcaconfigController extends ApiControllerBase
                     $subnetIndex,
                     $system_domain
                 );
+                $entry['advisories'][] = [
+                    'level'   => 'warning',
+                    'message' => 'This subnet is inside shared network "' . $net_name . '". '
+                               . 'Subnet-level static reservations sync correctly, but reservations '
+                               . 'placed directly on the shared-network object are not supported and '
+                               . 'will be silently missed. DDNS for subnets in shared networks is '
+                               . 'not tested (OPNsense issue #9427).',
+                ];
+                $subnets[] = $entry;
             }
         }
         return $subnets;
@@ -1074,6 +1084,55 @@ class KcaconfigController extends ApiControllerBase
         ];
     }
 
+    // ── Summary advisories ────────────────────────────────────────────────────
+
+    /**
+     * Return summary-level (whole-config) advisories for global reservations and
+     * shared networks found in a Kea daemon config map. Each advisory has:
+     *   ['level' => 'warning'|'notice', 'heading' => string, 'message' => string]
+     */
+    private function globalReservationAdvisories($dhcp_config)
+    {
+        $out = [];
+
+        if (!empty($dhcp_config['reservations'] ?? [])) {
+            $out[] = [
+                'level'   => 'notice',
+                'heading' => 'Global reservations configured',
+                'message' => 'Kea has reservations at the global Dhcp4/Dhcp6 level. '
+                           . 'ISC recommends against assigning IP addresses in global reservations — '
+                           . 'they are designed for options and hostname assignment only. '
+                           . 'The plugin static sync reads ip-address from global reservations; '
+                           . 'entries without an IP are silently skipped. '
+                           . 'This configuration path is not tested.',
+            ];
+        }
+
+        $shared_nets = $dhcp_config['shared-networks'] ?? [];
+        if (!empty($shared_nets)) {
+            $count = count($shared_nets);
+            $names = implode(', ', array_map(
+                function ($n) { return '"' . ($n['name'] ?? 'unnamed') . '"'; },
+                $shared_nets
+            ));
+            $out[] = [
+                'level'   => 'warning',
+                'heading' => 'Shared networks detected',
+                'message' => $count . ' shared network' . ($count !== 1 ? 's' : '') . ' detected: '
+                           . $names . '. '
+                           . 'Subnet-level static reservations within shared networks sync correctly, '
+                           . 'but reservations placed directly on a shared-network object are not '
+                           . 'supported and will be silently missed. '
+                           . 'DDNS for subnets inside shared networks is not tested. '
+                           . 'OPNsense GUI does not expose shared-network configuration '
+                           . '(opnsense/core issue #9427) — if you are using shared networks via '
+                           . 'manual config, verify DNS registration independently.',
+            ];
+        }
+
+        return $out;
+    }
+
     // ── Public action ─────────────────────────────────────────────────────────
 
     public function checkAction()
@@ -1094,17 +1153,18 @@ class KcaconfigController extends ApiControllerBase
         $idx6 = $this->loadSubnetIndex('dhcp6');
 
         $result = [
-            'status'         => 'ok',
-            'kea_error'      => null,
-            'our_listener'   => [
+            'status'            => 'ok',
+            'kea_error'         => null,
+            'our_listener'      => [
                 'address'      => $plugin['address'],
                 'port'         => $plugin['port'],
                 'tsig_enabled' => $plugin['tsig_enabled'],
                 'running'      => $this->isListenerRunning(),
             ],
-            'd2_reachable'   => $d2_ok,
-            'ipv4_subnets'   => [],
-            'ipv6_subnets'   => [],
+            'd2_reachable'      => $d2_ok,
+            'ipv4_subnets'      => [],
+            'ipv6_subnets'      => [],
+            'summary_advisories' => [],
         ];
 
         // IPv4
@@ -1117,6 +1177,10 @@ class KcaconfigController extends ApiControllerBase
                 $dhcp4, 'dhcp4', $domain_map, $plugin, $d2_ok,
                 $reverse_zones, $synthesize_ptr, $idx4, $system_domain
             );
+            $result['summary_advisories'] = array_merge(
+                $result['summary_advisories'],
+                $this->globalReservationAdvisories($dhcp4['Dhcp4'] ?? [])
+            );
         }
 
         // IPv6 (offline is not an error)
@@ -1125,6 +1189,10 @@ class KcaconfigController extends ApiControllerBase
             $result['ipv6_subnets'] = $this->extractSubnets(
                 $dhcp6, 'dhcp6', $domain_map, $plugin, $d2_ok,
                 $reverse_zones, $synthesize_ptr, $idx6, $system_domain
+            );
+            $result['summary_advisories'] = array_merge(
+                $result['summary_advisories'],
+                $this->globalReservationAdvisories($dhcp6['Dhcp6'] ?? [])
             );
         }
 

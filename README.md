@@ -271,6 +271,20 @@ OPNsense 26.1 with Kea DHCP4:
   with no log warning when D2 is down; monitor D2 separately.
 - **Kea connection auto-discovery** — the plugin reads each Kea daemon's active config file to find its control socket (unix or HTTP) and falls back to the standard OPNsense socket paths. Manual connection override is not exposed in the UI and is deferred; it may not be necessary given reliable auto-discovery. HTTP socket support is deferred until OPNsense enables HTTP control sockets or deprecates unix sockets.
 - **kea-dhcp-ddns connection** — the Kea Config Check tab reads `kea-dhcp-ddns.conf` directly rather than querying a control socket, because OPNsense does not provision a control socket or HTTP listener for `kea-dhcp-ddns` (it is not exposed in the web GUI and requires a manual config edit to enable).
+- **Global reservations not tested** — ISC recommends against assigning IP addresses in Kea's
+  global reservation scope (`Dhcp4.reservations`); that scope is designed for options and
+  hostname assignment only, not IP binding. The plugin's static sync reads `ip-address` from
+  global reservations and silently skips entries without one, so a correctly-used global
+  reservation (no IP) produces no DNS record. This configuration is not tested. The Kea Config
+  Check tab flags it when detected.
+- **Shared networks not supported** — The OPNsense GUI does not expose shared-network
+  configuration for Kea DHCP (see
+  [opnsense/core#9427](https://github.com/opnsense/core/issues/9427), no committed timeline).
+  If you use shared networks via manual config: subnet-level reservations within shared networks
+  do sync correctly, but reservations placed directly on a shared-network object (not inside a
+  subnet) are not supported and will be silently missed. DDNS for subnets inside shared networks
+  is not tested. The Kea Config Check tab flags both conditions when detected. Full shared-network
+  support is planned if and when OPNsense adds GUI exposure.
 - **Not yet in OPNsense community plugins** — installation is manual for now (see
   [Installation](#installation)).
 
