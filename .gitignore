@@ -15,3 +15,8 @@ COMPLETE_PLUGIN_OVERVIEW.md
 KEA_CONFIG_CHECK_SUMMARY.md
 STATUS_VIEW_SUMMARY.md
 PLUGIN_BRIEF.md
+tools/.env
+
+tools/results/
+tools/__pycache__/
+tools/**/__pycache__/
