@@ -26,6 +26,32 @@
  #}
 
 <script>
+    // Resident-daemon readiness banner. Reads the status file the daemon and
+    // start.py write, so the UI can explain a not-running daemon (refused /
+    // stopped) or a transient repopulation (blocked) beyond plain up/down.
+    function updateReadiness() {
+        ajaxGet('/api/keaunbound/service/readiness', {}, function(data, status) {
+            if (status !== 'success' || !data) { return; }
+            const banners = {
+                refused: ['danger', 'fa-circle-xmark',
+                          '{{ lang._('DDNS listener not started') }}'],
+                stopped: ['danger', 'fa-circle-xmark',
+                          '{{ lang._('DDNS listener stopped') }}'],
+                alert:   ['warning', 'fa-triangle-exclamation',
+                          '{{ lang._('DDNS listener degraded') }}'],
+                blocked: ['warning', 'fa-circle-nodes',
+                          '{{ lang._('Repopulating DNS after a Kea/Unbound restart') }}'],
+            };
+            const b = banners[data.state];
+            const $box = $('#keaunbound_readiness');
+            if (!b) { $box.hide().empty(); return; }
+            const detail = data.detail ? (' — ' + $('<div>').text(data.detail).html()) : '';
+            $box.html('<div class="alert alert-' + b[0] + '" role="alert">'
+                + '<i class="fa-solid ' + b[1] + '"></i> <b>' + b[2] + '</b>' + detail
+                + '</div>').show();
+        });
+    }
+
     $( document ).ready(function() {
         let data_get_map = {'frm_generalsettings': "/api/keaunbound/general/get"};
         mapDataToFormUI(data_get_map).done(function() {
@@ -33,6 +59,9 @@
             $('.selectpicker').selectpicker('refresh');
             updateServiceControlUI('keaunbound');
         });
+
+        updateReadiness();
+        setInterval(updateReadiness, 5000);
 
         $("#reconfigureAct").SimpleActionButton({
             onPreAction: function() {
@@ -51,6 +80,8 @@
         // Lease Audit tab, next to the records they affect.
     });
 </script>
+
+<div id="keaunbound_readiness" style="display:none; margin-bottom:10px;"></div>
 
 <div class="content-box">
     {{ partial("layout_partials/base_form", ['fields': formGeneralSettings, 'id': 'frm_generalsettings']) }}

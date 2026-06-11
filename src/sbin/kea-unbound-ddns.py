@@ -113,6 +113,7 @@ from lib.keaunbound_sync import (  # noqa: E402
 )
 from lib import consistency_sm as csm  # noqa: E402
 from lib import pid_watch  # noqa: E402
+from lib.preconditions import write_status  # noqa: E402
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 DEFAULT_PORT         = 53535
@@ -120,7 +121,6 @@ DEFAULT_UNBOUND_CONF = "/var/unbound/unbound.conf"
 DEFAULT_HOST_ENTRIES = "/var/unbound/host_entries.conf"
 UNBOUND_CONTROL      = "/usr/local/sbin/unbound-control"
 KEA_SYNC             = "/usr/local/opnsense/scripts/keaunbound/kea-sync.py"
-STATUS_FILE          = "/var/run/keaunbound/daemon-status"
 
 # Live-path unbound-control timeout. Spike R5 measured status/local_data at 9–15 ms
 # on a 446-record box; 300 ms is ~20x headroom and well under the 500 ms ACK budget.
@@ -489,16 +489,6 @@ def parse_tsig_key(spec, algorithm: str = "HMAC-SHA256"):
               f"Valid: {', '.join(algo_map)}", file=sys.stderr)
         sys.exit(1)
     return dns.tsigkeyring.from_text({name: (algo, secret)})
-
-
-def write_status(state: str, detail: str = "") -> None:
-    """Write a one-line status file the UI/StatusController reads."""
-    try:
-        os.makedirs(os.path.dirname(STATUS_FILE), exist_ok=True)
-        with open(STATUS_FILE, "w") as f:
-            f.write(f"{state}\t{detail}\t{int(time.time())}\n")
-    except OSError:
-        pass
 
 
 # ── Signal handling ───────────────────────────────────────────────────────────

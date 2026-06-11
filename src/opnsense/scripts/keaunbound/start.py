@@ -18,6 +18,7 @@ import xml.etree.ElementTree as ET
 
 sys.path.insert(0, "/usr/local/opnsense/scripts/keaunbound")
 from lib.keaunbound_sync import setup_logging  # noqa: E402
+from lib.preconditions import check_preconditions, write_status  # noqa: E402
 
 CONFIG_XML         = "/conf/config.xml"
 DAEMON             = "/usr/sbin/daemon"
@@ -125,6 +126,16 @@ def main():
                 os.unlink(pf)
             except OSError:
                 pass
+
+    # Preconditions: don't launch a daemon that would crash-loop or sit idle.
+    # On refusal, record the reason in the status file (the UI banner reads it)
+    # and exit 0 — not an error, just "not ready". The plugin's reconfigure on a
+    # settings change re-runs start.py, so this self-corrects when DDNS is wired.
+    ok, reason = check_preconditions(port)
+    if not ok:
+        logger.warning("not starting — %s", reason)
+        write_status("refused", reason)
+        sys.exit(0)
 
     # Build kea-unbound-ddns.py argument list
     script_args = [SCRIPT, "--port", cfg["port"]]
