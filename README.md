@@ -33,10 +33,11 @@ the plugin's stub listener. Each packet is immediately translated into an
 `unbound-control local_data` or `local_data_remove` call — A, AAAA, and PTR records
 are handled automatically.
 
-**Static path (on demand / scheduled):** On Kea start, Unbound reload, and on
-demand, the plugin reads Kea reservations and active leases directly via the Kea
-control socket and registers them in Unbound with TTLs matching remaining lease
-lifetime.
+**Static path (reconcile / on demand):** The resident daemon watches the Kea and
+Unbound service pidfiles. Whenever either service restarts — flushing Unbound's
+runtime records — the daemon automatically runs a full reconcile from Kea,
+repopulating Unbound without any manual intervention. The Lease Audit tab also
+provides manual Sync and Clean buttons.
 
 OPNsense Unbound Host Overrides and "Register DHCP Static Mappings" entries are
 never touched by either path.
@@ -50,6 +51,12 @@ never touched by either path.
   path works without it)
 - Unbound DNS resolver (built into OPNsense, must be the active resolver)
 - `py313-dnspython` — listed in `PLUGIN_DEPENDS`, installed automatically by `pkg`
+
+> **High availability / multi-router setups are not supported.** The plugin
+> assumes a single OPNsense instance is the sole writer to Unbound's runtime
+> local_data. Running two plugin instances against a shared Unbound is untested
+> and will produce split-brain DNS. CARP failover (active/passive with a single
+> active node at a time) is not affected by this limitation.
 
 ## Installation
 
@@ -180,21 +187,48 @@ so leaving the built-in setting on is safe if you prefer a gradual transition.
 | Setting | Default | Notes |
 |---|---|---|
 | Enabled | **off** | Master switch for the daemon and all sync jobs |
-| Sync Kea static reservations | **on** | Registers reservations in Unbound at startup and on demand |
+| Sync Kea static reservations | **on** | Registers reservations in Unbound during each reconcile and on demand |
 | Sync Kea active leases | **on** | Registers active leases; TTL = remaining lease time |
-| Clean up old IPs on lease update | **on** | After a new IP is registered via DDNS UPDATE, removes any previous IPs for that hostname no longer in Kea — see warning below |
 | Synthesize PTR records | **on** | Automatically create the `in-addr.arpa`/`ip6.arpa` PTR for every A/AAAA update. Works without a reverse zone in kea-dhcp-ddns. Disable only if you manage reverse DNS separately — explicit PTR updates from kea-dhcp-ddns are always applied regardless |
-| Hostname collision policy | **Allow** | Action when a DHCP client registers a hostname already registered to a different IP. **Allow**: both records coexist (Unbound round-robins them). **First wins**: existing record is kept; the new registrant's A and PTR are rejected — YXRRSET is returned to D2 only if Kea is in a `check-*` conflict-resolution mode. **Last wins**: existing record is replaced. Static reservations are always loaded before dynamic leases, so **First wins** naturally protects reserved hosts. |
+| Hostname collision policy | **Last wins** | Action when a hostname is already registered to a different IP — see [Hostname collision policy](#hostname-collision-policy) below |
 | Automatically clean stale DNS records | **on** | Scheduled bulk removal of entries not backed by Kea — see warning below |
-| Auto-clean frequency | **6 hours** | How often the scheduled bulk cleanup runs |
+| Auto-clean frequency | **6 hours** | How often the scheduled bulk cleanup runs. Options: every 1/3/6/12 hours or daily at a specific hour |
 | Port *(advanced)* | `53535` | UDP port for DNS UPDATE packets from kea-dhcp-ddns |
+| Dirty-set cap *(advanced)* | `100` | Max deferred hostnames before the next reconcile becomes a full sync |
+| Max reconcile attempts *(advanced)* | `5` | Failed reconciles before the daemon marks itself degraded |
+| Readiness watchdog *(advanced)* | `10 min` | Time to wait for Kea/Unbound before the watchdog restarts the daemon. 0 = wait forever |
+
+#### Hostname collision policy
+
+When a DHCP client registers a hostname that is already in Unbound for a
+different IP address, the plugin applies one of three policies:
+
+| Policy | Behaviour | Use when |
+|---|---|---|
+| **Last wins** *(default)* | The existing A/AAAA and its synthesized PTR are removed; the new IP is registered | Normal roaming network — a device that moves or gets a new lease should resolve to its current address |
+| **Allow** | Both records coexist — Unbound round-robins between them | Dual-stack hosts with separate DHCPv4 + DHCPv6 leases; or you intentionally want multiple A records per name |
+| **First wins** | Existing record is kept; the new registrant is rejected | You want static reservations to be immutable — reservations are always synced before dynamic leases, so they win naturally |
+
+**Why no DHCID?** Kea sends DHCID records in RFC 2136 UPDATE packets when
+configured with a `check-with-dhcid` or `check-exists-with-dhcid`
+conflict-resolution mode. This plugin silently ignores them. DHCID was designed
+to prevent two different DHCP servers from fighting over a hostname; since a
+single plugin instance is the sole DNS writer, DHCID adds no value and is
+deliberately omitted.
+
+**First wins caveats:** On a live DDNS stream, First wins is reliable — the
+first registrant holds the name until it sends a DELETE. After a full reconcile
+(daemon restart, Kea or Unbound restart), ordering is deterministic within the
+reconcile run (reservations beat leases) but not guaranteed across restarts.
+On networks where clients randomize their MAC address, First wins can permanently
+block a hostname from updating if the original registrant's lease expired without
+sending a DELETE.
 
 #### Warning: settings that can remove DNS entries from other sources
 
-**Auto-clean** and **Clean up old IPs on lease update** both call
-`unbound-control local_data_remove`, which removes records from Unbound's
-**runtime in-memory zone** — including entries sourced from config files, not
-just dynamically added ones.
+**Auto-clean** calls `unbound-control local_data_remove`, which removes records
+from Unbound's **runtime in-memory zone** — including entries sourced from config
+files, not just dynamically added ones.
 
 The following entries are **protected** — if removed from Unbound's runtime
 cache by a cleanup operation, the plugin automatically adds them back:
@@ -247,7 +281,7 @@ OPNsense 26.1 with Kea DHCP4:
 - Kea Config Check tab (forward zones, TSIG key detection, trailing-dot validation)
 - Scheduled stale-record cleanup
 - OPNsense Host Override guard (never removes managed entries)
-- Automated startup sync hooks (Kea start, Unbound reload, bootup)
+- Resident daemon with self-healing: detects Kea/Unbound restarts and automatically reconciles DNS records
 
 ## Known issues and roadmap
 
