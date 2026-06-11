@@ -52,13 +52,21 @@
         });
     }
 
+    function updateCleanScheduleUI() {
+        var isDaily = $('select[id="general.general.auto_clean_interval"]').val() === 'daily';
+        $('tr[id="row_general.general.auto_clean_hour"]').toggle(isDaily);
+    }
+
     $( document ).ready(function() {
         let data_get_map = {'frm_generalsettings': "/api/keaunbound/general/get"};
         mapDataToFormUI(data_get_map).done(function() {
             formatTokenizersUI();
             $('.selectpicker').selectpicker('refresh');
             updateServiceControlUI('keaunbound');
+            updateCleanScheduleUI();
         });
+
+        $('select[id="general.general.auto_clean_interval"]').change(updateCleanScheduleUI);
 
         updateReadiness();
         setInterval(updateReadiness, 5000);

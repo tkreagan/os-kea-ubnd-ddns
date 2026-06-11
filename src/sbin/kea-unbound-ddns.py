@@ -108,7 +108,7 @@ except ImportError:
 # machine, and the pid-watch level read. The plugin installs all halves together.
 sys.path.insert(0, "/usr/local/opnsense/scripts/keaunbound")
 from lib.keaunbound_sync import (  # noqa: E402
-    _arpa_to_ip, setup_logging, get_collision_policy,
+    _arpa_to_ip, setup_logging, get_collision_policy, get_sm_config,
     read_host_entries, unbound_mutation_lock, MUTATION_LOCK_PATH,
 )
 from lib import consistency_sm as csm  # noqa: E402
@@ -509,7 +509,7 @@ class Daemon:
         self.synthesize_ptr = not args.no_synthesize_ptr
         self.collision_policy = get_collision_policy()
         self.cache = HostEntriesCache(args.host_entries, logger)
-        self.sm = csm.ConsistencySM(csm.SMConfig())
+        self.sm = csm.ConsistencySM(get_sm_config())
         self.sock = None
         self.kq = None
         self.watcher = None

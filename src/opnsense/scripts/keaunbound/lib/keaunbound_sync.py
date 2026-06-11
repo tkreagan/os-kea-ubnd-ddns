@@ -180,7 +180,7 @@ def get_synthesize_ptr() -> bool:
 
 def get_collision_policy() -> str:
     """Return the collision_policy setting: 'allow', 'first_wins', or 'last_wins'.
-    Defaults to 'allow' (current additive behaviour) when absent."""
+    Defaults to 'last_wins' when absent."""
     try:
         node = ET.parse(CONFIG_XML).getroot().find(
             "OPNsense/KeaUnbound/general/collision_policy"
@@ -189,7 +189,38 @@ def get_collision_policy() -> str:
             return node.text.strip()
     except Exception:
         pass
-    return "allow"
+    return "last_wins"
+
+
+def get_sm_config():
+    """Read advanced SM tunables from config.xml and return a populated SMConfig.
+    Falls back to SMConfig defaults on any read/parse error."""
+    from .consistency_sm import SMConfig  # local import to avoid circular dependency
+    defaults = SMConfig()
+    try:
+        node = ET.parse(CONFIG_XML).getroot().find("OPNsense/KeaUnbound/general")
+        if node is None:
+            return defaults
+
+        def _int(name, default):
+            child = node.find(name)
+            if child is not None and child.text:
+                try:
+                    v = int(child.text.strip())
+                    if v >= 0:
+                        return v
+                except ValueError:
+                    pass
+            return default
+
+        cfg = SMConfig()
+        cfg.dirty_cap = _int("dirty_set_cap", defaults.dirty_cap)
+        cfg.max_full_sync_attempts = _int("max_full_sync_attempts", defaults.max_full_sync_attempts)
+        minutes = _int("readiness_watchdog_minutes", int(defaults.watchdog_seconds // 60))
+        cfg.watchdog_seconds = float(minutes * 60)
+        return cfg
+    except Exception:
+        return defaults
 
 
 # Path to kea-dhcp-ddns.conf — read directly because D2 has no control socket

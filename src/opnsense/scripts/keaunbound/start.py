@@ -70,7 +70,6 @@ def get_config():
         "tsig_key_name":              "",
         "tsig_key_secret":            "",
         "tsig_algorithm":             "HMAC-SHA256",
-        "aggressive_cleanup":         "0",
         "synthesize_ptr":             "1",
     }
     try:
@@ -153,11 +152,6 @@ def main():
             "--tsig-key",       f"{cfg['tsig_key_name']}:{cfg['tsig_key_secret']}",
             "--tsig-algorithm", cfg["tsig_algorithm"],
         ]
-
-    # NOTE: --aggressive-cleanup was retired in the resident-daemon rewrite — the
-    # live path now applies the collision policy inline (a host getting a new IP is
-    # a same-FQDN collision), which subsumes it. The aggressive_cleanup model field
-    # is removed in Phase 5; until then it is simply ignored here.
 
     if cfg["synthesize_ptr"] != "1":
         script_args.append("--no-synthesize-ptr")

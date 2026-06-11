@@ -20,18 +20,23 @@ kea-dhcp-ddns on <code>127.0.0.1:{{ port }}</code> and immediately registers or 
 A/AAAA and PTR records in Unbound. Records managed by Unbound Host Overrides are never
 touched.</p>
 
+<p><strong>Self-healing consistency:</strong> The resident daemon watches Kea and Unbound
+service pidfiles. Whenever either service restarts (flushing runtime DNS records), the
+daemon automatically runs a full reconcile from Kea — repopulating Unbound without any
+manual intervention or PHP configure hook. The status banner above shows the current
+reconcile state.</p>
+
 <p><strong>Static Reservation Sync:</strong> Registers Kea static reservations in Unbound
-before any client connects. Fires on Kea start, config change, and Unbound reload.
-Manual button available on the Lease Audit tab.</p>
+before any client connects. Runs as part of each full reconcile and on demand via the
+manual Sync button on the Lease Audit tab.</p>
 
 <p><strong>Active Lease Sync:</strong> Bulk-syncs all active Kea leases into Unbound with
-TTLs matching remaining lease time. Repopulates Unbound after a restart and catches leases
-the DDNS stream may have missed. Fires on Kea start, config change, and Unbound reload.
-Manual button available on the Lease Audit tab.</p>
+TTLs matching remaining lease time. Runs as part of each full reconcile and on demand via
+the manual Sync button on the Lease Audit tab.</p>
 
-<p><strong>DNS Record Cleaning:</strong> Two cleanup modes handle records Kea never
-explicitly deleted — see the DNS Record Cleaning settings section below. The Lease Audit
-tab shows a full preview of what each cleanup would remove.</p>
+<p><strong>DNS Record Cleaning:</strong> Periodically removes stale records not backed by
+any active Kea lease, reservation, or Unbound Host Override. See the DNS Record Cleaning
+settings below. The Lease Audit tab shows a full preview of what each cleanup would remove.</p>
 
 <h4>Configuring Kea for DDNS</h4>
 
@@ -82,18 +87,12 @@ tab shows a full preview of what each cleanup would remove.</p>
         <id>general.general.sync_dynamic_leases</id>
         <label>Sync Kea active leases to Unbound</label>
         <type>checkbox</type>
-        <help>Register Kea active leases in Unbound DNS with TTL matching lease expiration. Repopulates Unbound on startup and refreshes entries periodically. Requires the Kea DHCP service (kea-dhcp4/kea-dhcp6) to be running.</help>
+        <help>Register Kea active leases in Unbound DNS with TTL matching lease expiration. Repopulates Unbound on startup and after each Kea or Unbound restart. Requires the Kea DHCP service (kea-dhcp4/kea-dhcp6) to be running.</help>
     </field>
 
     <field>
         <type>header</type>
         <label>DNS Record Cleaning</label>
-    </field>
-    <field>
-        <id>general.general.aggressive_cleanup</id>
-        <label>Clean up old IPs on lease update</label>
-        <type>checkbox</type>
-        <help>When a new DHCP lease is registered via DDNS UPDATE, remove any previous IP addresses for that hostname that are no longer in Kea's lease or reservation table. This handles the common case where Kea issues a client a new IP without sending a DNS DELETE for the old one (standard Kea behaviour on IP change). Best-effort: the ADD is always recorded and the DDNS response is always sent regardless of whether cleanup succeeds. Requires Kea to be reachable at the time of the update. Records managed by Unbound Host Overrides are never touched.</help>
     </field>
     <field>
         <id>general.general.synthesize_ptr</id>
@@ -107,16 +106,17 @@ tab shows a full preview of what each cleanup would remove.</p>
         <type>dropdown</type>
         <help><![CDATA[Action when a hostname is already registered in Unbound for a
         different IP address.<br><br>
-        <b>Allow</b>: both records coexist — Unbound will round-robin between them.<br>
+        <b>Last wins</b> (default): the existing record is removed and replaced by the new
+        one. Correct behaviour for most networks — Kea issues the new IP and DDNS updates
+        Unbound atomically.<br>
+        <b>Allow</b>: both records coexist — Unbound will round-robin between them. Use
+        when you want multiple IPs per hostname (e.g. dual-stack hosts with separate
+        DHCPv4 and DHCPv6 leases).<br>
         <b>First wins</b>: the existing record is kept; the new registrant is rejected.
-        For live DDNS updates, rejection (YXRRSET) is only sent back to kea-dhcp-ddns
-        when Kea is configured with a <code>check-with-dhcid</code> or
-        <code>check-exists-with-dhcid</code> conflict-resolution mode (i.e. when RFC 2136
-        prerequisite records are present in the update packet). The colliding client still
-        receives a DHCP lease — only their DNS registration is blocked. Static reservations
-        are always synced before dynamic leases, so <b>First wins</b> naturally protects
-        static reservation DNS entries from being overwritten by dynamic clients.<br>
-        <b>Last wins</b>: the existing record is removed and replaced by the new one.<br><br>
+        Static reservations are always synced before dynamic leases, so First wins
+        naturally protects reservation DNS entries from being overwritten by dynamic
+        clients. Best-effort on reconcile after restart (ordering is deterministic within
+        a run, not across restarts).<br><br>
         Note: this plugin does not store or validate DHCID records. Collision detection
         is based on name-to-IP conflicts in Unbound, not client identity.]]></help>
     </field>
@@ -131,6 +131,13 @@ tab shows a full preview of what each cleanup would remove.</p>
         <label>Auto-clean frequency</label>
         <type>dropdown</type>
         <help>How often to run the scheduled bulk cleanup. Only used when auto-clean is enabled. The manual Clean button on the Lease Audit tab runs the same operation on demand.</help>
+    </field>
+    <field>
+        <id>general.general.auto_clean_hour</id>
+        <label>Auto-clean hour (0–23)</label>
+        <type>text</type>
+        <hint>0</hint>
+        <help>Hour of the day (0–23, UTC) to run the daily auto-clean. Only used when frequency is set to "Daily".</help>
     </field>
 
     <field>
@@ -147,5 +154,34 @@ tab shows a full preview of what each cleanup would remove.</p>
         <help>UDP port to listen on for DNS UPDATE packets from kea-dhcp-ddns. Must match the destination port configured in kea-dhcp-ddns. Default 53535.</help>
     </field>
 
+    <field>
+        <type>header</type>
+        <label>Advanced</label>
+        <advanced>true</advanced>
+    </field>
+    <field>
+        <id>general.general.dirty_set_cap</id>
+        <label>Dirty-set cap</label>
+        <type>text</type>
+        <hint>100</hint>
+        <advanced>true</advanced>
+        <help>Maximum number of deferred hostname updates tracked before the next reconcile becomes a full sync. Lower values reduce targeted-drain scope at high churn. Default 100.</help>
+    </field>
+    <field>
+        <id>general.general.max_full_sync_attempts</id>
+        <label>Max reconcile attempts</label>
+        <type>text</type>
+        <hint>5</hint>
+        <advanced>true</advanced>
+        <help>How many failed full reconcile attempts are allowed before the daemon marks itself degraded (alert banner) and stops retrying. 0 means retry indefinitely. Default 5.</help>
+    </field>
+    <field>
+        <id>general.general.readiness_watchdog_minutes</id>
+        <label>Readiness watchdog (minutes)</label>
+        <type>text</type>
+        <hint>10</hint>
+        <advanced>true</advanced>
+        <help>Minutes to wait for Kea and Unbound to become ready after startup before the watchdog terminates the daemon (daemon(8) will restart it). 0 disables the watchdog. Default 10.</help>
+    </field>
 
 </form>

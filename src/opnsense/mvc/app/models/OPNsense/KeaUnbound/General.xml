@@ -5,7 +5,7 @@
     <items>
         <general>
             <!-- Master enable switch. When disabled, the daemon does not start
-                 and all hooks (kea_sync, unbound_start, bootup) are no-ops. -->
+                 and the bootup hook is a no-op. -->
             <enabled type="BooleanField">
                 <Default>0</Default>
                 <Required>Y</Required>
@@ -22,43 +22,19 @@
                 <MaximumValue>65535</MaximumValue>
             </port>
 
-            <!-- Sync static reservations from Kea to Unbound.
-                 When enabled, static reservations from Kea are registered in
-                 Unbound's local_data via the reservation-sync.py script, making
-                 them available in DNS immediately (before any client connects).
-                 reservation-sync.py skips any name already in host_entries.conf,
-                 so this is safe regardless of Unbound's "Register DHCP Static
-                 Mappings" (regdhcpstatic) setting — the plugin only fills the
-                 gap for reservations OPNsense has not itself registered. -->
+            <!-- Sync static reservations from Kea to Unbound during the bulk
+                 reconcile (run by the daemon after a Kea/Unbound restart). -->
             <sync_static_reservations type="BooleanField">
                 <Default>1</Default>
                 <Required>Y</Required>
             </sync_static_reservations>
 
-            <!-- Sync active DHCP leases from Kea to Unbound.
-                 When enabled, active leases from Kea are registered in
-                 Unbound's local_data via the lease-sync.py script. TTL is set
-                 to the remaining lease lifetime, so entries automatically expire
-                 when leases expire, forcing clients to reconnect and refresh.
-                 This is called on Unbound startup (to repopulate after reload)
-                 and periodically via cron (to keep entries fresh). -->
+            <!-- Sync active DHCP leases from Kea to Unbound during the bulk
+                 reconcile. TTL is set to the remaining lease lifetime. -->
             <sync_dynamic_leases type="BooleanField">
                 <Default>1</Default>
                 <Required>Y</Required>
             </sync_dynamic_leases>
-
-            <!-- Remove previous IPs for a hostname when a new lease is
-                 registered via DDNS ADD. After each successful A/AAAA
-                 registration, query Kea for all IPs that hostname currently
-                 holds and remove any extras from Unbound that are no longer
-                 backed by an active lease or reservation. Handles the common
-                 case where Kea issues a client a new IP without sending a
-                 DELETE for the old one. Best-effort: ADD outcome is unaffected
-                 regardless of whether cleanup succeeds or Kea is reachable. -->
-            <aggressive_cleanup type="BooleanField">
-                <Default>1</Default>
-                <Required>Y</Required>
-            </aggressive_cleanup>
 
             <!-- Synthesize PTR (reverse) records from forward A/AAAA DDNS updates.
                  When enabled (default), the DDNS listener automatically creates the
@@ -78,21 +54,20 @@
 
             <!-- How to handle a DDNS registration for a hostname that is already
                  registered to a different IP address.
-                 allow:       both records coexist in Unbound (round-robin). Default.
-                 first_wins:  existing record is kept; the new registrant is rejected
-                              (YXRRSET returned to kea-dhcp-ddns only when Kea is in a
-                              check-with-dhcid or check-exists-with-dhcid mode, i.e. when
-                              RFC 2136 prerequisite records are present). Static reservations
-                              are always loaded before dynamic leases, so first_wins
-                              naturally protects reservations from being overwritten.
-                 last_wins:   existing record is replaced by the new one. -->
+                 last_wins:   existing record is replaced by the new one. Default.
+                 allow:       both records coexist in Unbound (round-robin).
+                 first_wins:  existing record is kept; the new registrant is rejected.
+                              Static reservations are always loaded before dynamic leases,
+                              so first_wins naturally protects reservations from being
+                              overwritten. Note: first_wins is best-effort on reconcile
+                              (ordering is deterministic within a run, not across restarts). -->
             <collision_policy type="OptionField">
                 <Required>Y</Required>
-                <Default>allow</Default>
+                <Default>last_wins</Default>
                 <OptionValues>
+                    <last_wins>Last wins (replace existing with new record)</last_wins>
                     <allow>Allow (both records coexist)</allow>
                     <first_wins>First wins (keep existing, reject new registrant)</first_wins>
-                    <last_wins>Last wins (replace existing with new record)</last_wins>
                 </OptionValues>
             </collision_policy>
 
@@ -106,16 +81,58 @@
             </enable_auto_clean>
 
             <!-- How often to run the auto-clean job.
-                 Only used when enable_auto_clean is enabled. -->
+                 Only used when enable_auto_clean is enabled.
+                 'daily' uses auto_clean_hour as the hour of day (0-23). -->
             <auto_clean_interval type="OptionField">
                 <Required>Y</Required>
                 <Default>h6</Default>
                 <OptionValues>
+                    <h1>Every hour</h1>
+                    <h3>Every 3 hours</h3>
                     <h6>Every 6 hours</h6>
                     <h12>Every 12 hours</h12>
-                    <h24>Every 24 hours</h24>
+                    <daily>Daily (at a specific hour)</daily>
                 </OptionValues>
             </auto_clean_interval>
+
+            <!-- Hour of day (0–23) for the daily auto-clean run.
+                 Only used when auto_clean_interval is 'daily'. -->
+            <auto_clean_hour type="IntegerField">
+                <Default>0</Default>
+                <Required>N</Required>
+                <MinimumValue>0</MinimumValue>
+                <MaximumValue>23</MaximumValue>
+            </auto_clean_hour>
+
+            <!-- Advanced: maximum number of dirty names held before the next
+                 reconcile is a full sync regardless of the names filter.
+                 Smaller values reduce targeted-drain scope at higher churn. -->
+            <dirty_set_cap type="IntegerField">
+                <Default>100</Default>
+                <Required>N</Required>
+                <MinimumValue>1</MinimumValue>
+                <MaximumValue>10000</MaximumValue>
+            </dirty_set_cap>
+
+            <!-- Advanced: how many failed reconcile attempts are allowed before
+                 the daemon marks itself degraded (alert state) and stops retrying.
+                 0 means retry indefinitely. -->
+            <max_full_sync_attempts type="IntegerField">
+                <Default>5</Default>
+                <Required>N</Required>
+                <MinimumValue>0</MinimumValue>
+                <MaximumValue>100</MaximumValue>
+            </max_full_sync_attempts>
+
+            <!-- Advanced: minutes to wait for Kea/Unbound to become ready before
+                 the readiness watchdog terminates the daemon and lets daemon(8)
+                 restart it. 0 disables the watchdog (wait forever). -->
+            <readiness_watchdog_minutes type="IntegerField">
+                <Default>10</Default>
+                <Required>N</Required>
+                <MinimumValue>0</MinimumValue>
+                <MaximumValue>1440</MaximumValue>
+            </readiness_watchdog_minutes>
         </general>
     </items>
 </model>

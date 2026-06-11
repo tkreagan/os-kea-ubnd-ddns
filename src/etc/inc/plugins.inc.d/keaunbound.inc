@@ -30,20 +30,17 @@
 /*
  * keaunbound.inc -- OPNsense plugin hooks for os-kea-unbound.
  *
- * Hooks (registered in keaunbound_configure()):
+ * The resident daemon (kea-unbound-ddns.py) owns consistency end-to-end: it
+ * watches Kea and Unbound service pidfiles, detects restarts, and drives
+ * kea-sync.py to repopulate Unbound. No PHP configure hooks are needed for
+ * runtime resync -- the daemon self-heals.
  *
- *   kea_start / kea_sync / unbound_start -> keaunbound_sync_if_enabled()
- *       Register Kea static reservations and/or active leases into Unbound via
- *       reservation-sync.py / lease-sync.py. Gated on the plugin being enabled
- *       and on the per-feature toggles (static reservations additionally require
- *       Unbound's regdhcpstatic to be OFF, so we don't fight OPNsense over
- *       host_entries.conf). Tied to Unbound's lifecycle because Unbound holds
- *       the records: an Unbound reload wipes runtime local_data, so we
- *       repopulate on unbound_start.
+ * Hooks (registered in keaunbound_configure()):
  *
  *   bootup (priority 2) -> keaunbound_start_do()
  *       Start the RFC 2136 stub listener daemon via the 'keaunbound start'
- *       configd action, ordered after Unbound (bootup priority 1).
+ *       configd action, ordered after Unbound (bootup priority 1). All
+ *       subsequent resync after boot is handled by the daemon.
  *
  * Service / schedule / logging hooks:
  *   keaunbound_services() -- register the daemon for service control
@@ -113,24 +110,40 @@ function keaunbound_cron()
      *
      * The job invokes the existing [clean] configd action so the schedule and
      * the GUI "Clean" button share one code path.
+     *
+     * Intervals: h1=every hour, h3=every 3h, h6=every 6h, h12=every 12h,
+     * daily=once per day at auto_clean_hour (0-23).
      */
     $jobs = [];
 
     $cfg = new \OPNsense\KeaUnbound\General();
     if (!empty((string)$cfg->general->enabled) && !empty((string)$cfg->general->enable_auto_clean)) {
-        $hour_by_interval = [
-            'h6'  => '0,6,12,18',
-            'h12' => '0,12',
-            'h24' => '0',
-        ];
-        $hour = $hour_by_interval[(string)$cfg->general->auto_clean_interval] ?? '0,6,12,18';
+        $interval = (string)$cfg->general->auto_clean_interval;
 
-        // autocron format: [command, minute, hour, mday, month, wday] (trailing => *)
-        $jobs[]['autocron'] = [
-            '/usr/local/sbin/configctl -d keaunbound clean',
-            '0',
-            $hour,
-        ];
+        if ($interval === 'daily') {
+            $hour = (string)$cfg->general->auto_clean_hour;
+            if (!ctype_digit($hour) || (int)$hour < 0 || (int)$hour > 23) {
+                $hour = '0';
+            }
+            $jobs[]['autocron'] = [
+                '/usr/local/sbin/configctl -d keaunbound clean',
+                '0',
+                $hour,
+            ];
+        } else {
+            $hour_by_interval = [
+                'h1'  => '*',
+                'h3'  => '0,3,6,9,12,15,18,21',
+                'h6'  => '0,6,12,18',
+                'h12' => '0,12',
+            ];
+            $hour = $hour_by_interval[$interval] ?? '0,6,12,18';
+            $jobs[]['autocron'] = [
+                '/usr/local/sbin/configctl -d keaunbound clean',
+                '0',
+                $hour,
+            ];
+        }
     }
 
     return $jobs;
@@ -138,227 +151,9 @@ function keaunbound_cron()
 
 function keaunbound_configure()
 {
-    /*
-     * Every event below either flushes Unbound's runtime local-data
-     * (unbound_configure_do is registered on dns/local/newwanip/unbound_start
-     * in unbound.inc) or signals that Kea data changed (kea_start/kea_sync).
-     * In all cases our Kea-derived records must be re-asserted, because they
-     * live only in Unbound's runtime store and vanish on every reconfigure.
-     *
-     * Rather than run a full reservation+lease sync inline on each event
-     * (wasteful during the boot burst, and racy against a still-restarting
-     * Kea/Unbound), every hook funnels into keaunbound_request_sync(), which
-     * just records a request and kicks the debounce worker (sync-debounce.py).
-     * The worker coalesces the burst, waits until Kea+Unbound are stably up,
-     * then syncs once. See sync-debounce.py for the full rationale.
-     *
-     * bootup still starts the listener daemon (keaunbound_start_do); the
-     * boot-time resync is covered by kea_start/kea_sync.
-     */
     return [
-        'kea_start'     => ['keaunbound_request_sync:2'],
-        'kea_sync'      => ['keaunbound_request_sync:2'],
-        'unbound_start' => ['keaunbound_request_sync'],
-        'dns'           => ['keaunbound_request_sync'],
-        'local'         => ['keaunbound_request_sync'],
-        'newwanip'      => ['keaunbound_request_sync:2'],
-        'bootup'        => ['keaunbound_start_do:2'],
+        'bootup' => ['keaunbound_start_do:2'],
     ];
-}
-
-function keaunbound_request_sync($verbose = false)
-{
-    /*
-     * Thin, non-blocking request for a resync. Resolves policy UPSTREAM (here,
-     * in PHP) and hands the decision to the debounce worker via a request file —
-     * the worker reads no config.xml of its own.
-     *
-     *   1. Master gate: if the plugin is disabled, do nothing (no marker, no
-     *      worker — the worker never even exists).
-     *   2. Resolve which sync types are enabled (static / dynamic). If neither,
-     *      there is nothing to request.
-     *   3. Write the enabled types into the request file. Writing also bumps the
-     *      file's mtime, which is the "generation" the worker debounces on.
-     *   4. Launch one debounce worker, guarded by flock(1) so concurrent hooks
-     *      in a burst collapse to a single worker (-E 0 makes a lost race a
-     *      silent no-op; -o keeps the lock off any grandchildren). mwexecfb runs
-     *      it detached, so this hook returns immediately and never blocks the
-     *      boot/reconfigure pipeline.
-     */
-    $cfg = new \OPNsense\KeaUnbound\General();
-    if (empty((string)$cfg->general->enabled)) {
-        service_log("KeaUnbound: plugin disabled -- not requesting sync\n", $verbose);
-        return 0;
-    }
-
-    $types = [];
-    if (should_sync_static_reservations()) {
-        $types[] = 'static';
-    }
-    if (should_sync_dynamic_leases()) {
-        $types[] = 'dynamic';
-    }
-    if (empty($types)) {
-        service_log("KeaUnbound: no sync types enabled -- not requesting sync\n", $verbose);
-        return 0;
-    }
-
-    @mkdir('/var/run/keaunbound', 0755, true);
-    @file_put_contents('/var/run/keaunbound/sync.request', implode(' ', $types) . "\n");
-
-    service_log('KeaUnbound: requesting debounced resync (' . implode(' ', $types) . ")...\n", $verbose);
-    mwexecfb('/usr/local/bin/flock -n -E 0 -o /var/run/keaunbound/sync.lock '
-        . '/usr/local/opnsense/scripts/keaunbound/sync-debounce.py');
-
-    return 0;
-}
-
-function keaunbound_sync_if_enabled($verbose = false)
-{
-    /*
-     * Synchronous resync: run the enabled syncs inline and return the result.
-     *
-     * Configure hooks no longer call this directly — they funnel through
-     * keaunbound_request_sync() / the debounce worker instead (see
-     * keaunbound_configure()). This is retained as the direct, blocking path
-     * for manual/diagnostic use where an immediate, in-line result is wanted.
-     *
-     * Syncs static reservations and/or dynamic leases depending on
-     * plugin configuration. Returns 0 if all enabled syncs succeeded,
-     * 1 if any enabled sync failed.
-     */
-
-    // Check if the overall KeaUnbound plugin is enabled
-    $cfg = new \OPNsense\KeaUnbound\General();
-    if (empty((string)$cfg->general->enabled)) {
-        service_log("KeaUnbound: plugin disabled -- skipping sync\n", $verbose);
-        return 0;
-    }
-
-    $errors = 0;
-
-    if (should_sync_static_reservations()) {
-        service_log('KeaUnbound: syncing static reservations...', $verbose);
-        if (keaunbound_reservation_sync($verbose) != 0) {
-            $errors++;
-        }
-    } else {
-        service_log("KeaUnbound: static reservation sync disabled\n", $verbose);
-    }
-
-    if (should_sync_dynamic_leases()) {
-        service_log('KeaUnbound: syncing active leases...', $verbose);
-        if (keaunbound_lease_sync($verbose) != 0) {
-            $errors++;
-        }
-    } else {
-        service_log("KeaUnbound: dynamic lease sync disabled\n", $verbose);
-    }
-
-    return ($errors > 0) ? 1 : 0;
-}
-
-/**
- * Check if static reservations should be synced from Kea.
- *
- * Gated solely on the plugin's own sync_static_reservations toggle. We do NOT
- * consult Unbound's regdhcpstatic ("Register DHCP Static Mappings"): the real
- * conflict-guard is the host_entries.conf skip in reservation-sync.py, which
- * never touches a name OPNsense already wrote. So whether regdhcpstatic is on
- * or off, the plugin only fills the gap for reservations OPNsense hasn't
- * registered — and a reservation only becomes a host_entries entry via an
- * Unbound reconfigure, which wipes the plugin's runtime record anyway. There is
- * never a moment a name is registered twice: it's a live record (plugin) XOR a
- * config-persistent override (OPNsense), never both.
- */
-function should_sync_static_reservations()
-{
-    $config = \OPNsense\Core\Config::getInstance();
-    $keaunbound_static_xpath = $config->object()->xpath('OPNsense/KeaUnbound/general/sync_static_reservations');
-    return !empty($keaunbound_static_xpath) && (string)$keaunbound_static_xpath[0] === '1';
-}
-
-/**
- * Check if dynamic leases should be synced from Kea.
- */
-function should_sync_dynamic_leases()
-{
-    $config = \OPNsense\Core\Config::getInstance();
-
-    // Get KeaUnbound plugin setting
-    $keaunbound_dynamic_xpath = $config->object()->xpath('OPNsense/KeaUnbound/general/sync_dynamic_leases');
-
-    return !empty($keaunbound_dynamic_xpath) && (string)$keaunbound_dynamic_xpath[0] === '1';
-}
-
-function keaunbound_reservation_sync($verbose = false)
-{
-    /*
-     * Sync Kea static reservations to Unbound via reservation-sync.py.
-     * Reads static reservations from Kea config via kea-ctrl-agent REST API
-     * and registers each one in Unbound via unbound-control local_data.
-     *
-     * Respects guard against clobbering OPNsense-managed entries -- skips
-     * any reservation whose hostname is in host_entries.conf.
-     *
-     * Requires kea-ctrl-agent to be enabled (Services -> Kea DHCP -> Control Agent).
-     * Returns 0 on success, 1 on failure.
-     */
-    $script = '/usr/local/opnsense/scripts/keaunbound/reservation-sync.py';
-
-    if (!file_exists($script)) {
-        service_log("KeaUnbound: reservation-sync.py not found at $script\n", $verbose);
-        keaunbound_log_error("reservation-sync.py not found at $script");
-        return 1;
-    }
-
-    service_log("KeaUnbound: calling $script...\n", $verbose);
-    $ret = mwexecf('%s', [$script]);
-
-    if ($ret !== 0) {
-        service_log("KeaUnbound: reservation-sync.py failed with exit code $ret\n", $verbose);
-        keaunbound_log_error("reservation-sync.py failed with exit code $ret");
-        return 1;
-    } else {
-        service_log("KeaUnbound: reservation-sync.py completed successfully\n", $verbose);
-        return 0;
-    }
-}
-
-function keaunbound_lease_sync($verbose = false)
-{
-    /*
-     * Sync Kea active leases to Unbound via lease-sync.py.
-     * Queries kea-ctrl-agent REST API for all currently active leases
-     * and registers each one via unbound-control local_data with TTL
-     * matching the lease expiration time.
-     *
-     * This restores dynamic lease registrations after an Unbound reload
-     * or restart, ensuring DNS entries are available without waiting for
-     * clients to renew their leases.
-     *
-     * Requires kea-ctrl-agent to be enabled (Services -> Kea DHCP -> Control Agent).
-     * Returns 0 on success, 1 on failure.
-     */
-    $script = '/usr/local/opnsense/scripts/keaunbound/lease-sync.py';
-
-    if (!file_exists($script)) {
-        service_log("KeaUnbound: lease-sync.py not found at $script\n", $verbose);
-        keaunbound_log_error("lease-sync.py not found at $script");
-        return 1;
-    }
-
-    service_log("KeaUnbound: calling $script...\n", $verbose);
-    $ret = mwexecf('%s', [$script]);
-
-    if ($ret !== 0) {
-        service_log("KeaUnbound: lease-sync.py failed with exit code $ret\n", $verbose);
-        keaunbound_log_error("lease-sync.py failed with exit code $ret");
-        return 1;
-    } else {
-        service_log("KeaUnbound: lease-sync.py completed successfully\n", $verbose);
-        return 0;
-    }
 }
 
 function keaunbound_start_do($verbose = false)
