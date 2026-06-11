@@ -143,8 +143,10 @@ def main():
             "--tsig-algorithm", cfg["tsig_algorithm"],
         ]
 
-    if cfg["aggressive_cleanup"] == "1":
-        script_args.append("--aggressive-cleanup")
+    # NOTE: --aggressive-cleanup was retired in the resident-daemon rewrite — the
+    # live path now applies the collision policy inline (a host getting a new IP is
+    # a same-FQDN collision), which subsumes it. The aggressive_cleanup model field
+    # is removed in Phase 5; until then it is simply ignored here.
 
     if cfg["synthesize_ptr"] != "1":
         script_args.append("--no-synthesize-ptr")
