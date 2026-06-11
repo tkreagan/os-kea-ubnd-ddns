@@ -2,7 +2,7 @@
 
 > Documents which Kea DHCP/DDNS configuration options are fully supported, partially
 > supported, or unsupported by the os-kea-unbound plugin. "Supported" means both the
-> live path (kea-unbound-ddns.py) AND the bulk path (lease-sync / reservation-sync /
+> live path (kea-unbound-ddns.py) AND the bulk path (kea-sync.py /
 > local-data-audit / local-data-clean) handle the option correctly and consistently.
 >
 > See `kea-ddns-options-reference.md` for the full analysis behind each entry.
@@ -11,7 +11,7 @@
 
 ## Architectural scope limitation (locked decision)
 
-The bulk sync path (`lease-sync.py`, `reservation-sync.py`) is explicitly scoped to
+The bulk sync path (`kea-sync.py`) is explicitly scoped to
 **OPNsense standard configuration** — i.e., options that are settable via the OPNsense
 GUI / config.xml. It does not attempt to replicate Kea's internal name-crafting logic
 (charset scrubbing, generated-prefix construction, replace-client-name modes).

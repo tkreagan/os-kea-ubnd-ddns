@@ -1,5 +1,11 @@
 # Implementation & test plan: resident-daemon consistency authority
 
+> **STATUS: ALL PHASES COMPLETE (2026-06-11).** Phases 1–7 and all verification
+> spikes (V1–V6) are implemented and committed. All open risks (R1–R11) are
+> resolved — see the "Open risks" section for the DECISION recorded against each.
+> This document is a historical record; read `resident-daemon-design.md` for the
+> current architectural reference.
+
 Companion to `resident-daemon-design.md`. The design says "no design questions
 remain open — the rest is implementation." This document is that implementation
 plan, **plus a critical pass that surfaces the implementation-level problems the

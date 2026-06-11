@@ -1,6 +1,6 @@
 # PTR Record Handling — Notes & Open Decisions
 
-> **Superseded by `ptr-testing-plan.md`** (June 2026). The open decisions below
+> **ARCHIVED — superseded by `ptr-testing-plan.md`** (June 2026). The open decisions below
 > were resolved during implementation; key outcomes:
 > - Decision 2 (synthesis flag): implemented as `general.synthesize_ptr` (default ON)
 > - Decision 1 / F4 (custom reverse zone): **cannot occur** — D2 zone matching is
