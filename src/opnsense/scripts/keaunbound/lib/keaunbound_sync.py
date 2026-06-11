@@ -19,8 +19,11 @@ on a stock OPNsense install without extra packages.
 
 from __future__ import annotations
 
+import contextlib
+import fcntl
 import ipaddress
 import logging
+import os
 import re
 import subprocess
 import sys
@@ -47,6 +50,8 @@ UNBOUND_CONF = "/var/unbound/unbound.conf"
 # syslog-ng filter is program("unbound"), which matches as an unanchored substring,
 # so any tag containing "unbound" would be routed into the resolver log instead of ours.
 SYSLOG_IDENT = "kea-ub"
+MUTATION_LOCK_DIR = "/var/run/keaunbound"
+MUTATION_LOCK_PATH = f"{MUTATION_LOCK_DIR}/unbound-mutation.lock"
 
 # Kea lease "state" enum: 0 = default/active (the only one we register),
 # 1 = declined, 2 = expired-reclaimed.
@@ -113,6 +118,27 @@ def setup_logging(verbose: bool = False) -> logging.Logger:
         logger.addHandler(stderr)
 
     return logger
+
+
+@contextlib.contextmanager
+def unbound_mutation_lock(blocking: bool = True):
+    """Advisory flock over MUTATION_LOCK_PATH.
+
+    All Unbound-mutation callers (kea-sync.py, local-data-clean.py, daemon live
+    path) hold this lock for their whole run so unbound-control mutations are
+    serialized. The daemon live path uses blocking=False: on BlockingIOError it
+    ACK-fails and calls note_dirty rather than waiting.
+
+    Creates MUTATION_LOCK_DIR on first use; idempotent.
+    """
+    os.makedirs(MUTATION_LOCK_DIR, mode=0o700, exist_ok=True)
+    with open(MUTATION_LOCK_PATH, "w") as f:
+        flag = fcntl.LOCK_EX if blocking else (fcntl.LOCK_EX | fcntl.LOCK_NB)
+        fcntl.flock(f, flag)
+        try:
+            yield
+        finally:
+            fcntl.flock(f, fcntl.LOCK_UN)
 
 
 def query_kea_api(command: str, arguments: Optional[Dict] = None,
@@ -313,6 +339,71 @@ def query_kea_reservations(service: str = "dhcp4") -> List[Dict]:
     return reservations
 
 
+def _build_suffix_map(service: str, dhcp_config: Dict) -> Tuple[Dict, str]:
+    """Build subnet-id → ddns-qualifying-suffix map from a parsed Kea config dict.
+    Returns (suffix_by_subnet, default_suffix).
+    """
+    is_v4 = service == "dhcp4"
+    subnet_key = "subnet4" if is_v4 else "subnet6"
+    global_suffix = dhcp_config.get("ddns-qualifying-suffix", "") or ""
+    system_domain = get_system_domain()
+    suffix_by_subnet: Dict = {}
+    for subnet, net_suffix in _iter_kea_subnets(dhcp_config, subnet_key):
+        sid = subnet.get("id")
+        if sid is not None:
+            suffix_by_subnet[sid] = _effective_suffix(
+                subnet, net_suffix, global_suffix, system_domain)
+    return suffix_by_subnet, (global_suffix or system_domain or "")
+
+
+def _normalize_raw_lease(lease: Dict, is_v4: bool,
+                          suffix_by_subnet: Dict, default_suffix: str,
+                          now: int) -> Optional[Dict]:
+    """Normalize a raw Kea lease dict to our internal format.
+    Returns None if the lease should be skipped (wrong state, expired, no hostname/IP).
+    """
+    try:
+        state = int(lease.get("state", LEASE_STATE_DEFAULT))
+    except (TypeError, ValueError):
+        state = LEASE_STATE_DEFAULT
+    if state != LEASE_STATE_DEFAULT:
+        return None
+
+    expire = lease.get("expire", 0)
+    if expire in (0, -1, None):
+        expires = now + 86400
+    else:
+        try:
+            expire = int(expire)
+        except (TypeError, ValueError):
+            return None
+        if expire <= now:
+            return None
+        expires = expire
+
+    suffix = suffix_by_subnet.get(lease.get("subnet-id"), default_suffix)
+    try:
+        valid_lifetime = int(lease.get("valid-lft", 0))
+    except (TypeError, ValueError):
+        valid_lifetime = 0
+
+    lease_dict: Dict = {
+        "hostname": qualify_hostname(lease.get("hostname", ""), suffix),
+        "ip": None,
+        "ipv6": None,
+        "expires": expires,
+        "valid_lifetime": valid_lifetime,
+    }
+    if is_v4:
+        lease_dict["ip"] = lease.get("ip-address")
+    else:
+        lease_dict["ipv6"] = lease.get("ip-address")
+
+    if lease_dict["hostname"] and (lease_dict["ip"] or lease_dict["ipv6"]):
+        return lease_dict
+    return None
+
+
 def query_kea_leases(service: str = "dhcp4") -> List[Dict]:
     """
     Query active leases from Kea.
@@ -321,77 +412,49 @@ def query_kea_leases(service: str = "dhcp4") -> List[Dict]:
     declined and expired-reclaimed leases are skipped so we never publish DNS
     for an address a client no longer holds.
 
-    Returns list of lease dicts with keys: hostname, ip, ipv6, expires
-    (expires is an absolute unix timestamp). Raises KeaUnavailableError if Kea
-    is unavailable.
+    Returns list of lease dicts with keys: hostname, ip, ipv6, expires,
+    valid_lifetime (expires is an absolute unix timestamp).
+    Raises KeaUnavailableError if Kea is unavailable.
     """
     now = int(time.time())
     is_v4 = service == "dhcp4"
     root_key = "Dhcp4" if is_v4 else "Dhcp6"
-    subnet_key = "subnet4" if is_v4 else "subnet6"
-
-    # Build a subnet-id -> qualifying-suffix map from the running config so each
-    # lease is named the same way the live kea-dhcp-ddns path would name it.
     cfg = query_kea_api("config-get", service=service)
     dhcp_config = cfg.get("arguments", {}).get(root_key, {})
-    global_suffix = dhcp_config.get("ddns-qualifying-suffix", "") or ""
-    system_domain = get_system_domain()
-    suffix_by_subnet = {}
-    for subnet, net_suffix in _iter_kea_subnets(dhcp_config, subnet_key):
-        sid = subnet.get("id")
-        if sid is not None:
-            suffix_by_subnet[sid] = _effective_suffix(subnet, net_suffix, global_suffix, system_domain)
-    default_suffix = global_suffix or system_domain or ""
+    suffix_by_subnet, default_suffix = _build_suffix_map(service, dhcp_config)
 
     command = "lease4-get-all" if is_v4 else "lease6-get-all"
     resp = query_kea_api(command, service=service)
     leases = []
+    for raw in resp.get("arguments", {}).get("leases", []):
+        ld = _normalize_raw_lease(raw, is_v4, suffix_by_subnet, default_suffix, now)
+        if ld is not None:
+            leases.append(ld)
+    return leases
 
-    for lease in resp.get("arguments", {}).get("leases", []):
-        # Skip non-active leases (declined / expired-reclaimed).
-        try:
-            state = int(lease.get("state", LEASE_STATE_DEFAULT))
-        except (TypeError, ValueError):
-            state = LEASE_STATE_DEFAULT
-        if state != LEASE_STATE_DEFAULT:
-            continue
 
-        # "expire" is an absolute unix timestamp. 0/-1 are sometimes used to
-        # mean "infinite"; map those to a long horizon. Skip already-expired.
-        expire = lease.get("expire", 0)
-        if expire in (0, -1, None):
-            expires = now + 86400
-        else:
-            try:
-                expire = int(expire)
-            except (TypeError, ValueError):
-                continue
-            if expire <= now:
-                continue
-            expires = expire
+def query_kea_leases_by_hostname(hostname: str,
+                                  service: str = "dhcp4") -> List[Dict]:
+    """Query active leases for a specific hostname (lease4/6-get-by-hostname).
 
-        suffix = suffix_by_subnet.get(lease.get("subnet-id"), default_suffix)
-        try:
-            valid_lifetime = int(lease.get("valid-lft", 0))
-        except (TypeError, ValueError):
-            valid_lifetime = 0
+    Returns a list in the same format as query_kea_leases(). Used by kea-sync.py
+    for targeted drain (--names filter) so only the dirty names are re-fetched
+    rather than the full lease table.
+    """
+    now = int(time.time())
+    is_v4 = service == "dhcp4"
+    root_key = "Dhcp4" if is_v4 else "Dhcp6"
+    cfg = query_kea_api("config-get", service=service)
+    dhcp_config = cfg.get("arguments", {}).get(root_key, {})
+    suffix_by_subnet, default_suffix = _build_suffix_map(service, dhcp_config)
 
-        lease_dict = {
-            "hostname": qualify_hostname(lease.get("hostname", ""), suffix),
-            "ip": None,
-            "ipv6": None,
-            "expires": expires,
-            "valid_lifetime": valid_lifetime,
-        }
-
-        if service == "dhcp4":
-            lease_dict["ip"] = lease.get("ip-address")
-        if service == "dhcp6":
-            lease_dict["ipv6"] = lease.get("ip-address")
-
-        if lease_dict["hostname"] and (lease_dict["ip"] or lease_dict["ipv6"]):
-            leases.append(lease_dict)
-
+    command = "lease4-get-by-hostname" if is_v4 else "lease6-get-by-hostname"
+    resp = query_kea_api(command, arguments={"hostname": hostname}, service=service)
+    leases = []
+    for raw in resp.get("arguments", {}).get("leases", []):
+        ld = _normalize_raw_lease(raw, is_v4, suffix_by_subnet, default_suffix, now)
+        if ld is not None:
+            leases.append(ld)
     return leases
 
 
@@ -494,6 +557,29 @@ def unbound_control(args: List[str], timeout: float = 10.0) -> bool:
         return False
 
 
+def unbound_local_datas_batch(records: List[str], timeout: float = 30.0) -> bool:
+    """Add multiple records to Unbound via local_datas (stdin protocol).
+
+    Equivalent to repeated local_data calls but uses a single unbound-control
+    exec, which is significantly faster for bulk adds (full reconcile).
+    Returns True if all records were accepted, False on any error.
+    """
+    if not records:
+        return True
+    cmd = [UNBOUND_CONTROL, "-c", UNBOUND_CONF, "local_datas"]
+    data = "\n".join(records) + "\n"
+    try:
+        result = subprocess.run(cmd, input=data, capture_output=True, text=True,
+                                timeout=timeout)
+        return result.returncode == 0
+    except subprocess.TimeoutExpired:
+        logging.getLogger(SYSLOG_IDENT).error("unbound-control local_datas timeout")
+        return False
+    except Exception as e:
+        logging.getLogger(SYSLOG_IDENT).error(f"unbound-control local_datas failed: {e}")
+        return False
+
+
 def unbound_list_local_data() -> Dict[str, List[str]]:
     """
     Query Unbound's local_data store via list_local_data.
@@ -546,6 +632,27 @@ def _forward_ips(unbound_data: Dict[str, List[str]]) -> Dict[str, Set[str]]:
         if ips:
             forward_ips[name] = ips
     return forward_ips
+
+
+def forward_ips_by_type(unbound_data: Dict[str, List[str]],
+                        rtype: str) -> Dict[str, Set[str]]:
+    """Like _forward_ips but filtered to a single record type ('A' or 'AAAA').
+
+    Used by kea-sync.py so collision checks compare within the same address
+    family only — avoids false conflicts when a host has both A and AAAA records.
+    """
+    result: Dict[str, Set[str]] = {}
+    for name, lines in unbound_data.items():
+        if is_ptr_name(name):
+            continue
+        ips: Set[str] = set()
+        for line in lines:
+            parts = line.split()
+            if len(parts) >= 5 and parts[3] == rtype:
+                ips.add(parts[4])
+        if ips:
+            result[name] = ips
+    return result
 
 
 def find_stale_records(unbound_data: Dict[str, List[str]],

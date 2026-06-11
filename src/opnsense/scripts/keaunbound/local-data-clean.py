@@ -57,6 +57,7 @@ from lib.keaunbound_sync import (
     is_in_host_entries,
     get_synthesize_ptr,
     read_d2_reverse_zones,
+    unbound_mutation_lock,
 )
 
 
@@ -321,11 +322,24 @@ def main():
                         help="Log additional details to stderr")
     args = parser.parse_args()
 
-    if args.hostname:
-        return clean_host(hostname=args.hostname, keep_ip=args.keep_ip,
-                          verbose=args.verbose)
-    return clean_stale_records(interactive=args.confirm, dry_run=args.dry_run,
-                               verbose=args.verbose)
+    # A dry-run mutates nothing, so it needn't serialize against other writers.
+    if args.dry_run and not args.hostname:
+        return clean_stale_records(interactive=args.confirm, dry_run=True,
+                                   verbose=args.verbose)
+
+    # Hold the shared Unbound-mutation lock for the whole run so cleanup is
+    # atomic with respect to kea-sync and the daemon's live path. Blocking
+    # acquire: external clean invocations wait their turn rather than racing.
+    try:
+        with unbound_mutation_lock(blocking=True):
+            if args.hostname:
+                return clean_host(hostname=args.hostname, keep_ip=args.keep_ip,
+                                  verbose=args.verbose)
+            return clean_stale_records(interactive=args.confirm,
+                                       dry_run=args.dry_run, verbose=args.verbose)
+    except Exception as e:
+        setup_logging(args.verbose).error("clean failed acquiring lock: %s", e)
+        return 1
 
 
 if __name__ == "__main__":
