@@ -842,6 +842,20 @@ class KcaconfigController extends ApiControllerBase
         return strpos($response, 'is running') !== false;
     }
 
+    // Whether Kea HA is enabled for a service (//OPNsense/Kea/<svc>/ha/enabled).
+    private function isHaEnabled($service)
+    {
+        if (!file_exists($this->config_file)) {
+            return false;
+        }
+        $xml = simplexml_load_file($this->config_file);
+        if ($xml === false) {
+            return false;
+        }
+        $n = $xml->xpath("//OPNsense/Kea/{$service}/ha/enabled");
+        return !empty($n) && (string)$n[0] === '1';
+    }
+
     // Whether a Kea daemon is enabled in OPNsense (//OPNsense/Kea/<svc>/general/enabled).
     private function isServiceEnabled($service)
     {
@@ -1133,6 +1147,34 @@ class KcaconfigController extends ApiControllerBase
         return $out;
     }
 
+    /**
+     * Return a summary advisory if Kea HA is enabled for any service, read
+     * directly from config.xml — no daemon probing needed.
+     */
+    private function haAdvisories()
+    {
+        $services = [];
+        foreach (['dhcp4', 'dhcp6'] as $svc) {
+            if ($this->isHaEnabled($svc)) {
+                $services[] = $svc;
+            }
+        }
+        if (empty($services)) {
+            return [];
+        }
+        $label = implode(' and ', array_map('strtoupper', $services));
+        return [[
+            'level'   => 'warning',
+            'heading' => 'Kea High Availability enabled',
+            'message' => "Kea HA is enabled for {$label}. "
+                       . 'This plugin reads lease and reservation data from the local Kea instance only. '
+                       . 'In an HA pair, the peer node handles some DHCP exchanges independently — '
+                       . 'those leases never trigger DDNS updates through this plugin, so DNS records '
+                       . 'for peer-issued leases will be missing or stale after a failover. '
+                       . 'Behavior with Kea HA is untested and unsupported.',
+        ]];
+    }
+
     // ── Public action ─────────────────────────────────────────────────────────
 
     public function checkAction()
@@ -1166,6 +1208,9 @@ class KcaconfigController extends ApiControllerBase
             'ipv6_subnets'      => [],
             'summary_advisories' => [],
         ];
+
+        // HA advisory: config.xml-based, emitted once regardless of daemon reachability.
+        $result['summary_advisories'] = $this->haAdvisories();
 
         // IPv4
         $dhcp4 = $this->keaQuery('dhcp4');
