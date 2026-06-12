@@ -346,20 +346,29 @@ def process_update(msg: dns.message.Message, unbound_conf: str, dry_run: bool,
         name = fqdn(rrset.name)
         rdtype = dns.rdatatype.to_text(rrset.rdtype)
 
-        if rdtype not in HANDLED_TYPES:
+        # dnspython exposes an UPDATE record's delete-class via rrset.deleting
+        # (NONE = delete a specific RR, ANY = delete an RRset / all RRsets at the
+        # name); it is non-None iff this record is a delete. rrset.rdclass is
+        # NORMALIZED to the zone class (IN) on parsed updates, so it must NOT be
+        # used to detect deletes — doing so silently dropped every delete d2
+        # ever sent (see int-docs/kea-listener-delete-bug). ttl is 0 on deletes
+        # but rrset.deleting is the authoritative signal.
+        is_delete = rrset.deleting is not None
+
+        # "delete all RRsets for a name" arrives as rdtype ANY; allow it through,
+        # but only as a delete. Other types are restricted to what we manage.
+        if rdtype not in HANDLED_TYPES and not (is_delete and rdtype == "ANY"):
             logger.debug("Skipping unsupported record type %s for %s", rdtype, name)
             continue
-        if rdtype != "PTR" and not is_sane_name(name, logger):
+        # Name hygiene gates ADDs only (we must never publish junk). A delete is
+        # a removal of existing data, so an odd/non-hostname name simply no-ops.
+        if not is_delete and rdtype != "PTR" and not is_sane_name(name, logger):
             skipped += 1
             continue
         if cache.is_static(name):
             logger.info("Skipping %s %s — static (host_entries)", rdtype, name)
             skipped += 1
             continue
-
-        # RFC 2136 §2.5 delete: class ANY/NONE AND TTL=0.
-        is_delete = (rrset.rdclass in (dns.rdataclass.ANY, dns.rdataclass.NONE)
-                     and rrset.ttl == 0)
 
         if is_delete:
             if rdtype in ("A", "AAAA"):
@@ -389,6 +398,23 @@ def process_update(msg: dns.message.Message, unbound_conf: str, dry_run: bool,
             elif rdtype == "PTR":
                 logger.info("Remove PTR: %s (standalone)", name)
                 if uc(["local_data_remove", name]):
+                    removed += 1
+                else:
+                    errors += 1
+            else:  # rdtype == "ANY": delete every RRset at this name
+                # Forward name: capture current IPs first so we can also drop the
+                # synthesized PTRs that point back here. Reverse (arpa) name:
+                # there are no A/AAAA, so this just removes the PTR(s).
+                current_ips = [ip for t in ("A", "AAAA")
+                               for ip, _t in query_unbound(name, t, logger, unbound_conf)]
+                logger.info("Remove all: %s", name)
+                if uc(["local_data_remove", name]):
+                    if synthesize_ptr:
+                        for ip in current_ips:
+                            ptr = reverse_ptr(ip)
+                            if ptr and not cache.is_static(ptr):
+                                logger.info("Remove PTR: %s", ptr)
+                                uc(["local_data_remove", ptr])
                     removed += 1
                 else:
                     errors += 1
