@@ -48,12 +48,12 @@ settings below. The Lease Audit tab shows a full preview of what each cleanup wo
 "ddns-override-client-update": true,
 "hostname-char-replacement": "-"</code></pre>
 
-<p>Use the <strong>Kea Config Check</strong> tab to verify subnet DDNS configuration.</p>
+<p>Use the <strong>Config Check</strong> tab to verify Unbound and Kea DHCP configuration.</p>
 
 <h4>Tabs</h4>
 <ul>
   <li><strong>Settings:</strong> Enable the plugin; configure sync, cleanup, and listen port</li>
-  <li><strong>Kea Config Check:</strong> Verify DDNS is configured in Kea subnets</li>
+  <li><strong>Config Check:</strong> Verify Unbound DNS settings and Kea subnet DDNS configuration</li>
   <li><strong>Lease Audit:</strong> Inspect all DNS records, preview and run cleanup, trigger syncs</li>
   <li><strong>Log File:</strong> Daemon, sync, audit, and cleanup logs</li>
 </ul>
@@ -95,10 +95,16 @@ settings below. The Lease Audit tab shows a full preview of what each cleanup wo
         <label>DNS Record Cleaning</label>
     </field>
     <field>
+        <id>general.general.enable_logwatch</id>
+        <label>Watch Kea log for lease releases</label>
+        <type>checkbox</type>
+        <help>Enable a secondary daemon that tails Kea's DHCP log and removes DNS records promptly when a lease is released (DHCP4_RELEASE / DHCP6_RELEASE). Belt-and-suspenders: the live DDNS path handles most releases, but this catches the rare case where kea-dhcp-ddns was down or the live update was missed. Runs as a separate daemon alongside the main listener, using the same shared cleanup scripts and lock.</help>
+    </field>
+    <field>
         <id>general.general.synthesize_ptr</id>
         <label>Synthesize PTR records from DDNS updates</label>
         <type>checkbox</type>
-        <help>Automatically create the standard in-addr.arpa / ip6.arpa PTR (reverse) record for every A/AAAA update received from kea-dhcp-ddns. Enabled by default — PTRs work immediately without needing a reverse zone in kea-dhcp-ddns. Disable only if you manage reverse DNS separately (e.g. another authoritative server for in-addr.arpa). Explicit PTR updates from kea-dhcp-ddns are always applied regardless of this setting. When both this option and a kea-dhcp-ddns reverse zone are configured for a subnet, PTRs are written by both paths — harmless, but the Kea Config Check tab will flag it per subnet.</help>
+        <help>Automatically create the standard in-addr.arpa / ip6.arpa PTR (reverse) record for every A/AAAA update received from kea-dhcp-ddns. Enabled by default — PTRs work immediately without needing a reverse zone in kea-dhcp-ddns. Disable only if you manage reverse DNS separately (e.g. another authoritative server for in-addr.arpa). Explicit PTR updates from kea-dhcp-ddns are always applied regardless of this setting. When both this option and a kea-dhcp-ddns reverse zone are configured for a subnet, PTRs are written by both paths — harmless, but the Config Check tab will flag it per subnet.</help>
     </field>
     <field>
         <id>general.general.collision_policy</id>

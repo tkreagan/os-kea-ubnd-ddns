@@ -71,6 +71,19 @@
                 </OptionValues>
             </collision_policy>
 
+            <!-- Watch Kea DHCP log for DHCP4_RELEASE / DHCP6_RELEASE events
+                 and proactively clean up DNS records when a lease is released.
+                 Belt-and-suspenders: the live DDNS listener handles releases
+                 immediately when kea-dhcp-ddns is running, but the log watcher
+                 catches releases the live path missed (d2 was down, listener
+                 briefly blocked, or UDP packet lost).
+                 Dispatches local-data-clean.py with purge-ip under the shared lock.
+                 Runs as a separate daemon started alongside the main listener. -->
+            <enable_logwatch type="BooleanField">
+                <Default>1</Default>
+                <Required>Y</Required>
+            </enable_logwatch>
+
             <!-- Automatically clean stale DNS records from Unbound.
                  When enabled, the local-data-clean.py script runs periodically
                  to remove stale records (entries in Unbound that don't match

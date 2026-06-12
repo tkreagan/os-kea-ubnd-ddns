@@ -2,24 +2,16 @@
 # SPDX-License-Identifier: BSD-2-Clause
 # Copyright (c) 2026 Thomas Reagan
 """
-stop.py -- Stop kea-unbound-ddns cleanly and reliably.
+stop.py -- Stop kea-unbound-ddns and kea-unbound-logwatch cleanly.
 
-Called by configd actions [stop] and [restart]. Replaces the previous inline
-pkill-F shell command, which was fragile: if the supervisor pidfile drifted
-out of sync with the actual running supervisor (which happens whenever a
-restart fails partway), pkill -F silently killed the wrong process and left
-the real daemon running.
+Called by configd actions [stop] and [restart].
 
-Shutdown sequence:
+Shutdown sequence (applied to each daemon independently):
   1. Collect all candidate PIDs: supervisor pidfile, child pidfile, pgrep scan.
-  2. SIGTERM all of them (graceful — daemon(8) propagates to its child).
+  2. SIGTERM all (graceful — daemon(8) propagates to its child).
   3. Poll up to 3 s for graceful exit.
   4. SIGKILL anything still alive.
   5. Remove pidfiles.
-
-pgrep is used for discovery (not pkill) so the pattern string in argv does
-not cause the process to match and kill itself — a problem inherent to using
-pkill -f from a shell whose own argv contains the match string.
 """
 
 import os
@@ -31,11 +23,14 @@ import time
 sys.path.insert(0, "/usr/local/opnsense/scripts/keaunbound")
 from lib.keaunbound_sync import setup_logging  # noqa: E402
 
-PIDFILE            = "/var/run/kea-unbound-ddns.pid"
-SUPERVISOR_PIDFILE = "/var/run/kea-unbound-ddns.supervisor.pid"
-# The script path is a stable anchor — both the daemon(8) supervisor and the
-# Python child have it in their argv, so pgrep -f finds both with one query.
-SCRIPT_PATH        = "/usr/local/sbin/kea-unbound-ddns.py"
+PIDFILE                     = "/var/run/kea-unbound-ddns.pid"
+SUPERVISOR_PIDFILE          = "/var/run/kea-unbound-ddns.supervisor.pid"
+LOGWATCH_PIDFILE            = "/var/run/kea-unbound-logwatch.pid"
+LOGWATCH_SUPERVISOR_PIDFILE = "/var/run/kea-unbound-logwatch.supervisor.pid"
+# Script paths — used by pgrep to find both the daemon(8) supervisor and Python
+# child for each daemon without the self-match trap of pkill -f.
+SCRIPT_PATH          = "/usr/local/sbin/kea-unbound-ddns.py"
+LOGWATCH_SCRIPT_PATH = "/usr/local/sbin/kea-unbound-logwatch.py"
 
 logger = setup_logging(verbose=True)
 
@@ -57,31 +52,6 @@ def _alive(pid: int) -> bool:
         return False
 
 
-def _find_matching_pids() -> list[int]:
-    """
-    Return PIDs of all processes with SCRIPT_PATH in their argv, excluding
-    this process. Uses pgrep (not pkill) to avoid the self-match trap where
-    pkill -f matches its own parent shell because the pattern string appears
-    in the shell's argv.
-    """
-    try:
-        result = subprocess.run(
-            ["pgrep", "-f", SCRIPT_PATH],
-            capture_output=True, text=True
-        )
-        pids = []
-        for line in result.stdout.splitlines():
-            try:
-                pid = int(line.strip())
-                if pid != os.getpid():
-                    pids.append(pid)
-            except ValueError:
-                pass
-        return pids
-    except Exception:
-        return []
-
-
 def _send(pid: int, sig: int) -> None:
     """Send signal to pid, silently ignoring errors (process may be gone)."""
     try:
@@ -90,57 +60,62 @@ def _send(pid: int, sig: int) -> None:
         pass
 
 
-def main() -> int:
-    # Collect every PID that might be part of this daemon: supervisor pidfile,
-    # child pidfile, and a pgrep scan for anything else with the script in argv
-    # (covers orphaned processes whose pidfile was already deleted).
+def _collect_pids(script_path: str, supervisor_pidfile: str,
+                  child_pidfile: str) -> set[int]:
+    """Collect all PIDs for one daemon (supervisor + child + pgrep scan)."""
     pids: set[int] = set()
+    sup = _read_pid(supervisor_pidfile)
+    if sup:
+        pids.add(sup)
+    child = _read_pid(child_pidfile)
+    if child:
+        pids.add(child)
+    try:
+        result = subprocess.run(["pgrep", "-f", script_path],
+                                capture_output=True, text=True)
+        for line in result.stdout.splitlines():
+            try:
+                pid = int(line.strip())
+                if pid != os.getpid():
+                    pids.add(pid)
+            except ValueError:
+                pass
+    except Exception:
+        pass
+    return pids
 
-    sup_pid = _read_pid(SUPERVISOR_PIDFILE)
-    if sup_pid:
-        pids.add(sup_pid)
 
-    child_pid = _read_pid(PIDFILE)
-    if child_pid:
-        pids.add(child_pid)
-
-    pids.update(_find_matching_pids())
-
+def _stop_one(label: str, pids: set[int],
+              pidfiles: tuple[str, ...]) -> bool:
+    """Stop one set of PIDs.  Returns True on clean exit."""
     if not pids:
-        logger.info("kea-unbound-ddns is not running")
-        # Clean up any stale pidfiles that might confuse a subsequent start.
-        for pf in (SUPERVISOR_PIDFILE, PIDFILE):
+        logger.info("%s is not running", label)
+        for pf in pidfiles:
             try:
                 os.unlink(pf)
             except FileNotFoundError:
                 pass
-        return 0
+        return True
 
-    # Phase 1: SIGTERM — let daemon(8) propagate gracefully to its child.
-    logger.info("Stopping kea-unbound-ddns (pids: %s)", sorted(pids))
+    logger.info("Stopping %s (pids: %s)", label, sorted(pids))
     for pid in pids:
         _send(pid, signal.SIGTERM)
 
-    # Phase 2: Poll up to 3 s for graceful exit (child exits within ~1 s
-    # once its 1-second socket timeout fires and it checks _running=False).
     deadline = time.monotonic() + 3.0
     while time.monotonic() < deadline:
         if not any(_alive(p) for p in pids):
             break
         time.sleep(0.25)
 
-    # Phase 3: SIGKILL anything still alive after the grace period.
     stubborn = [p for p in pids if _alive(p)]
     if stubborn:
-        logger.warning("Graceful shutdown timed out; force-killing: %s", stubborn)
+        logger.warning("%s: graceful shutdown timed out; force-killing: %s",
+                       label, stubborn)
         for pid in stubborn:
             _send(pid, signal.SIGKILL)
         time.sleep(0.5)
 
-    # Phase 4: Remove pidfiles — always, even if some processes couldn't be
-    # killed, so a subsequent start.py doesn't see stale pidfiles as proof
-    # that the daemon is running.
-    for pf in (SUPERVISOR_PIDFILE, PIDFILE):
+    for pf in pidfiles:
         try:
             os.unlink(pf)
         except FileNotFoundError:
@@ -148,11 +123,24 @@ def main() -> int:
 
     remaining = [p for p in pids if _alive(p)]
     if remaining:
-        logger.error("Failed to stop all processes; still alive: %s", remaining)
-        return 1
+        logger.error("%s: failed to stop; still alive: %s", label, remaining)
+        return False
 
-    logger.info("kea-unbound-ddns stopped")
-    return 0
+    logger.info("%s stopped", label)
+    return True
+
+
+def main() -> int:
+    listener_pids = _collect_pids(SCRIPT_PATH, SUPERVISOR_PIDFILE, PIDFILE)
+    logwatch_pids = _collect_pids(LOGWATCH_SCRIPT_PATH,
+                                  LOGWATCH_SUPERVISOR_PIDFILE, LOGWATCH_PIDFILE)
+
+    ok1 = _stop_one("kea-unbound-ddns",
+                    listener_pids, (SUPERVISOR_PIDFILE, PIDFILE))
+    ok2 = _stop_one("kea-unbound-logwatch",
+                    logwatch_pids, (LOGWATCH_SUPERVISOR_PIDFILE, LOGWATCH_PIDFILE))
+
+    return 0 if (ok1 and ok2) else 1
 
 
 if __name__ == "__main__":

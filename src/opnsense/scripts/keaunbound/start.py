@@ -23,6 +23,7 @@ from lib.preconditions import check_preconditions, write_status  # noqa: E402
 CONFIG_XML         = "/conf/config.xml"
 DAEMON             = "/usr/sbin/daemon"
 SCRIPT             = "/usr/local/sbin/kea-unbound-ddns.py"
+LOGWATCH_SCRIPT    = "/usr/local/sbin/kea-unbound-logwatch.py"
 # Child (listener) PID — used by the service status check (keaunbound_services).
 PIDFILE            = "/var/run/kea-unbound-ddns.pid"
 # daemon(8) supervisor PID — the process that holds the -r respawn loop. Stop and
@@ -30,6 +31,9 @@ PIDFILE            = "/var/run/kea-unbound-ddns.pid"
 # supervisor immediately respawn it, and each start would add another supervisor,
 # so two would fight over the port and crash-loop on "Address already in use".
 SUPERVISOR_PIDFILE = "/var/run/kea-unbound-ddns.supervisor.pid"
+# Logwatch daemon pidfiles (same pattern)
+LOGWATCH_PIDFILE            = "/var/run/kea-unbound-logwatch.pid"
+LOGWATCH_SUPERVISOR_PIDFILE = "/var/run/kea-unbound-logwatch.supervisor.pid"
 
 # Log to syslog (the keaunbound log) and, because this runs under the configd
 # [start] action, also to stderr (verbose=True) so failures surface in the
@@ -71,6 +75,7 @@ def get_config():
         "tsig_key_secret":            "",
         "tsig_algorithm":             "HMAC-SHA256",
         "synthesize_ptr":             "1",
+        "enable_logwatch":            "1",
     }
     try:
         tree = ET.parse(CONFIG_XML)
@@ -168,6 +173,37 @@ def main():
     except subprocess.CalledProcessError as e:
         logger.error("failed to start kea-unbound-ddns: %s", e)
         sys.exit(1)
+
+    # Start the log-watch daemon if enabled.
+    if cfg["enable_logwatch"] == "1":
+        _start_logwatch()
+
+
+def _start_logwatch() -> None:
+    """Launch kea-unbound-logwatch.py under its own daemon(8) supervisor."""
+    existing = _pid_alive(LOGWATCH_SUPERVISOR_PIDFILE)
+    if existing:
+        logger.info("kea-unbound-logwatch already running (supervisor pid %s).", existing)
+        return
+
+    for pf in (LOGWATCH_SUPERVISOR_PIDFILE, LOGWATCH_PIDFILE):
+        if os.path.exists(pf) and _pid_alive(pf) is None:
+            try:
+                os.unlink(pf)
+            except OSError:
+                pass
+
+    cmd = [DAEMON, "-f",
+           "-p", LOGWATCH_PIDFILE,
+           "-P", LOGWATCH_SUPERVISOR_PIDFILE,
+           "-r", "-R", "5",
+           sys.executable, LOGWATCH_SCRIPT]
+    try:
+        subprocess.run(cmd, check=True)
+        logger.info("kea-unbound-logwatch started.")
+    except subprocess.CalledProcessError as e:
+        logger.warning("failed to start kea-unbound-logwatch: %s", e)
+
 
 if __name__ == "__main__":
     main()

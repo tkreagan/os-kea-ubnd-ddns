@@ -33,6 +33,7 @@ Usage:
   local-data-clean.py --confirm                  # Bulk: prompt before removing
   local-data-clean.py --hostname HOST            # Targeted: clean one hostname
   local-data-clean.py --hostname HOST --keep-ip IP  # Targeted: always preserve IP
+  local-data-clean.py --purge-ip IP              # IP-targeted: clean one released IP
 """
 
 import argparse
@@ -214,6 +215,73 @@ def clean_host(hostname: str, keep_ip: Optional[str] = None,
     return 0
 
 
+def clean_ip(ip: str, verbose: bool = False) -> int:
+    """
+    IP-targeted cleanup: remove every Unbound record for one specific IP address
+    that is no longer present in Kea.
+
+    Called by kea-unbound-logwatch when a DHCP4_RELEASE / DHCP6_RELEASE is
+    detected in Kea's log.  Locates all forward names in Unbound that hold this
+    IP as an A or AAAA record, verifies with Kea that the IP is gone, then
+    removes it (using the remove+restore dance when the name still has other
+    valid IPs) and removes the PTR.
+
+    Returns 0 always; cleanup is best-effort, errors are logged.
+    """
+    logger = setup_logging(verbose)
+    logger.info("[cleanup] Purging released IP: %s", ip)
+
+    host_entries = read_host_entries()
+    unbound_data = unbound_list_local_data()
+
+    # Find every forward name in Unbound that currently has this IP.
+    # unbound_data is {name: [line, ...]}.
+    affected_names: list[str] = []
+    for name, lines in unbound_data.items():
+        for line in lines:
+            parts = line.split()
+            if len(parts) >= 5 and parts[3] in ("A", "AAAA") and parts[4] == ip:
+                affected_names.append(name)
+                break
+
+    if not affected_names:
+        logger.info("[cleanup] IP %s not found in Unbound — nothing to do", ip)
+        return 0
+
+    # For each name, clean_host handles the Kea query + remove+restore dance.
+    # We do not pass keep_ip because the point is the IP IS gone.
+    for name in affected_names:
+        if is_in_host_entries(name, host_entries):
+            logger.info("[cleanup] %s is in host_entries.conf — skipping", name)
+            continue
+        clean_host(hostname=name, verbose=verbose)
+
+    # Remove the PTR if it's still present and not statically managed.
+    ptr_name = reverse_ptr(ip)
+    if ptr_name and ptr_name in unbound_data:
+        if not is_in_host_entries(ptr_name, host_entries):
+            # Only remove PTR if Kea no longer has this IP at all.
+            # (clean_host already handles PTRs for the forward side, but a
+            # PTR can survive if the forward name was host_entries-protected.)
+            still_in_kea = False
+            for service in ("dhcp4", "dhcp6"):
+                try:
+                    for lease in query_kea_leases(service=service):
+                        if lease.get("ip") == ip or lease.get("ipv6") == ip:
+                            still_in_kea = True
+                    for res in query_kea_reservations(service=service):
+                        if res.get("ip") == ip or res.get("ipv6") == ip:
+                            still_in_kea = True
+                except Exception:
+                    still_in_kea = True  # abort if Kea unavailable
+
+            if not still_in_kea:
+                logger.info("[cleanup] Removing PTR for released IP: %s", ptr_name)
+                unbound_control(["local_data_remove", ptr_name])
+
+    return 0
+
+
 def clean_stale_records(interactive: bool = False, dry_run: bool = False, verbose: bool = False) -> int:
     """
     Identify and remove stale records from Unbound local_data.
@@ -350,6 +418,12 @@ def main():
                              "(use when calling immediately after a DDNS ADD "
                              "so the new IP is never removed even if Kea has "
                              "not yet committed the lease).")
+    parser.add_argument("--purge-ip", default=None, metavar="IP",
+                        help="IP-targeted mode: find and remove all Unbound "
+                             "records for one specific released IP address. "
+                             "Verifies with Kea that the IP is gone before "
+                             "removing. Called by kea-unbound-logwatch on "
+                             "DHCP4_RELEASE / DHCP6_RELEASE log events.")
     # Bulk mode
     parser.add_argument("--confirm", action="store_true",
                         help="Bulk mode: prompt before removing (manual debugging only)")
@@ -360,7 +434,7 @@ def main():
     args = parser.parse_args()
 
     # A dry-run mutates nothing, so it needn't serialize against other writers.
-    if args.dry_run and not args.hostname:
+    if args.dry_run and not args.hostname and not args.purge_ip:
         return clean_stale_records(interactive=args.confirm, dry_run=True,
                                    verbose=args.verbose)
 
@@ -369,6 +443,8 @@ def main():
     # acquire: external clean invocations wait their turn rather than racing.
     try:
         with unbound_mutation_lock(blocking=True):
+            if args.purge_ip:
+                return clean_ip(ip=args.purge_ip, verbose=args.verbose)
             if args.hostname:
                 return clean_host(hostname=args.hostname, keep_ip=args.keep_ip,
                                   verbose=args.verbose)
