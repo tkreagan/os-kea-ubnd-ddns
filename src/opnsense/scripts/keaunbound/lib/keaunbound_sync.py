@@ -237,7 +237,6 @@ def _arpa_to_ip(ptr_name: str) -> str:
       local-data-ptr: "192.168.1.1 hostname."
     when the caller holds only the arpa form "1.1.168.192.in-addr.arpa".
     """
-    import ipaddress as _ipaddress
     name = ptr_name.rstrip(".")
     if name.endswith(".in-addr.arpa"):
         labels = name[:-len(".in-addr.arpa")].split(".")
@@ -249,7 +248,7 @@ def _arpa_to_ip(ptr_name: str) -> str:
             rev = "".join(reversed(nibbles))
             groups = [rev[i:i + 4] for i in range(0, 32, 4)]
             try:
-                return str(_ipaddress.ip_address(":".join(groups)))
+                return str(ipaddress.ip_address(":".join(groups)))
             except ValueError:
                 return ""
     return ""
@@ -358,14 +357,18 @@ def query_kea_reservations(service: str = "dhcp4") -> List[Dict]:
     for source, suffix in sources:
         for res in source.get("reservations", []):
             hostname = qualify_hostname(res.get("hostname", ""), suffix)
-            res_dict = {"hostname": hostname, "ip": None, "ipv6": None}
+            if not hostname:
+                continue
             if is_v4:
-                res_dict["ip"] = res.get("ip-address")
+                ip = res.get("ip-address")
+                if ip:
+                    reservations.append({"hostname": hostname, "ip": ip, "ipv6": None})
             else:
-                addrs = res.get("ip-addresses") or []
-                res_dict["ipv6"] = addrs[0] if addrs else None
-            if hostname and (res_dict["ip"] or res_dict["ipv6"]):
-                reservations.append(res_dict)
+                # DHCPv6 reservations carry a list of addresses — emit one dict
+                # per address so every reserved IP gets a DNS record.
+                for addr in (res.get("ip-addresses") or []):
+                    if addr:
+                        reservations.append({"hostname": hostname, "ip": None, "ipv6": addr})
 
     return reservations
 
@@ -398,6 +401,17 @@ def _normalize_raw_lease(lease: Dict, is_v4: bool,
     except (TypeError, ValueError):
         state = LEASE_STATE_DEFAULT
     if state != LEASE_STATE_DEFAULT:
+        return None
+
+    # Only IA_NA leases (type=0) carry host addresses that belong in DNS.
+    # IA_TA (type=1) are temporary addresses not intended for stable DNS entries.
+    # IA_PD (type=2) are delegated prefixes — the "address" is a network prefix,
+    # not a host, and registering it would produce a semantically wrong record.
+    try:
+        lease_type = int(lease.get("type", 0))
+    except (TypeError, ValueError):
+        lease_type = 0
+    if lease_type != 0:
         return None
 
     expire = lease.get("expire", 0)
@@ -690,27 +704,30 @@ def find_stale_records(unbound_data: Dict[str, List[str]],
                        kea_pairs: Set[Tuple[str, str]],
                        host_entries: Dict[str, List[str]],
                        synthesize_ptr: bool = True,
-                       d2_reverse_zones: Optional[Set[str]] = None) -> Tuple[Set[str], Set[str]]:
+                       d2_reverse_zones: Optional[Set[str]] = None) -> Tuple[Set[Tuple[str, str]], Set[str]]:
     """
     Single source of truth for what cleanup removes — used by both the audit
     (to show the preview) and the clean script (to act). Returns
-    (stale_names, orphaned_ptrs):
+    (stale_pairs, orphaned_ptrs):
 
-      stale_names   -- forward (A/AAAA) owner names where no (name, ip) pair is
-                       known to Kea and which are not OPNsense-managed.
-      orphaned_ptrs -- PTR owner names not backed by a *surviving* forward
-                       record (i.e. no forward maps to them once stale forwards
-                       are removed), not OPNsense-managed, and (when
+      stale_pairs   -- (name, ip) tuples where that specific IP is not backed by
+                       Kea for that name, and the name is not OPNsense-managed.
+                       Per-IP rather than per-name: a dual-stack host with a
+                       valid A but stale AAAA produces one stale pair for the
+                       AAAA only — the surviving family is left untouched.
+      orphaned_ptrs -- PTR owner names not backed by any surviving (non-stale)
+                       (name, ip) pair, not OPNsense-managed, and (when
                        synthesize_ptr is False) not covered by a D2 reverse
                        zone (those are D2's responsibility, not ours).
 
-    Using per-(hostname, ip) pairs rather than a flat IP set means a record like
+    Using per-(name, ip) pairs rather than per-name means a record like
     "host-A → IP-X" is correctly flagged stale when Kea's IP-X is leased to a
     different host-B — IP-X is in Kea's address space, but not for host-A.
 
-    Computing orphans against surviving forwards means a PTR whose only forward
-    is itself stale is correctly flagged for removal alongside it, while a PTR
-    backed by a live record is preserved.
+    Computing orphans against surviving (non-stale) (name, ip) pairs means
+    a PTR for a stale IP is correctly orphaned even when that name still has a
+    valid record in the other address family. A PTR backed by any live pair is
+    preserved.
 
     Synthesis-aware PTR cleanup rules (applied only to PTR records):
       1. OPNsense host-override guard: skip if arpa name OR decoded IP appears
@@ -725,23 +742,23 @@ def find_stale_records(unbound_data: Dict[str, List[str]],
 
     forward_ips = _forward_ips(unbound_data)
 
-    # Stale forwards: no (name, ip) pair backed by Kea, not OPNsense-managed.
-    stale_names: Set[str] = set()
+    # Stale forwards: per (name, ip) — each IP judged independently against Kea.
+    stale_pairs: Set[Tuple[str, str]] = set()
     for name, ips in forward_ips.items():
         if is_in_host_entries(name, host_entries):
             continue
-        if not any((name, ip) in kea_pairs for ip in ips):
-            stale_names.add(name)
+        for ip in ips:
+            if (name, ip) not in kea_pairs:
+                stale_pairs.add((name, ip))
 
-    # PTR names that a surviving (kept) forward still points to.
+    # PTR names that a surviving (non-stale) (name, ip) pair still points to.
     surviving_ptr_names: Set[str] = set()
     for name, ips in forward_ips.items():
-        if name in stale_names:
-            continue
         for ip in ips:
-            ptr = reverse_ptr(ip)
-            if ptr:
-                surviving_ptr_names.add(ptr)
+            if (name, ip) not in stale_pairs:
+                ptr = reverse_ptr(ip)
+                if ptr:
+                    surviving_ptr_names.add(ptr)
 
     orphaned_ptrs: Set[str] = set()
     for name in unbound_data:
@@ -764,11 +781,11 @@ def find_stale_records(unbound_data: Dict[str, List[str]],
             orphaned_ptrs.add(name)
             continue
 
-        # Original rule: orphan if no surviving forward points to this PTR.
+        # Orphan if no surviving (non-stale) forward points to this PTR.
         if name not in surviving_ptr_names:
             orphaned_ptrs.add(name)
 
-    return stale_names, orphaned_ptrs
+    return stale_pairs, orphaned_ptrs
 
 
 def collect_kea_pairs(logger: Optional[logging.Logger] = None) -> Set[Tuple[str, str]]:

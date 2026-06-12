@@ -37,7 +37,7 @@ Usage:
 
 import argparse
 import sys
-from typing import Optional
+from typing import Dict, Optional
 
 # Add parent directory to path so we can import lib
 sys.path.insert(0, "/usr/local/opnsense/scripts/keaunbound")
@@ -235,25 +235,30 @@ def clean_stale_records(interactive: bool = False, dry_run: bool = False, verbos
 
     synthesize_ptr = get_synthesize_ptr()
     d2_reverse_zones = read_d2_reverse_zones()
-    stale_names, orphaned_ptrs = find_stale_records(
+    stale_pairs, orphaned_ptrs = find_stale_records(
         unbound_data, kea_pairs, host_entries,
         synthesize_ptr=synthesize_ptr, d2_reverse_zones=d2_reverse_zones,
     )
 
-    total_stale = len(stale_names) + len(orphaned_ptrs)
+    # Group stale (name, ip) pairs by name for the remove+restore loop.
+    stale_ips_by_name: Dict[str, set] = {}
+    for name, ip in stale_pairs:
+        stale_ips_by_name.setdefault(name, set()).add(ip)
+
+    total_stale = len(stale_pairs) + len(orphaned_ptrs)
 
     if total_stale == 0:
         logger.info("No stale records found")
         print("No stale records found")
         return 0
 
-    print(f"Found {total_stale} stale record(s):")
+    print(f"Found {len(stale_pairs)} stale address(es), {len(orphaned_ptrs)} orphaned PTR(s):")
     print()
 
-    if stale_names:
-        print(f"Stale hostnames ({len(stale_names)}):")
-        for name in sorted(stale_names):
-            print(f"  {name}")
+    if stale_pairs:
+        print(f"Stale addresses ({len(stale_pairs)}):")
+        for name, ip in sorted(stale_pairs):
+            print(f"  {name} [{ip}]")
 
     if orphaned_ptrs:
         print(f"Orphaned PTRs ({len(orphaned_ptrs)}):")
@@ -285,14 +290,45 @@ def clean_stale_records(interactive: bool = False, dry_run: bool = False, verbos
     removed = 0
     errors = 0
 
-    for name in sorted(stale_names | orphaned_ptrs):
-        if unbound_control(["local_data_remove", name]):
-            logger.info(f"Removed: {name}")
-            print(f"  removed {name}")
+    # Forward records: group by name so partial-staleness (e.g. valid A, stale
+    # AAAA) is handled with a remove-all + restore-valid dance rather than
+    # dropping the entire name. local_data_remove wipes ALL types for a name,
+    # so surviving records must be re-added explicitly.
+    for name in sorted(stale_ips_by_name):
+        stale_ips = stale_ips_by_name[name]
+        all_records = []
+        for line in unbound_data.get(name, []):
+            parts = line.split()
+            if len(parts) >= 5 and parts[3] in ("A", "AAAA"):
+                all_records.append((parts[4], parts[1], parts[3]))  # ip, ttl, rtype
+        valid_records = [(ip, ttl, rt) for ip, ttl, rt in all_records
+                         if ip not in stale_ips]
+
+        if not unbound_control(["local_data_remove", name]):
+            logger.error(f"Failed to remove forward records for: {name}")
+            print(f"  FAILED {name}")
+            errors += 1
+            continue
+
+        for ip, ttl, rtype in valid_records:
+            if not unbound_control(["local_data", f"{name} {ttl} IN {rtype} {ip}"]):
+                logger.error(f"Failed to restore {rtype} {name} -> {ip}")
+                errors += 1
+
+        label = f"{name} [{', '.join(sorted(stale_ips))}]"
+        logger.info(f"Removed stale address(es): {label}")
+        print(f"  removed {label}")
+        removed += len(stale_ips)
+
+    # PTR records (includes PTRs for stale IPs and any other orphans).
+    for ptr in sorted(orphaned_ptrs):
+        if unbound_control(["local_data_remove", ptr]):
+            logger.info(f"Removed orphaned PTR: {ptr}")
+            print(f"  removed {ptr}")
             removed += 1
         else:
-            logger.error(f"Failed to remove: {name}")
-            print(f"  FAILED {name}")
+            logger.error(f"Failed to remove PTR: {ptr}")
+            print(f"  FAILED {ptr}")
             errors += 1
 
     print()

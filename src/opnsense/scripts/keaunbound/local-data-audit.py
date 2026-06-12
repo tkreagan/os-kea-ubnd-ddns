@@ -49,6 +49,7 @@ sys.path.insert(0, "/usr/local/opnsense/scripts/keaunbound")
 from lib.keaunbound_sync import (
     KeaUnavailableError,
     KeaServiceUnavailableError,
+    _arpa_to_ip,
     query_kea_reservations,
     query_kea_leases,
     read_host_entries,
@@ -71,25 +72,6 @@ def _forward_ips_from_lines(lines):
             ips.add(parts[4])
     return ips
 
-
-def _ip_from_ptr(ptr_name):
-    """Convert a reverse-DNS name back to its IP address string, or '' if it
-    isn't a full, parseable in-addr.arpa / ip6.arpa name (e.g. a delegation)."""
-    name = ptr_name.rstrip(".")
-    if name.endswith(".in-addr.arpa"):
-        labels = name[:-len(".in-addr.arpa")].split(".")
-        if len(labels) == 4 and all(l.isdigit() for l in labels):
-            return ".".join(reversed(labels))
-    elif name.endswith(".ip6.arpa"):
-        nibbles = name[:-len(".ip6.arpa")].split(".")
-        if len(nibbles) == 32 and all(len(n) == 1 for n in nibbles):
-            rev = "".join(reversed(nibbles))
-            groups = [rev[i:i + 4] for i in range(0, 32, 4)]
-            try:
-                return str(ipaddress.ip_address(":".join(groups)))
-            except ValueError:
-                return ""
-    return ""
 
 
 def _ttl_for_ip(lines, ip):
@@ -221,12 +203,12 @@ def audit_local_data(report_json: bool = False, verbose: bool = False) -> int:
     unbound_ptr_names = {n for n in unbound_data if is_ptr_name(n)}
 
     # Authoritative stale/orphan set — only meaningful with complete Kea data.
-    stale_names = set()
+    stale_pairs = set()
     orphaned_ptr_names = set()
     if result["complete"]:
         synthesize_ptr = get_synthesize_ptr()
         d2_reverse_zones = read_d2_reverse_zones()
-        stale_names, orphaned_ptr_names = find_stale_records(
+        stale_pairs, orphaned_ptr_names = find_stale_records(
             unbound_data, kea_pairs, host_entries,
             synthesize_ptr=synthesize_ptr, d2_reverse_zones=d2_reverse_zones,
         )
@@ -251,7 +233,7 @@ def audit_local_data(report_json: bool = False, verbose: bool = False) -> int:
                 source = "unbound_local_data"
                 if not result["complete"]:
                     status = "unknown"  # cannot judge staleness without Kea
-                elif hostname in stale_names:
+                elif (hostname, ip) in stale_pairs:
                     status = "stale"
                 else:
                     status = "ok"
@@ -318,7 +300,7 @@ def audit_local_data(report_json: bool = False, verbose: bool = False) -> int:
             target = parts[4].rstrip(".")
         result["orphaned_ptrs"].append({
             "ptr_name": ptr_name,
-            "address": _ip_from_ptr(ptr_name),
+            "address": _arpa_to_ip(ptr_name),
             "data": raw,
             "ttl": ttl,
             "target": target,
@@ -344,7 +326,7 @@ def audit_local_data(report_json: bool = False, verbose: bool = False) -> int:
             names_by_ip.setdefault(ip, set()).add(name)
 
     for ptr_name in sorted(n for n in unbound_data if is_ptr_name(n)):
-        ip = _ip_from_ptr(ptr_name)
+        ip = _arpa_to_ip(ptr_name)
         covered = _ptr_targets(unbound_data, ip) if ip else set()
         uncovered = (names_by_ip.get(ip, set()) - covered) if ip else set()
         # One entry per reverse name; each target it points to is its own line.
