@@ -48,6 +48,7 @@ from lib.keaunbound_sync import (
     read_host_entries,
     unbound_list_local_data,
     unbound_control,
+    unbound_local_datas_batch,
     collect_kea_pairs,
     find_stale_records,
     setup_logging,
@@ -183,10 +184,9 @@ def clean_host(hostname: str, keep_ip: Optional[str] = None,
         logger.error("[cleanup] Failed to remove records for %s — aborting", hn)
         return 0
 
-    for ip, ttl, rtype in valid_records:
-        rr = f"{hn} {ttl} IN {rtype} {ip}"
-        if not unbound_control(["local_data", rr]):
-            logger.error("[cleanup] Failed to re-add %s", rr)
+    rrs = [f"{hn} {ttl} IN {rtype} {ip}" for ip, ttl, rtype in valid_records]
+    if not unbound_local_datas_batch(rrs):
+        logger.error("[cleanup] Failed to re-add records for %s", hn)
 
     # Remove PTRs for stale IPs — but only if the PTR in Unbound points TO
     # this hostname. A PTR pointing elsewhere is owned by a different hostname
@@ -310,9 +310,10 @@ def clean_stale_records(interactive: bool = False, dry_run: bool = False, verbos
             errors += 1
             continue
 
-        for ip, ttl, rtype in valid_records:
-            if not unbound_control(["local_data", f"{name} {ttl} IN {rtype} {ip}"]):
-                logger.error(f"Failed to restore {rtype} {name} -> {ip}")
+        if valid_records:
+            rrs = [f"{name} {ttl} IN {rtype} {ip}" for ip, ttl, rtype in valid_records]
+            if not unbound_local_datas_batch(rrs):
+                logger.error(f"Failed to restore records for: {name}")
                 errors += 1
 
         label = f"{name} [{', '.join(sorted(stale_ips))}]"

@@ -307,17 +307,19 @@ def qualify_hostname(hostname: str, suffix: str) -> str:
     return f"{hostname}.{suffix}" if suffix else hostname
 
 
-def _iter_kea_subnets(dhcp_config: Dict, subnet_key: str):
+def _iter_kea_subnets(dhcp_config: Dict, subnet_key: str, global_send: bool = True):
     """
-    Yield (subnet, inherited_suffix) for every subnet, where inherited_suffix is
-    the parent shared-network's ddns-qualifying-suffix ('' for top-level subnets).
+    Yield (subnet, net_suffix, net_send) for every subnet.
+    net_suffix: parent shared-network's ddns-qualifying-suffix ('' for top-level).
+    net_send:   parent's ddns-send-updates value for inheritance (global for top-level).
     """
     for subnet in dhcp_config.get(subnet_key, []):
-        yield subnet, ""
+        yield subnet, "", global_send
     for shared in dhcp_config.get("shared-networks", []):
         net_suffix = shared.get("ddns-qualifying-suffix", "") or ""
+        net_send = bool(shared.get("ddns-send-updates", global_send))
         for subnet in shared.get(subnet_key, []):
-            yield subnet, net_suffix
+            yield subnet, net_suffix, net_send
 
 
 def _effective_suffix(subnet: Dict, net_suffix: str, global_suffix: str,
@@ -346,15 +348,23 @@ def query_kea_reservations(service: str = "dhcp4") -> List[Dict]:
     resp = query_kea_api("config-get", service=service)
     dhcp_config = resp.get("arguments", {}).get(root_key, {})
     global_suffix = dhcp_config.get("ddns-qualifying-suffix", "") or ""
+    global_send = bool(dhcp_config.get("ddns-send-updates", True))
     system_domain = get_system_domain()
 
     reservations = []
     # Per-subnet reservations (incl. shared-networks), each qualified with that
     # subnet's effective DDNS suffix; then any global reservations.
-    sources = [(subnet, _effective_suffix(subnet, net_suffix, global_suffix, system_domain))
-               for subnet, net_suffix in _iter_kea_subnets(dhcp_config, subnet_key)]
-    sources.append((dhcp_config, global_suffix or system_domain or ""))
-    for source, suffix in sources:
+    # Subnets where ddns-send-updates resolves to false are skipped entirely.
+    sources = [
+        (subnet,
+         _effective_suffix(subnet, net_suffix, global_suffix, system_domain),
+         bool(subnet.get("ddns-send-updates", net_send)))
+        for subnet, net_suffix, net_send in _iter_kea_subnets(dhcp_config, subnet_key, global_send)
+    ]
+    sources.append((dhcp_config, global_suffix or system_domain or "", global_send))
+    for source, suffix, send in sources:
+        if not send:
+            continue
         for res in source.get("reservations", []):
             hostname = qualify_hostname(res.get("hostname", ""), suffix)
             if not hostname:
@@ -373,28 +383,35 @@ def query_kea_reservations(service: str = "dhcp4") -> List[Dict]:
     return reservations
 
 
-def _build_suffix_map(service: str, dhcp_config: Dict) -> Tuple[Dict, str]:
-    """Build subnet-id → ddns-qualifying-suffix map from a parsed Kea config dict.
-    Returns (suffix_by_subnet, default_suffix).
+def _build_suffix_map(service: str, dhcp_config: Dict) -> Tuple[Dict, str, Set]:
+    """Build subnet-id → ddns-qualifying-suffix map and DDNS-disabled subnet set.
+    Returns (suffix_by_subnet, default_suffix, ddns_disabled_subnets).
+    ddns_disabled_subnets: IDs of subnets where ddns-send-updates resolves to false.
     """
     is_v4 = service == "dhcp4"
     subnet_key = "subnet4" if is_v4 else "subnet6"
     global_suffix = dhcp_config.get("ddns-qualifying-suffix", "") or ""
+    global_send = bool(dhcp_config.get("ddns-send-updates", True))
     system_domain = get_system_domain()
     suffix_by_subnet: Dict = {}
-    for subnet, net_suffix in _iter_kea_subnets(dhcp_config, subnet_key):
+    ddns_disabled_subnets: Set = set()
+    for subnet, net_suffix, net_send in _iter_kea_subnets(dhcp_config, subnet_key, global_send):
         sid = subnet.get("id")
         if sid is not None:
             suffix_by_subnet[sid] = _effective_suffix(
                 subnet, net_suffix, global_suffix, system_domain)
-    return suffix_by_subnet, (global_suffix or system_domain or "")
+            if not bool(subnet.get("ddns-send-updates", net_send)):
+                ddns_disabled_subnets.add(sid)
+    return suffix_by_subnet, (global_suffix or system_domain or ""), ddns_disabled_subnets
 
 
 def _normalize_raw_lease(lease: Dict, is_v4: bool,
                           suffix_by_subnet: Dict, default_suffix: str,
-                          now: int) -> Optional[Dict]:
+                          now: int,
+                          ddns_disabled_subnets: Optional[Set] = None) -> Optional[Dict]:
     """Normalize a raw Kea lease dict to our internal format.
-    Returns None if the lease should be skipped (wrong state, expired, no hostname/IP).
+    Returns None if the lease should be skipped (wrong state, expired, no hostname/IP,
+    or subnet has ddns-send-updates disabled).
     """
     try:
         state = int(lease.get("state", LEASE_STATE_DEFAULT))
@@ -412,6 +429,9 @@ def _normalize_raw_lease(lease: Dict, is_v4: bool,
     except (TypeError, ValueError):
         lease_type = 0
     if lease_type != 0:
+        return None
+
+    if ddns_disabled_subnets and lease.get("subnet-id") in ddns_disabled_subnets:
         return None
 
     expire = lease.get("expire", 0)
@@ -466,13 +486,14 @@ def query_kea_leases(service: str = "dhcp4") -> List[Dict]:
     root_key = "Dhcp4" if is_v4 else "Dhcp6"
     cfg = query_kea_api("config-get", service=service)
     dhcp_config = cfg.get("arguments", {}).get(root_key, {})
-    suffix_by_subnet, default_suffix = _build_suffix_map(service, dhcp_config)
+    suffix_by_subnet, default_suffix, ddns_disabled_subnets = _build_suffix_map(service, dhcp_config)
 
     command = "lease4-get-all" if is_v4 else "lease6-get-all"
     resp = query_kea_api(command, service=service)
     leases = []
     for raw in resp.get("arguments", {}).get("leases", []):
-        ld = _normalize_raw_lease(raw, is_v4, suffix_by_subnet, default_suffix, now)
+        ld = _normalize_raw_lease(raw, is_v4, suffix_by_subnet, default_suffix, now,
+                                  ddns_disabled_subnets)
         if ld is not None:
             leases.append(ld)
     return leases
@@ -491,13 +512,14 @@ def query_kea_leases_by_hostname(hostname: str,
     root_key = "Dhcp4" if is_v4 else "Dhcp6"
     cfg = query_kea_api("config-get", service=service)
     dhcp_config = cfg.get("arguments", {}).get(root_key, {})
-    suffix_by_subnet, default_suffix = _build_suffix_map(service, dhcp_config)
+    suffix_by_subnet, default_suffix, ddns_disabled_subnets = _build_suffix_map(service, dhcp_config)
 
     command = "lease4-get-by-hostname" if is_v4 else "lease6-get-by-hostname"
     resp = query_kea_api(command, arguments={"hostname": hostname}, service=service)
     leases = []
     for raw in resp.get("arguments", {}).get("leases", []):
-        ld = _normalize_raw_lease(raw, is_v4, suffix_by_subnet, default_suffix, now)
+        ld = _normalize_raw_lease(raw, is_v4, suffix_by_subnet, default_suffix, now,
+                                  ddns_disabled_subnets)
         if ld is not None:
             leases.append(ld)
     return leases
