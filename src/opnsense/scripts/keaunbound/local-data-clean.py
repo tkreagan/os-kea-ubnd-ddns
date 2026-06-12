@@ -223,8 +223,12 @@ def clean_ip(ip: str, verbose: bool = False) -> int:
     Called by kea-unbound-logwatch when a DHCP4_RELEASE / DHCP6_RELEASE is
     detected in Kea's log.  Locates all forward names in Unbound that hold this
     IP as an A or AAAA record, verifies with Kea that the IP is gone, then
-    removes it (using the remove+restore dance when the name still has other
-    valid IPs) and removes the PTR.
+    removes it using the remove+restore dance (removes all records for the name,
+    re-adds whichever IPs Kea still considers valid, then removes the PTR).
+
+    Unlike clean_host, this correctly handles the case where the released IP was
+    the only IP for that name — clean_host refuses to remove the last record as
+    a safety guard, but here we have explicit Kea confirmation the IP is gone.
 
     Returns 0 always; cleanup is best-effort, errors are logged.
     """
@@ -235,7 +239,6 @@ def clean_ip(ip: str, verbose: bool = False) -> int:
     unbound_data = unbound_list_local_data()
 
     # Find every forward name in Unbound that currently has this IP.
-    # unbound_data is {name: [line, ...]}.
     affected_names: list[str] = []
     for name, lines in unbound_data.items():
         for line in lines:
@@ -248,34 +251,47 @@ def clean_ip(ip: str, verbose: bool = False) -> int:
         logger.info("[cleanup] IP %s not found in Unbound — nothing to do", ip)
         return 0
 
-    # For each name, clean_host handles the Kea query + remove+restore dance.
-    # We do not pass keep_ip because the point is the IP IS gone.
     for name in affected_names:
         if is_in_host_entries(name, host_entries):
             logger.info("[cleanup] %s is in host_entries.conf — skipping", name)
             continue
-        clean_host(hostname=name, verbose=verbose)
 
-    # Remove the PTR if it's still present and not statically managed.
-    ptr_name = reverse_ptr(ip)
-    if ptr_name and ptr_name in unbound_data:
-        if not is_in_host_entries(ptr_name, host_entries):
-            # Only remove PTR if Kea no longer has this IP at all.
-            # (clean_host already handles PTRs for the forward side, but a
-            # PTR can survive if the forward name was host_entries-protected.)
-            still_in_kea = False
-            for service in ("dhcp4", "dhcp6"):
-                try:
-                    for lease in query_kea_leases(service=service):
-                        if lease.get("ip") == ip or lease.get("ipv6") == ip:
-                            still_in_kea = True
-                    for res in query_kea_reservations(service=service):
-                        if res.get("ip") == ip or res.get("ipv6") == ip:
-                            still_in_kea = True
-                except Exception:
-                    still_in_kea = True  # abort if Kea unavailable
+        # Ask Kea which IPs are still valid for this name (across all services).
+        valid_kea_ips = _kea_ips_for_hostname(name, logger)
+        if valid_kea_ips is None:
+            logger.warning("[cleanup] Kea unavailable for %s — skipping", name)
+            continue
+        if ip in valid_kea_ips:
+            logger.info("[cleanup] IP %s still valid in Kea for %s — skipping", ip, name)
+            continue
 
-            if not still_in_kea:
+        # Parse what Unbound currently has for this name.
+        all_records = []
+        for line in unbound_data.get(name, []):
+            parts = line.split()
+            if len(parts) >= 5 and parts[3] in ("A", "AAAA"):
+                all_records.append((parts[4], parts[1], parts[3]))  # ip, ttl, rdtype
+
+        # Split into records to restore (other valid IPs) and the stale one.
+        valid_records = [(r_ip, ttl, rtype) for r_ip, ttl, rtype in all_records
+                         if r_ip in valid_kea_ips]
+
+        # Remove all records for this name, then restore valid ones.
+        if not unbound_control(["local_data_remove", name]):
+            logger.error("[cleanup] Failed to remove records for %s", name)
+            continue
+
+        if valid_records:
+            rrs = [f"{name} {ttl} IN {rtype} {r_ip}" for r_ip, ttl, rtype in valid_records]
+            unbound_local_datas_batch(rrs)
+
+        logger.info("[cleanup] Removed released IP %s from %s (restored %d other record(s))",
+                    ip, name, len(valid_records))
+
+        # Remove PTR for this IP if present, not static, and no longer in Kea.
+        ptr_name = reverse_ptr(ip)
+        if ptr_name and ptr_name in unbound_data:
+            if not is_in_host_entries(ptr_name, host_entries):
                 logger.info("[cleanup] Removing PTR for released IP: %s", ptr_name)
                 unbound_control(["local_data_remove", ptr_name])
 
