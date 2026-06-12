@@ -104,6 +104,16 @@ $( document ).ready(function() {
     $("#syncStaticBtn").click(function()  { triggerSync($(this), "/api/keaunbound/general/sync_static"); });
     $("#syncDynamicBtn").click(function() { triggerSync($(this), "/api/keaunbound/general/sync_dynamic"); });
 
+    // Search inputs — delegated because the inputs are inside dynamically-rendered HTML.
+    $(document).on("input", "#fwdSearchInput", function() {
+        fwdSearch = $(this).val();
+        applyFwdSearch(fwdSearch);
+    });
+    $(document).on("input", "#revSearchInput", function() {
+        revSearch = $(this).val();
+        applyRevSearch(revSearch);
+    });
+
     // Sortable table
     $(document).on("click", "th.sortable", function() {
         const th = $(this);
@@ -211,6 +221,22 @@ function fwdIcon(state) {
 // Whether the summary's "What it means" column is shown. Persists across the
 // 30s auto-refresh re-renders; applied after each render.
 var showDesc = false;
+// Search state — persisted so values survive the 30s auto-refresh HTML replacement.
+var fwdSearch = '';
+var revSearch = '';
+
+function applyFwdSearch(q) {
+    var lq = q.toLowerCase();
+    $(".kea-records tbody tr").each(function() {
+        $(this).toggle(!lq || $(this).text().toLowerCase().indexOf(lq) >= 0);
+    });
+}
+function applyRevSearch(q) {
+    var lq = q.toLowerCase();
+    $(".kea-ptrs tbody tr").each(function() {
+        $(this).toggle(!lq || $(this).text().toLowerCase().indexOf(lq) >= 0);
+    });
+}
 function applyDescVisibility() {
     $(".kea-desc").toggle(showDesc);
     $(".kea-summary").toggleClass("kea-wide", showDesc);
@@ -218,6 +244,12 @@ function applyDescVisibility() {
 }
 
 function renderAuditData(audit) {
+    // Capture current search values before HTML is replaced.
+    var $fwd = $('#fwdSearchInput');
+    if ($fwd.length) fwdSearch = $fwd.val();
+    var $rev = $('#revSearchInput');
+    if ($rev.length) revSearch = $rev.val();
+
     const records = audit.records || [];
     const orphans  = audit.orphaned_ptrs || [];
 
@@ -339,7 +371,10 @@ function renderAuditData(audit) {
     // ── DNS records table ─────────────────────────────────────────────────────
     if (records.length > 0) {
         html += '<div class="panel panel-default">' +
-                '<div class="panel-heading"><h4 class="panel-title">DNS Records (' + records.length + ')</h4></div>' +
+                '<div class="panel-heading" style="display:flex;align-items:center;justify-content:space-between;">' +
+                '<h4 class="panel-title" style="margin:0;">DNS Records (' + records.length + ')</h4>' +
+                '<input type="text" id="fwdSearchInput" placeholder="Search records…" class="form-control input-sm" style="width:220px;" value="' + escapeHtml(fwdSearch) + '">' +
+                '</div>' +
                 '<div class="panel-body" style="padding:0;">' +
                 '<div class="table-responsive">' +
                 '<table class="table table-striped table-condensed kea-records" style="margin:0;">' +
@@ -393,10 +428,13 @@ function renderAuditData(audit) {
     const ptrs = audit.ptr_records || [];
     if (ptrs.length > 0) {
         html += '<div class="panel panel-default">' +
-                '<div class="panel-heading"><h4 class="panel-title">Reverse (PTR) Records (' + ptrs.length + ')</h4></div>' +
+                '<div class="panel-heading" style="display:flex;align-items:center;justify-content:space-between;">' +
+                '<h4 class="panel-title" style="margin:0;">Reverse (PTR) Records (' + ptrs.length + ')</h4>' +
+                '<input type="text" id="revSearchInput" placeholder="Search PTR records…" class="form-control input-sm" style="width:220px;" value="' + escapeHtml(revSearch) + '">' +
+                '</div>' +
                 '<div class="panel-body" style="padding:0;">' +
                 '<div class="table-responsive">' +
-                '<table class="table table-striped table-condensed" style="margin:0;">' +
+                '<table class="table table-striped table-condensed kea-ptrs" style="margin:0;">' +
                 '<thead><tr>' +
                 '<th class="sortable">IP Address</th>' +
                 '<th class="sortable">Reverse Name</th>' +
@@ -432,6 +470,8 @@ function renderAuditData(audit) {
 
     $("#statusContent").html(html);
     applyDescVisibility();
+    if (fwdSearch) { $('#fwdSearchInput').val(fwdSearch); applyFwdSearch(fwdSearch); }
+    if (revSearch) { $('#revSearchInput').val(revSearch); applyRevSearch(revSearch); }
 }
 
 function updateCleanButton(complete, removable) {
