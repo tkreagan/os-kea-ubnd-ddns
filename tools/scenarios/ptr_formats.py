@@ -169,11 +169,7 @@ class PtrFormatV6Sync(Scenario):
     tags = ["ptr", "format", "ipv6", "sync"]
 
     def setup(self, ctx: ChaosContext) -> None:
-        from tools.lib.kea import KeaError
-        try:
-            ctx.kea.discover_subnet_id(service="dhcp6")
-        except KeaError as exc:
-            raise RuntimeError(f"DHCPv6 not available: {exc}") from exc
+        ctx.require_dhcp6()
 
     def run(self, ctx: ChaosContext) -> None:
         hostname, ipv6 = ctx.alloc_v6_host("-ptrf6", prefix=_TEST_V6_PREFIX)
@@ -339,7 +335,13 @@ class DdnsPtrSynthesisV6(Scenario):
             failures.append(f"Synthesized IPv6 PTR missing: {expected_arpa} → {self._fqdn}")
 
         raw_data = ctx.unbound.list_local_data()
-        ip6_keys = [k for k in raw_data if k.endswith(".ip6.arpa")]
+        # Only check ip6.arpa keys that have actual PTR records.
+        # Unbound's built-in RFC 6303 stubs (8.b.d.0.1.0.0.2.ip6.arpa etc.) have
+        # NS/SOA entries with fewer than 32 nibbles — those are expected and correct.
+        ip6_keys = [k for k in raw_data
+                    if k.endswith(".ip6.arpa")
+                    and any("IN PTR" in l or "\tPTR\t" in l
+                            for l in raw_data.get(k, []))]
         if not ip6_keys:
             failures.append("No ip6.arpa PTR key found — daemon did not synthesize IPv6 PTR")
         else:

@@ -35,10 +35,7 @@ class DualStackHost(Scenario):
     tags = ["ipv6", "dual-stack", "basic"]
 
     def setup(self, ctx: ChaosContext) -> None:
-        try:
-            ctx.kea.discover_subnet_id(service="dhcp6")
-        except KeaError as exc:
-            raise RuntimeError(f"DHCPv6 not available: {exc}") from exc
+        ctx.require_dhcp6()
 
     def run(self, ctx: ChaosContext) -> None:
         hostname, ipv4 = ctx.alloc_host("-ds")
@@ -63,16 +60,16 @@ class DualStackHost(Scenario):
         failures = []
         fqdn = f"{self._hostname}.{ctx.domain}"
 
-        if not ctx.unbound.has_record(fqdn, self._ipv4):
+        if not ctx.unbound.has_record(fqdn, self._ipv4, "A"):
             failures.append(f"A record missing: {fqdn} → {self._ipv4}")
-        if not ctx.unbound.has_record(fqdn, self._ipv6):
+        if not ctx.unbound.has_record(fqdn, self._ipv6, "AAAA"):
             failures.append(f"AAAA record missing: {fqdn} → {self._ipv6}")
         if not ctx.unbound.has_ptr(self._ipv4, fqdn):
             failures.append(f"PTR missing for IPv4: {self._ipv4} → {fqdn}")
         if not ctx.unbound.has_ptr(self._ipv6, fqdn):
             failures.append(f"PTR missing for IPv6: {self._ipv6} → {fqdn}")
 
-        result = ctx.dns.verify_pair(self._hostname, self._ipv4, ctx.domain)
+        result = ctx.dns.verify_pair(self._hostname, self._ipv4, ctx.domain, "A")
         if not result["forward_ok"]:
             failures.append(
                 f"drill A failed for {self._hostname}: {result['forward_answer']!r}"
@@ -102,10 +99,7 @@ class StaleAaaaCleanup(Scenario):
     tags = ["ipv6", "dual-stack", "stale", "cleanup"]
 
     def setup(self, ctx: ChaosContext) -> None:
-        try:
-            ctx.kea.discover_subnet_id(service="dhcp6")
-        except KeaError as exc:
-            raise RuntimeError(f"DHCPv6 not available: {exc}") from exc
+        ctx.require_dhcp6()
 
     def run(self, ctx: ChaosContext) -> None:
         hostname, ipv4 = ctx.alloc_host("-stale6")
@@ -148,11 +142,11 @@ class StaleAaaaCleanup(Scenario):
         fqdn = f"{self._hostname}.{ctx.domain}"
         import ipaddress as _ia
 
-        if not ctx.unbound.has_record(fqdn, self._ipv4):
+        if not ctx.unbound.has_record(fqdn, self._ipv4, "A"):
             failures.append(f"A record was removed (should survive): {fqdn} → {self._ipv4}")
-        if not ctx.unbound.has_record(fqdn, self._ipv6_new):
+        if not ctx.unbound.has_record(fqdn, self._ipv6_new, "AAAA"):
             failures.append(f"New AAAA removed (should survive): {fqdn} → {self._ipv6_new}")
-        if ctx.unbound.has_record(fqdn, self._ipv6_old):
+        if ctx.unbound.has_record(fqdn, self._ipv6_old, "AAAA"):
             failures.append(f"Stale AAAA still present: {fqdn} → {self._ipv6_old}")
 
         # PTR for the old AAAA must be gone.
@@ -189,10 +183,7 @@ class Ipv6OnlyHost(Scenario):
     tags = ["ipv6", "basic"]
 
     def setup(self, ctx: ChaosContext) -> None:
-        try:
-            ctx.kea.discover_subnet_id(service="dhcp6")
-        except KeaError as exc:
-            raise RuntimeError(f"DHCPv6 not available: {exc}") from exc
+        ctx.require_dhcp6()
 
     def run(self, ctx: ChaosContext) -> None:
         hostname, ipv6 = ctx.alloc_v6_host("-v6only", prefix=_V6_PREFIX)
@@ -208,13 +199,16 @@ class Ipv6OnlyHost(Scenario):
         failures = []
         fqdn = f"{self._hostname}.{ctx.domain}"
 
-        if not ctx.unbound.has_record(fqdn, self._ipv6):
+        if not ctx.unbound.has_record(fqdn, self._ipv6, "AAAA"):
             failures.append(f"AAAA missing: {fqdn} → {self._ipv6}")
         if not ctx.unbound.has_ptr(self._ipv6, fqdn):
             failures.append(f"PTR missing for {self._ipv6} → {fqdn}")
-        # Must have NO A record.
-        if ctx.unbound.has_record(fqdn, "0.0.0.0"):  # any A
-            failures.append(f"Unexpected A record for {fqdn}")
+        # Must have NO A record — check raw data for any A-type lines.
+        raw = ctx.unbound.list_local_data()
+        a_lines = [l for l in raw.get(fqdn, [])
+                   if len(l.split()) >= 4 and l.split()[3] == "A"]
+        if a_lines:
+            failures.append(f"Unexpected A record for {fqdn}: {a_lines}")
 
         # Delete the lease; clean; verify gone.
         try:
@@ -226,7 +220,7 @@ class Ipv6OnlyHost(Scenario):
         ctx.run_clean()
         ctx.wait(2, "post-clean")
 
-        if ctx.unbound.has_record(fqdn, self._ipv6):
+        if ctx.unbound.has_record(fqdn, self._ipv6, "AAAA"):
             failures.append(f"AAAA still present after clean: {fqdn}")
         if ctx.unbound.has_ptr(self._ipv6, fqdn):
             failures.append(f"PTR still present after clean: {self._ipv6}")
@@ -251,10 +245,7 @@ class DualStackFamilyIsolation(Scenario):
     tags = ["ipv6", "dual-stack", "collision"]
 
     def setup(self, ctx: ChaosContext) -> None:
-        try:
-            ctx.kea.discover_subnet_id(service="dhcp6")
-        except KeaError as exc:
-            raise RuntimeError(f"DHCPv6 not available: {exc}") from exc
+        ctx.require_dhcp6()
 
     def run(self, ctx: ChaosContext) -> None:
         hostname, ipv4 = ctx.alloc_host("-fiso")
@@ -282,9 +273,9 @@ class DualStackFamilyIsolation(Scenario):
         failures = []
         fqdn = f"{self._hostname}.{ctx.domain}"
 
-        if not ctx.unbound.has_record(fqdn, self._ipv4):
+        if not ctx.unbound.has_record(fqdn, self._ipv4, "A"):
             failures.append(f"v4 reservation A missing: {fqdn} → {self._ipv4}")
-        if not ctx.unbound.has_record(fqdn, self._ipv6):
+        if not ctx.unbound.has_record(fqdn, self._ipv6, "AAAA"):
             failures.append(
                 f"v6 lease AAAA blocked by v4 reservation (family isolation failed): "
                 f"{fqdn} → {self._ipv6}"
@@ -313,10 +304,7 @@ class Ipv6MultipleAddresses(Scenario):
     tags = ["ipv6", "reservation", "basic"]
 
     def setup(self, ctx: ChaosContext) -> None:
-        try:
-            ctx.kea.discover_subnet_id(service="dhcp6")
-        except KeaError as exc:
-            raise RuntimeError(f"DHCPv6 not available: {exc}") from exc
+        ctx.require_dhcp6()
 
     def run(self, ctx: ChaosContext) -> None:
         hostname, ipv6a = ctx.alloc_v6_host("-multi", prefix=_V6_PREFIX)
@@ -346,7 +334,7 @@ class Ipv6MultipleAddresses(Scenario):
         fqdn = f"{self._hostname}.{ctx.domain}"
 
         for ip in (self._ipv6a, self._ipv6b):
-            if not ctx.unbound.has_record(fqdn, ip):
+            if not ctx.unbound.has_record(fqdn, ip, "AAAA"):
                 failures.append(f"AAAA missing for address {ip}: {fqdn}")
             if not ctx.unbound.has_ptr(ip, fqdn):
                 failures.append(f"PTR missing: {ip} → {fqdn}")

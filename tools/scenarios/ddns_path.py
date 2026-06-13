@@ -67,9 +67,11 @@ def _minimal_update_wire(hostname: str, ip: str, domain: str) -> bytes:
 @register
 class DdnsUpdateFlood(Scenario):
     name = "ddns_update_flood"
-    description = "Send 50 RFC 2136 UPDATEs in 2s; verify daemon alive and records correct"
+    description = "Send 30 RFC 2136 UPDATEs in 2s; verify daemon alive and records correct"
     tags = ["ddns", "stress"]
-    COUNT = 50
+    # _ip_counter resets to 220 per scenario; valid range is .220-.254 (35 slots).
+    # Keep COUNT ≤ 34 to avoid building packets with IPs > .255.
+    COUNT = 30
 
     def run(self, ctx: ChaosContext) -> None:
         self._pairs: list[tuple[str, str]] = []

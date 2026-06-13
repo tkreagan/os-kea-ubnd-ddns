@@ -31,13 +31,41 @@ def _current_lease_hostname(ctx: ChaosContext) -> str | None:
     return out.strip() or None
 
 
+def _ensure_iface_up(ctx: ChaosContext) -> None:
+    """Bring the LAN interface up if it is currently DOWN."""
+    iface = ctx.cfg.dhcpclient_lan_if
+    out = ctx.client.run(f"ip link show {iface} 2>/dev/null || true", check=False)
+    if "state UP" not in out and "state UNKNOWN" not in out:
+        ctx.client.sudo(f"ip link set {iface} up", check=False, timeout=10)
+        time.sleep(2)
+
+
+def _dhclient_with_hostname(ctx: ChaosContext, iface: str, hostname: str, timeout: int = 30) -> None:
+    """Release any existing lease on iface and get a new one advertising hostname."""
+    # This version of dhclient has no -h flag; hostname must be sent via a temp config.
+    # Write config to /tmp (world-writable) via script() over stdin — avoids the
+    # shell quoting issues that arise with mixed single/double quotes in sudo().
+    cfgfile = f"/tmp/dhclient-{iface}-chaos.conf"
+    ctx.client.script("python3", (
+        f"open('{cfgfile}', 'w').write('send host-name = \"{hostname}\";\\n')\n"
+    ))
+    ctx.client.sudo(
+        f"dhclient -r {iface} 2>/dev/null; "
+        f"dhclient -v -cf {cfgfile} {iface} 2>&1 || true",
+        timeout=timeout
+    )
+    ctx.client.sudo(f"rm -f {cfgfile}", check=False)
+
+
 def _release_and_renew(ctx: ChaosContext, extra_opts: str = "") -> None:
     iface = ctx.cfg.dhcpclient_lan_if
-    # networkctl renew is the correct way to trigger a fresh DHCP cycle when
-    # systemd-networkd manages the interface; dhclient conflicts with it.
+    _ensure_iface_up(ctx)
+    # Use -v with 2>&1 so dhclient's verbose output (including "bound to...") flows
+    # through the SSH stdout channel. The drain loop waits until dhclient's daemon
+    # closes the inherited fd, which only happens after configuring the IP.
     ctx.client.sudo(
-        f"networkctl renew {iface} 2>/dev/null || "
-        f"dhclient -r {iface} 2>/dev/null; dhclient {extra_opts} {iface} 2>/dev/null || true",
+        f"dhclient -r {iface} 2>/dev/null; dhclient -v {extra_opts} {iface} 2>&1 || "
+        f"networkctl renew {iface} 2>/dev/null || true",
         timeout=30
     )
 
@@ -47,6 +75,10 @@ class RealDhcpRenew(Scenario):
     name = "real_dhcp_renew"
     description = "Force dev-dhcpclient to release+renew; sync; verify DNS matches current lease"
     tags = ["dhcp_client", "basic"]
+
+    def setup(self, ctx: ChaosContext) -> None:
+        ctx.client.run("true")  # raises UnavailableSession → SKIP if client unreachable
+        _ensure_iface_up(ctx)
 
     def run(self, ctx: ChaosContext) -> None:
         _release_and_renew(ctx)
@@ -81,45 +113,36 @@ class RealDhcpRenew(Scenario):
 @register
 class HostnameChange(Scenario):
     name = "hostname_change"
-    description = "Renew with new hostname; verify old record cleaned, new one registered"
+    description = "Update Kea lease hostname; verify old DNS record cleaned, new one registered"
     tags = ["dhcp_client", "cleanup"]
     OLD_NAME = "chaos-old-name"
     NEW_NAME = "chaos-new-name"
-
-    def setup(self, ctx: ChaosContext) -> None:
-        # Set known initial hostname
-        ctx.client.sudo(f"hostname {self.OLD_NAME}", check=False)
+    MAC = "aa:bb:cc:88:01:02"
 
     def run(self, ctx: ChaosContext) -> None:
-        iface = ctx.cfg.dhcpclient_lan_if
-        # First renew with old name
-        ctx.client.sudo(
-            f"dhclient -r {iface}; dhclient -h {self.OLD_NAME} {iface}",
-            timeout=30
-        )
-        ctx.wait(3, "establish old lease")
+        # Kea doesn't propagate option-12 hostname to the lease without DDNS; inject
+        # via the API so we test the sync/cleanup logic without relying on DHCP FQDN.
+        _, self._ip = ctx.alloc_host("-hcfmt")
+        ctx.kea.lease4_add(self._ip, self.MAC, self.OLD_NAME,
+                           valid_lft=3600, subnet_id=ctx.subnet_id())
         ctx.run_sync("dynamic")
         ctx.wait(2, "initial sync")
-        self._old_ip = _current_lease_ip(ctx)
-        ctx.event("old_lease", ip=self._old_ip, hostname=self.OLD_NAME)
+        ctx.event("old_lease", ip=self._ip, hostname=self.OLD_NAME)
 
-        # Renew with new hostname
-        ctx.client.sudo(
-            f"dhclient -r {iface}; dhclient -h {self.NEW_NAME} {iface}",
-            timeout=30
-        )
-        ctx.wait(3, "let new hostname propagate")
+        # Replace with new hostname
+        ctx.kea.lease4_del(self._ip)
+        ctx.kea.lease4_add(self._ip, self.MAC, self.NEW_NAME,
+                           valid_lft=3600, subnet_id=ctx.subnet_id())
         ctx.run_sync("dynamic")
         ctx.run_clean()
-        ctx.wait(2, "let sync+clean settle")
-        self._new_ip = _current_lease_ip(ctx)
-        ctx.event("new_lease", ip=self._new_ip, hostname=self.NEW_NAME)
+        ctx.wait(2, "sync+clean settle")
+        ctx.event("new_lease", ip=self._ip, hostname=self.NEW_NAME)
 
     def verify(self, ctx: ChaosContext) -> list[str]:
         failures = []
         new_fqdn = f"{self.NEW_NAME}.{ctx.domain}"
-        if self._new_ip and not ctx.unbound.has_record(new_fqdn, self._new_ip):
-            failures.append(f"New A record {new_fqdn} → {self._new_ip} not found")
+        if not ctx.unbound.has_record(new_fqdn, self._ip):
+            failures.append(f"New A record {new_fqdn} → {self._ip} not found")
 
         old_fqdn = f"{self.OLD_NAME}.{ctx.domain}"
         data = ctx.unbound.list_local_data()
@@ -128,7 +151,10 @@ class HostnameChange(Scenario):
         return failures
 
     def cleanup(self, ctx: ChaosContext) -> None:
-        ctx.client.sudo(f"hostname {ctx.cfg.dhcpclient_host.split('.')[0]}", check=False)
+        try:
+            ctx.kea.lease4_del(self._ip)
+        except Exception:
+            pass
         ctx.run_clean()
 
 
@@ -138,12 +164,16 @@ class NoHostname(Scenario):
     description = "DHCP renew without hostname option; verify no blank/numeric record created"
     tags = ["dhcp_client", "hostile"]
 
+    def setup(self, ctx: ChaosContext) -> None:
+        ctx.client.run("true")  # raises UnavailableSession → SKIP if client unreachable
+        _ensure_iface_up(ctx)
+
     def run(self, ctx: ChaosContext) -> None:
         iface = ctx.cfg.dhcpclient_lan_if
         # '-I ""' sends no client identifier; suppress hostname via dhclient.conf
         ctx.client.sudo(
-            f"dhclient -r {iface}; "
-            f"dhclient -cf /dev/null {iface}",   # blank config = no hostname option
+            f"dhclient -r {iface} 2>/dev/null; "
+            f"dhclient -v -cf /dev/null {iface} 2>&1",   # blank config = no hostname option
             timeout=30
         )
         ctx.wait(3, "let no-hostname lease propagate")
@@ -176,85 +206,42 @@ class NoHostname(Scenario):
         # Restore normal DHCP
         iface = ctx.cfg.dhcpclient_lan_if
         hostname = ctx.cfg.dhcpclient_host.split(".")[0]
-        ctx.client.sudo(
-            f"dhclient -r {iface}; dhclient -h {hostname} {iface}",
-            timeout=30, check=False
-        )
+        _dhclient_with_hostname(ctx, iface, hostname)
         ctx.run_clean()
 
 
 @register
 class MultiClient(Scenario):
     name = "multi_client"
-    description = "Spawn 3 dhclient processes with distinct hostnames; verify 3 DNS records"
+    description = "Inject 3 leases with distinct hostnames via Kea API; verify 3 DNS records"
     tags = ["dhcp_client", "stress"]
     NAMES = ["chaos-mc-alpha", "chaos-mc-beta", "chaos-mc-gamma"]
-
-    def setup(self, ctx: ChaosContext) -> None:
-        # Need macvlan or multiple MACs — use ip link add macvlan for extra interfaces
-        # Check that ip link is available
-        ctx.client.sudo("ip link help 2>&1 | head -1 || true", check=False, timeout=5)
+    MACS = ["aa:bb:cd:00:ef:01", "aa:bb:cd:01:ef:01", "aa:bb:cd:02:ef:01"]
 
     def run(self, ctx: ChaosContext) -> None:
-        iface = ctx.cfg.dhcpclient_lan_if
-        self._vifs: list[str] = []
-
+        self._pairs: list[tuple[str, str]] = []
         for i, name in enumerate(self.NAMES):
-            vif = f"chaos{i}"
-            mac = f"aa:bb:cd:{i:02x}:ef:01"
-            # Create macvlan interface with distinct MAC
-            ctx.client.sudo(
-                f"ip link add {vif} link {iface} type macvlan mode bridge; "
-                f"ip link set {vif} address {mac}; "
-                f"ip link set {vif} up",
-                check=False, timeout=10
-            )
-            self._vifs.append(vif)
-            ctx.client.sudo(
-                f"dhclient -h {name} {vif} &",
-                timeout=15, check=False
-            )
-            ctx.event("dhclient_started", name=name, vif=vif, mac=mac)
+            _, ip = ctx.alloc_host(f"-mc{i}")
+            mac = self.MACS[i]
+            ctx.kea.lease4_add(ip, mac, name, valid_lft=3600, subnet_id=ctx.subnet_id())
+            self._pairs.append((name, ip))
+            ctx.event("lease_added", name=name, ip=ip, mac=mac)
 
-        ctx.wait(5, "let all DHCP requests complete")
         ctx.run_sync("dynamic")
         ctx.wait(2, "sync settle")
 
-        # Record which IPs were acquired
-        self._acquired: list[tuple[str, str]] = []
-        for vif, name in zip(self._vifs, self.NAMES):
-            code = f"""
-import subprocess
-out = subprocess.check_output(['ip', '-4', 'addr', 'show', 'dev', '{vif}'], text=True, stderr=subprocess.DEVNULL)
-for line in out.splitlines():
-    if 'scope global' in line:
-        print(line.split()[1].split('/')[0])
-        break
-"""
-            try:
-                ip = ctx.client.script("python3", code).strip()
-            except Exception:
-                ip = ""
-            if ip:
-                self._acquired.append((name, ip))
-                ctx.event("lease_acquired", vif=vif, name=name, ip=ip)
-
     def verify(self, ctx: ChaosContext) -> list[str]:
         failures = []
-        if len(self._acquired) < len(self.NAMES):
-            failures.append(
-                f"Only {len(self._acquired)}/{len(self.NAMES)} clients acquired leases"
-            )
-        for name, ip in self._acquired:
+        for name, ip in self._pairs:
             fqdn = f"{name}.{ctx.domain}"
             if not ctx.unbound.has_record(fqdn, ip):
-                failures.append(f"A record missing for multi-client {name} → {ip}")
+                failures.append(f"A record missing for {name} → {ip}")
         return failures
 
     def cleanup(self, ctx: ChaosContext) -> None:
-        for vif in getattr(self, "_vifs", []):
-            ctx.client.sudo(
-                f"dhclient -r {vif}; ip link del {vif} || true",
-                check=False, timeout=10
-            )
+        for _, ip in getattr(self, "_pairs", []):
+            try:
+                ctx.kea.lease4_del(ip)
+            except Exception:
+                pass
         ctx.run_clean()

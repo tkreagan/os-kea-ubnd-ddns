@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: BSD-2-Clause
 """
-Paramiko-based SSH session with password auth.
+Paramiko-based SSH session — supports both password and key-based auth.
 
 Adapted from tests/integration/conftest.py:SSHSession — same behaviour but
 no pytest dependency, so it can be used in standalone scripts.
@@ -14,32 +14,80 @@ from typing import Union
 
 class SSHSession:
     """
-    Password-based SSH session via paramiko.
+    SSH session via paramiko, supporting password or key-file auth.
 
-    Usage:
-        s = SSHSession("host", "user", "pass")
-        out = s.run("ls /tmp")           # no privilege escalation
-        out = s.sudo("cat /etc/shadow")  # wraps with sudo via stdin password
-        out = s.script("python3", "import sys; print(sys.version)")
-        s.sftp_put("/tmp/local.txt", "/tmp/remote.txt")
+    Key auth (NOPASSWD sudo):
+        s = SSHSession("host", "del", key_file="~/.ssh/del_rgn.cm.private")
+        out = s.sudo("cat /etc/shadow")  # uses sudo -n (no password)
+
+    Password auth:
+        s = SSHSession("host", "user", password="pass")
+        out = s.sudo("cmd")             # injects password via stdin
+
+    Other methods:
+        s.run("cmd")                    # no privilege escalation
+        s.script("python3", "code")     # feed code over stdin
+        s.sftp_put("/local", "/remote")
         s.close()
     """
 
-    def __init__(self, host: str, user: str, password: str,
-                 sudo_password: str | None = None, timeout: int = 15):
+    def __init__(self, host: str, user: str, password: str = "",
+                 sudo_password: str | None = None, timeout: int = 15,
+                 key_file: str | None = None):
         import paramiko
+        import socket
         self.host = host
         self.user = user
         self.password = password
         self.sudo_password = sudo_password or password
+        self._key_auth = bool(key_file)
+
+        # Resolve all IPs for the hostname; try each in order so a stale DNS
+        # entry doesn't cause a 15-second hang before the good IP is tried.
+        try:
+            addrs = [ai[4][0] for ai in socket.getaddrinfo(
+                host, 22, socket.AF_INET, socket.SOCK_STREAM)]
+            # Deduplicate while preserving order
+            seen: set[str] = set()
+            addrs = [a for a in addrs if not (a in seen or seen.add(a))]  # type: ignore[func-returns-value]
+        except Exception:
+            addrs = [host]
 
         self._client = paramiko.SSHClient()
         self._client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-        self._client.connect(
-            host, username=user, password=password,
-            look_for_keys=False, allow_agent=False,
-            timeout=timeout,
-        )
+
+        last_exc: Exception | None = None
+        for addr in addrs:
+            try:
+                if key_file:
+                    expanded = str(pathlib.Path(key_file).expanduser())
+                    self._client.connect(
+                        addr, username=user,
+                        key_filename=expanded,
+                        look_for_keys=False, allow_agent=False,
+                        timeout=timeout,
+                    )
+                else:
+                    self._client.connect(
+                        addr, username=user, password=password,
+                        look_for_keys=False, allow_agent=False,
+                        timeout=timeout,
+                    )
+                last_exc = None
+                break
+            except Exception as exc:
+                last_exc = exc
+                # Reset for next attempt
+                self._client = paramiko.SSHClient()
+                self._client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+
+        if last_exc is not None:
+            raise last_exc
+
+        # Keep-alive so the connection survives slow operations and test pauses.
+        transport = self._client.get_transport()
+        if transport:
+            transport.set_keepalive(30)
 
     # ------------------------------------------------------------------
     # Core execution
@@ -47,10 +95,62 @@ class SSHSession:
 
     def run(self, cmd: str, check: bool = True, timeout: int = 60) -> str:
         """Run cmd without privilege escalation. Return stdout."""
-        _, stdout, stderr = self._client.exec_command(cmd, timeout=timeout)
-        out = stdout.read().decode(errors="replace").strip()
-        err = stderr.read().decode(errors="replace").strip()
-        rc = stdout.channel.recv_exit_status()
+        import threading
+
+        result_holder: list = []
+        exc_holder: list = []
+        done = threading.Event()
+
+        def _worker():
+            ch = None
+            try:
+                _, stdout, stderr = self._client.exec_command(cmd, timeout=timeout)
+                ch = stdout.channel
+                # Drain stdout and stderr concurrently to avoid the pipe-deadlock
+                # that occurs when sequential reads block each other's pipe buffers.
+                out_chunks: list[bytes] = []
+                err_chunks: list[bytes] = []
+                while True:
+                    if ch.recv_ready():
+                        data = ch.recv(65536)
+                        if data:
+                            out_chunks.append(data)
+                        continue
+                    if ch.recv_stderr_ready():
+                        data = ch.recv_stderr(65536)
+                        if data:
+                            err_chunks.append(data)
+                        continue
+                    if (ch.exit_status_ready()
+                            and not ch.recv_ready()
+                            and not ch.recv_stderr_ready()):
+                        break
+                    time.sleep(0.02)
+                rc = ch.recv_exit_status()
+                out = b"".join(out_chunks).decode(errors="replace").strip()
+                err = b"".join(err_chunks).decode(errors="replace").strip()
+                result_holder[:] = [out, err, rc]
+            except Exception as exc:
+                exc_holder[:] = [exc]
+            finally:
+                try:
+                    if ch is not None:
+                        ch.close()
+                except Exception:
+                    pass
+                done.set()
+
+        t = threading.Thread(target=_worker, daemon=True)
+        t.start()
+        if not done.wait(timeout=timeout + 5):
+            raise TimeoutError(
+                f"[{self.host}] command timed out after {timeout + 5}s: {cmd[:80]!r}"
+            )
+
+        if exc_holder:
+            raise exc_holder[0]
+
+        out, err, rc = result_holder
         if check and rc != 0:
             raise RuntimeError(
                 f"[{self.host}] Command failed (rc={rc}):\n"
@@ -61,11 +161,18 @@ class SSHSession:
         return out
 
     def sudo(self, cmd: str, check: bool = True, timeout: int = 60) -> str:
-        """Run cmd with sudo, supplying password via stdin."""
-        full = (
-            f"echo {self.sudo_password!r} | "
-            f"sudo -S -p '' sh -c {cmd!r}"
-        )
+        """Run cmd with sudo.
+
+        Key-auth sessions use 'sudo -n' (NOPASSWD assumed).
+        Password sessions inject password via stdin.
+        """
+        if self._key_auth:
+            full = f"sudo -n sh -c {cmd!r}"
+        else:
+            full = (
+                f"echo {self.sudo_password!r} | "
+                f"sudo -S -p '' sh -c {cmd!r}"
+            )
         return self.run(full, check=check, timeout=timeout)
 
     # Convenience: calling the session object invokes sudo
@@ -113,9 +220,12 @@ class SSHSession:
         """Run `code` via `sudo interpreter`, feeding over stdin."""
         channel = self._client.get_transport().open_session()
         channel.settimeout(timeout)
-        channel.exec_command(
-            f"echo {self.sudo_password!r} | sudo -S -p '' {interpreter}"
-        )
+        if self._key_auth:
+            channel.exec_command(f"sudo -n {interpreter}")
+        else:
+            channel.exec_command(
+                f"echo {self.sudo_password!r} | sudo -S -p '' {interpreter}"
+            )
         channel.sendall(code.encode())
         channel.shutdown_write()
         out = b""

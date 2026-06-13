@@ -8,6 +8,7 @@ import time
 
 from tools.scenarios import register
 from tools.scenarios.base import Scenario, ChaosContext
+from tools.lib.kea import KeaError
 
 CONFIGCTL = "/usr/local/sbin/configctl keaunbound"
 PIDFILE = "/var/run/kea-unbound-ddns.pid"
@@ -36,7 +37,10 @@ class DaemonKill(Scenario):
     def run(self, ctx: ChaosContext) -> None:
         self._pre_pid = _get_pid(ctx, PIDFILE)
         ctx.event("pre_kill_pid", pid=self._pre_pid)
-        ctx.ssh.sudo("pkill -f kea-unbound-ddns.py || true", check=False)
+        # Kill only the child (by pidfile), NOT the supervisor.
+        # pkill -f would match the supervisor's cmdline too (it contains the
+        # script name as an argument), killing both and preventing respawn.
+        ctx.ssh.sudo(f"pkill -F {PIDFILE} 2>/dev/null || true", check=False)
         ctx.event("daemon_killed")
         ctx.wait(8, "wait for supervisor respawn")
 
@@ -221,29 +225,55 @@ class SimultaneousFlip(Scenario):
         ctx.run_sync("dynamic")
         ctx.wait(2, "initial sync")
 
-        # Stop both simultaneously
+        # Stop both simultaneously.
+        # Use pkill -x (exact process-name match) for unbound so we don't
+        # accidentally kill kea-unbound-ddns.py whose cmdline also contains
+        # "unbound". For kea-dhcp4 the exact name is safe.
         ctx.ssh.sudo(
             "service kea-dhcp4 stop; service unbound stop; "
-            "pkill -f kea-dhcp4 || true; pkill -f unbound || true",
+            "pkill -x kea-dhcp4 || true; pkill -x unbound || true; "
+            "pkill -f kea-dhcp-ddns || true",
             check=False, timeout=20
         )
         ctx.event("both_services_stopped")
-        ctx.wait(3, "let services stop")
+        ctx.wait(4, "let services stop")
 
-        # Restart in correct order: Unbound first, then Kea
+        # Restart in correct order: Unbound first, then Kea + d2
         ctx.ssh.sudo(
             "/usr/local/sbin/configctl unbound start || /usr/local/sbin/pluginctl -s unbound start || true",
             check=False, timeout=20
         )
-        ctx.wait(3, "let unbound start")
+        ctx.wait(4, "let unbound start")
         ctx.ssh.sudo(
             "/usr/local/sbin/configctl kea start || true",
             check=False, timeout=20
         )
-        ctx.event("both_services_restarted")
         ctx.wait(5, "let kea start")
+        # d2 must also be running so the daemon can leave BLOCKED state
+        ctx.ssh.sudo(
+            "pkill -f kea-dhcp-ddns 2>/dev/null || true; sleep 1; "
+            "/usr/local/sbin/kea-dhcp-ddns "
+            "-c /usr/local/etc/kea/kea-dhcp-ddns.conf -d "
+            ">> /var/log/kea/kea_startup.log 2>&1 &",
+            check=False, timeout=15,
+        )
+        ctx.event("both_services_restarted")
+        ctx.wait(5, "let d2 start and daemon transition to NORMAL")
+
+        # OPNsense regenerates kea-dhcp4.conf on restart; re-inject test subnet.
+        from tools.chaos_monkey import _ensure_kea_subnet
+        _ensure_kea_subnet(ctx)
+
+        # Wait for Kea to be responsive, then sync (retry a few times).
+        for attempt in range(3):
+            try:
+                ctx.kea.version_get()
+                break
+            except Exception:
+                ctx.wait(3, f"waiting for Kea to be ready (attempt {attempt+1})")
+
         ctx.run_sync("dynamic")
-        ctx.wait(2, "post-restart sync")
+        ctx.wait(3, "post-restart sync")
 
     def verify(self, ctx: ChaosContext) -> list[str]:
         failures = []
@@ -255,12 +285,19 @@ class SimultaneousFlip(Scenario):
         return failures
 
     def cleanup(self, ctx: ChaosContext) -> None:
-        # Ensure both services are up
+        # Ensure all three services are up
         ctx.ssh.sudo(
-            "/usr/local/sbin/configctl unbound start || true; /usr/local/sbin/configctl kea start || true",
+            "/usr/local/sbin/configctl unbound start || true; "
+            "/usr/local/sbin/configctl kea start || true",
             check=False, timeout=20
         )
         time.sleep(3)
+        if not ctx.daemon_is_running():
+            ctx.ssh.sudo(
+                "/usr/local/sbin/configctl keaunbound start || true",
+                check=False, timeout=15
+            )
+            time.sleep(3)
         for _, ip in getattr(self, "_pairs", []):
             try:
                 ctx.kea.lease4_del(ip)

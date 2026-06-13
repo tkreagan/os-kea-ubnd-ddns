@@ -121,7 +121,11 @@ def _extract_answer(raw: str, rdtype: str) -> str | None:
             return line
         if rdtype_upper == "AAAA" and re.match(r"^[0-9a-fA-F:]+$", line) and ":" in line:
             return line
-        if rdtype_upper == "PTR" and line.endswith(".") and "NXDOMAIN" not in line:
+        # dig +short PTR: bare "hostname.domain." on its own line (no spaces).
+        # Full drill record lines also end with "." but contain whitespace —
+        # they must fall through to field-based extraction below.
+        if (rdtype_upper == "PTR" and line.endswith(".") and "NXDOMAIN" not in line
+                and " " not in line and "\t" not in line):
             return line.rstrip(".")
         # drill/host answer-section lines: "name  TTL  IN  TYPE  value"
         if rdtype_upper in line.upper() and "ANSWER SECTION" not in line:

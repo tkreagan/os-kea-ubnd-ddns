@@ -27,6 +27,8 @@ class ChaosConfig:
     dev_domain: str
     test_ip_prefix: str      # e.g. "192.168.99."
     test_subnet_id: int | None
+    opnsense_key: str | None = None   # path to SSH private key (key auth)
+    dhcpclient_key: str | None = None
     output_dir: str = "tools/results"
     delay_secs: int = 10
 
@@ -97,6 +99,20 @@ class ChaosContext:
             self._subnet6_id = discovered
         return self._subnet6_id
 
+    def require_dhcp6(self) -> None:
+        """Assert kea-dhcp6 is available; raises RuntimeError (→ SKIP) if not.
+
+        Call this from scenario.setup() so that missing DHCPv6 is a graceful
+        skip rather than an error in run().
+        """
+        from tools.lib.kea import KeaError
+        try:
+            subnet = self.kea.discover_subnet_id(service="dhcp6")
+        except KeaError as exc:
+            raise RuntimeError(f"DHCPv6 not available: {exc}") from exc
+        if subnet is None:
+            raise RuntimeError("DHCPv6 not configured — no kea-dhcp6 subnet found")
+
     def alloc_v6_addr(self, prefix: str = "fd00::") -> str:
         """Allocate a unique test IPv6 address from prefix."""
         addr = f"{prefix}{self._v6_counter:x}"
@@ -131,7 +147,7 @@ class ChaosContext:
 
     def run_audit(self) -> dict:
         raw = self.ssh.sudo(
-            "/usr/local/opnsense/scripts/keaunbound/local-data-audit.py --report-json",
+            "timeout 25 /usr/local/opnsense/scripts/keaunbound/local-data-audit.py --report-json",
             timeout=30,
         )
         import json

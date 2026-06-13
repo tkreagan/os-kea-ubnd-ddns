@@ -465,8 +465,9 @@ class DdnsNcrIdempotent(Scenario):
         raw = ctx.unbound.list_local_data()
         fqdn = self._fqdn
 
-        # Forward record
-        fwd_lines = [l for l in raw.get(fqdn, []) if " A " in l and self._ip in l]
+        # Forward record — unbound-control uses tabs between fields
+        fwd_lines = [l for l in raw.get(fqdn, [])
+                     if l.split()[3:4] == ["A"] and self._ip in l]
         if len(fwd_lines) == 0:
             failures.append(f"A record missing after repeated NCRs: {fqdn}")
         elif len(fwd_lines) > 1:

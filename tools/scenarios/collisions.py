@@ -21,12 +21,25 @@ class ReservationLeaseCollision(Scenario):
     )
     tags = ["collision"]
 
+    def setup(self, ctx: ChaosContext) -> None:
+        # Probe whether host_cmds hook is loaded; skip gracefully if not.
+        from tools.lib.kea import KeaError
+        try:
+            # Use a no-op query that will fail with result=1 (unknown command)
+            # if host_cmds isn't loaded, or result=2 (missing args) if it is.
+            ctx.kea.query("subnet4-reservation-get", arguments={"subnet-id": 99999, "ip-address": "0.0.0.0"})
+        except KeaError as exc:
+            if "not supported" in str(exc):
+                raise RuntimeError(
+                    "host_cmds hook not loaded — enable it in kea-dhcp4.conf to run this scenario"
+                )
+
     def run(self, ctx: ChaosContext) -> None:
         _, ip = ctx.alloc_host("-col")
         self._ip = ip
         subnet_id = ctx.subnet_id()
-        self._host_a = f"collision-reserved"
-        self._host_b = f"collision-leased"
+        self._host_a = "collision-reserved"
+        self._host_b = "collision-leased"
 
         # Add reservation
         ctx.kea.reservation_add(subnet_id, ip, "aa:bb:cc:co:ll:01", self._host_a)
@@ -85,16 +98,21 @@ class OverrideConflict(Scenario):
         self._ip = ip
         self.OVERRIDE_IP = ip
 
-        # Inject a host_entries.conf record directly
-        record = f"local-data: \"{self.OVERRIDE_NAME}.{ctx.domain}. 3600 IN A {ip}\""
-        ctx.ssh.sudo(
-            f"echo '{record}' >> {HOST_ENTRIES}",
-            timeout=10
+        # Inject a host_entries.conf record directly.
+        # Double-quotes in the record body make shell escaping impossible with
+        # nested sudo/sh -c; write via a temp file instead.
+        import pathlib, tempfile as _tmp
+        content = (
+            f'local-data: "{self.OVERRIDE_NAME}.{ctx.domain}. 3600 IN A {ip}"\n'
+            f'local-data-ptr: "{ip} {self.OVERRIDE_NAME}.{ctx.domain}."\n'
         )
-        ctx.ssh.sudo(
-            f"echo 'local-data-ptr: \"{ip} {self.OVERRIDE_NAME}.{ctx.domain}.\"' >> {HOST_ENTRIES}",
-            timeout=10
-        )
+        with _tmp.NamedTemporaryFile(mode="w", suffix=".conf", delete=False) as tf:
+            tf.write(content)
+            tmp_local = pathlib.Path(tf.name)
+        tmp_remote = "/tmp/_chaos_host_entries_patch.conf"
+        ctx.ssh.sftp_put(tmp_local, tmp_remote)
+        tmp_local.unlink(missing_ok=True)
+        ctx.ssh.sudo(f"cat {tmp_remote} >> {HOST_ENTRIES} && rm {tmp_remote}", timeout=10)
         # Reload Unbound to pick up static record
         ctx.ssh.sudo(
             "/usr/local/sbin/unbound-control -c /var/unbound/unbound.conf reload || true",
@@ -103,7 +121,7 @@ class OverrideConflict(Scenario):
         ctx.event("static_record_injected", name=self.OVERRIDE_NAME, ip=ip)
 
         # Now add a lease for the same IP with a different hostname
-        ctx.kea.lease4_add(ip, "aa:bb:cc:ov:00:01", "chaos-leased-override",
+        ctx.kea.lease4_add(ip, "aa:bb:cc:cc:00:01", "chaos-leased-override",
                            valid_lft=3600, subnet_id=ctx.subnet_id())
         ctx.run_sync("dynamic")
         ctx.wait(2, "sync settle")
