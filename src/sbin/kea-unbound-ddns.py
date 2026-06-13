@@ -229,8 +229,8 @@ def is_sane_name(name: str, logger: logging.Logger) -> bool:
         if not _LABEL_RE.match(label):
             logger.warning("Rejecting name with invalid label %r in: %r", label, name)
             return False
-    if all(part.isdigit() for part in labels):
-        logger.warning("Rejecting all-numeric name (looks like an IP): %r", name)
+    if labels[0].isdigit():
+        logger.warning("Rejecting all-numeric first label (looks like IP/counter): %r", name)
         return False
     if len(name.rstrip(".")) > 253:
         logger.warning("Rejecting name exceeding 253-char limit: %r", name)
@@ -708,7 +708,12 @@ class Daemon:
             except OSError as e:
                 self.log.error("socket error: %s", e)
                 return
-            self._handle_packet(data, addr)
+            try:
+                self._handle_packet(data, addr)
+            except Exception as e:
+                self.log.error("unhandled error in _handle_packet: %s (%s)",
+                               e, type(e).__name__, exc_info=True)
+
 
     def _handle_packet(self, data: bytes, addr):
         t0 = time.monotonic()
@@ -719,6 +724,11 @@ class Daemon:
                 msg = dns.message.from_wire(data)
         except dns.exception.DNSException as e:
             self.log.warning("failed to parse DNS message from %s: %s", addr, e)
+            return
+        except Exception as e:
+            # struct.error, ValueError, etc. from truly malformed wire data
+            self.log.warning("unexpected parse error from %s: %s (%s)",
+                             addr, e, type(e).__name__)
             return
 
         if self.keyring and not msg.had_tsig:
@@ -758,6 +768,11 @@ class Daemon:
                 except UnboundRefused as e:
                     self.log.warning("apply failed, Unbound down (%s) — BLOCKED", e)
                     self.execute(self.sm.on_apply_failure(time.time(), names))
+                    return dns.rcode.SERVFAIL
+                except Exception as e:
+                    # Unexpected error in process_update — log it, stay up.
+                    self.log.error("process_update raised %s: %s",
+                                   type(e).__name__, e, exc_info=True)
                     return dns.rcode.SERVFAIL
         except BlockingIOError:
             # A reconcile / external clean holds the lock. Defer + re-resolve on

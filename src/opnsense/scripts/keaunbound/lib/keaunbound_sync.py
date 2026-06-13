@@ -436,8 +436,20 @@ def _normalize_raw_lease(lease: Dict, is_v4: bool,
 
     expire = lease.get("expire", 0)
     if expire in (0, -1, None):
-        expires = now + 86400
-    else:
+        # Kea API (lease4-get, lease4-get-all) returns "cltt" (client last
+        # transaction time) and "valid-lft" but not "expire" directly in most
+        # responses.  Compute the expiry from those fields if available.
+        try:
+            cltt = int(lease.get("cltt", 0))
+            vlft = int(lease.get("valid-lft", 0))
+        except (TypeError, ValueError):
+            cltt, vlft = 0, 0
+        if cltt > 0 and vlft > 0:
+            expire = cltt + vlft
+        else:
+            expires = now + 86400
+            expire = None  # skip the convert/check below
+    if expire is not None:
         try:
             expire = int(expire)
         except (TypeError, ValueError):
@@ -601,9 +613,13 @@ def is_sane_name(name: str, logger: Optional[logging.Logger] = None) -> bool:
                 logger.warning("Rejecting name with invalid label %r in: %r", label, name)
             return False
 
-    if all(part.isdigit() for part in labels):
+    # Reject when the first label is all-numeric — it looks like an IP octet or
+    # counter, not a real hostname.  The domain-suffix appended by qualify_hostname
+    # makes the all(…) check unreliable: "123456789.lan" would pass because "lan"
+    # is not all-digit, so we check only the first label.
+    if labels[0].isdigit():
         if logger:
-            logger.warning("Rejecting all-numeric name (looks like an IP): %r", name)
+            logger.warning("Rejecting all-numeric first label (looks like IP/counter): %r", name)
         return False
 
     if len(name.rstrip(".")) > 253:
