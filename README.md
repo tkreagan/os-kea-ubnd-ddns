@@ -256,9 +256,10 @@ before enabling either cleanup setting.
 
 TSIG support is partially implemented in the daemon (`kea-unbound-ddns.py`) and
 daemon-start code, but has not been tested end-to-end and is not configurable via
-the Settings UI. It is a planned roadmap item. The listener only accepts
+the Settings UI. It is deferred indefinitely. The listener only accepts
 connections from `127.0.0.1`, so unsigned updates from kea-dhcp-ddns are safe
-for the standard single-host deployment.
+for the standard single-host deployment and TSIG provides no additional security
+in that topology.
 
 ## UI tabs
 
@@ -285,7 +286,7 @@ OPNsense 26.1 with Kea DHCP4:
 
 ## Known issues and roadmap
 
-- **TSIG authentication** — partially implemented in the listener and startup code; not tested end-to-end, not configurable via Settings UI. Planned for a future release.
+- **TSIG authentication** — partially implemented in the listener and startup code; not tested end-to-end, not configurable via Settings UI. Deferred indefinitely — the listener only accepts connections from `127.0.0.1`, so unsigned updates are safe for all standard single-host deployments.
 - **Reverse zones verified** — the DNS reverse zone field is tested and working;
   PTR records register correctly when it is set (with a trailing dot).
 - **Override options verified** — `override-no-update`, `override-client-update`,
@@ -311,16 +312,113 @@ OPNsense 26.1 with Kea DHCP4:
   global reservations and silently skips entries without one, so a correctly-used global
   reservation (no IP) produces no DNS record. This configuration is not tested. The Kea Config
   Check tab flags it when detected.
-- **Shared networks not supported** — The OPNsense GUI does not expose shared-network
+- **Shared networks — partial support** — The OPNsense GUI does not expose shared-network
   configuration for Kea DHCP (see
   [opnsense/core#9427](https://github.com/opnsense/core/issues/9427), no committed timeline).
-  If you use shared networks via manual config: subnet-level reservations within shared networks
-  do sync correctly, but reservations placed directly on a shared-network object (not inside a
-  subnet) are not supported and will be silently missed. DDNS for subnets inside shared networks
-  is not tested. The Kea Config Check tab flags both conditions when detected. Full shared-network
-  support is planned if and when OPNsense adds GUI exposure.
+  If you configure shared networks manually, see [Shared networks (manual config)](#shared-networks-manual-config) below.
 - **Not yet in OPNsense community plugins** — installation is manual for now (see
   [Installation](#installation)).
+
+## Advanced configuration notes
+
+### Shared networks (manual config)
+
+OPNsense does not expose shared-network configuration in its Kea DHCP GUI
+([opnsense/core#9427](https://github.com/opnsense/core/issues/9427)). If you
+configure shared networks by hand with `manual_config` enabled, here is what the
+plugin supports and what it does not.
+
+**What works:**
+
+- **Subnet-level `ddns-qualifying-suffix` inside shared networks** — the plugin
+  reads each subnet's suffix from Kea's `config-get` response, including subnets
+  that live inside a shared-network object. Suffix inheritance follows the standard
+  waterfall: subnet → shared-network → global → OPNsense system domain. A subnet
+  with no explicit suffix inherits from the shared-network; a subnet with an
+  explicit suffix uses that, ignoring the shared-network's value. Verified on real
+  Kea API responses in testing.
+
+- **Subnet-level `ddns-send-updates` inside shared networks** — the same
+  inheritance applies. A shared-network with `"ddns-send-updates": false` disables
+  DDNS registration for all child subnets unless a subnet explicitly overrides it
+  back to `true`. Both the sync path and the clean path honour this.
+
+- **Subnet-level reservations inside shared networks** — reservations placed inside
+  a subnet that is itself inside a shared-network (`shared-networks[].subnet4[].reservations[]`)
+  are picked up correctly. The sync path walks the nested structure.
+
+**What does not work:**
+
+- **Shared-network-level reservations** — reservations placed *directly on the
+  shared-network object* (`shared-networks[].reservations[]`, not inside a child
+  subnet) are not supported and will be silently ignored. Kea allows this placement
+  but ISC recommends against it for IP-address reservations. OPNsense does not
+  generate this structure. If you have such reservations, move them to the
+  appropriate child subnet.
+
+- **DDNS for subnets inside shared networks is not end-to-end tested** — Kea's D2
+  routes NCRs by matching the FQDN against configured forward domains; as long as
+  the qualifying suffix for a shared-network subnet matches a D2 forward domain, NCRs
+  should route correctly. However, this path has only been verified via the sync
+  path, not via a live DHCPv6/DHCPv4 exchange from a client in a shared-network subnet.
+
+The Kea Config Check tab flags shared-network subnets with an advisory notice.
+
+---
+
+### Clients without hostnames and generated names
+
+**The problem:** every DNS record the plugin creates is derived from a hostname.
+A client that sends no hostname in its DHCP request — common on phones and devices
+with MAC address randomization — gets no DNS record, regardless of the override
+settings (`ddns-override-no-update`, `ddns-override-client-update`). Those flags
+only act when the client supplies a name; they cannot manufacture one from nothing.
+This was confirmed in testing (test G1: all three override flags ON, client sent no
+name, result: lease allocated, no DNS record).
+
+**Kea's solution:** two options work together to generate names for nameless clients.
+Both are available only in manual config mode (OPNsense does not expose them in the
+GUI as of 26.1).
+
+`ddns-replace-client-name` controls when Kea generates a synthetic name:
+
+| Mode | When Kea generates a name |
+|------|--------------------------|
+| `never` *(default)* | Never — use the client-supplied name as-is |
+| `when-not-present` | When the client sends no name |
+| `always` | Always — discard whatever the client sends |
+| `when-present` | Only when the client sends a name (replace it) |
+
+`ddns-generated-prefix` sets the prefix for generated names (default `"myhost"`).
+Generated FQDNs follow the format `<prefix>-<dashed-IP>.<qualifying-suffix>` — for
+example, `myhost-192-168-1-100.home.lan` for a client at `192.168.1.100`. For IPv6,
+the dashed form uses `--` where `::` appears: `kea6host-fd00--102.home.lan`.
+
+**Important limitation — sync path divergence:** when Kea generates a name, it
+places the generated FQDN in the NCR packet (so the live path — `kea-dhcp-ddns` →
+listener — registers it correctly). However, Kea stores the *original client name*
+(or empty string) in the lease database. The sync path (`kea-sync.py`) reads the
+lease database; it sees an empty hostname and skips the lease. This means:
+
+- While Kea and D2 are running: the generated name is in Unbound, registered via the live path.
+- After an Unbound restart (which flushes all runtime `local_data`): the sync path
+  cannot restore the record. It stays gone until the client's next lease renewal
+  triggers a new NCR — or until `ddns-update-on-renew` fires a renewal-triggered NCR.
+
+**Mitigation:** enable `ddns-update-on-renew: true` on subnets that use generated
+names. This causes Kea to re-assert DNS on every genuine renewal (subject to the
+`cache-threshold` caveat noted in the configuration guide above), which limits the
+window after an Unbound restart where records are missing. The window is at most
+one lease T1 interval.
+
+**Recommendation for this deployment:** if every device must be resolvable, the
+most reliable approach is to configure `ddns-replace-client-name: when-not-present`
+and `ddns-generated-prefix: <something>` in manual config mode, combined with
+`ddns-update-on-renew: true`. Devices that supply a real hostname continue to use
+it; nameless devices get a deterministic generated name that the live path keeps
+fresh.
+
+---
 
 ## Development and testing
 

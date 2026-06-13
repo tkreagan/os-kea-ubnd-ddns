@@ -226,8 +226,14 @@ name that is NOT under the qualifying suffix (e.g. `foo.bar` with suffix
 `plhm.rgn.cm`). Both sides should leave it as `foo.bar` — verify they agree and the name
 isn't rejected by D2's forward-domain matching.
 
-**Untested branches:** shared-network suffix inheritance (no shared-networks in test
-config) and the dotted-name edge case above.
+**Shared-network suffix inheritance: TESTED ✅** — verified on dev-opnsense (June 2026)
+by injecting a shared-network structure into the real `config-get` response and running
+`_build_suffix_map` + `_normalize_raw_lease` against it. Both inheritance (subnet with
+no explicit suffix gets the shared-network's suffix) and per-subnet override (subnet
+with explicit suffix ignores shared-network's value) pass. `ddns-send-updates`
+inheritance through shared-networks also confirmed in the same test.
+
+**Untested branches:** the dotted-name edge case above.
 
 ### Reservation hostname presence — STATUS: UNTESTED | OPNsense: GUI settable
 
@@ -314,14 +320,29 @@ in Kea log (not `LEASE_REUSE`).
 operational caveat. Document for anyone shortening lease times or relying on frequent
 renewals for self-healing.
 
-### `ddns-send-updates` — STATUS: IMPLICITLY TESTED | OPNsense: GUI (derived, not explicit)
+### `ddns-send-updates` — STATUS: TESTED ✅ | OPNsense: GUI (derived, not explicit)
 
 OPNsense derives this from `ddns_dns_server`: if a DNS server is configured for the
 subnet, the PHP emits `ddns-send-updates: true`; otherwise `false`. It is not an
 independent GUI field. It lives in `kea-dhcp4.conf` per-subnet.
 
 If false for a subnet, no NCR is sent for leases in that subnet → live path never fires.
-Bulk sync still registers them → inconsistent lifecycle (records exist but never refresh).
+**The bulk sync path also respects this flag** (`_build_suffix_map` in
+`lib/keaunbound_sync.py` reads `ddns-send-updates` per subnet and builds a
+`ddns_disabled_subnets` set; `_normalize_raw_lease` returns `None` for any lease whose
+`subnet-id` is in that set). Both `query_kea_leases()` and `query_kea_reservations()`
+honour per-subnet and shared-network inheritance, so a subnet with
+`ddns-send-updates: false` is excluded from sync, clean, and audit — matching the live
+NCR path.
+
+**Inheritance chain:** subnet → shared-network → global, in that order. A subnet with
+no explicit value inherits from its shared-network parent; a shared-network with no
+explicit value inherits from the global Dhcp4/Dhcp6 level (default true).
+
+**Operational note:** this setting is the correct way to exclude a subnet from DNS
+registration. Setting it to false on a subnet stops the plugin from syncing those leases
+in all three paths (live NCR, bulk sync, and clean). Records already in Unbound from
+before the change are cleaned up on the next scheduled run of `local-data-clean.py`.
 
 ### `enable-updates` (in `dhcp-ddns {}` block) — STATUS: TESTED | OPNsense: GUI (via KeaDdns.enabled)
 
@@ -499,11 +520,14 @@ present; end-to-end is unvalidated.
 
 ## Tier 5 — Reservation / lease structural options
 
-### Multiple IPv6 addresses per reservation — STATUS: UNTESTED | OPNsense: GUI (v6 only)
+### Multiple IPv6 addresses per reservation — STATUS: TESTED ✅ | OPNsense: GUI (v6 only)
 
 DHCPv4 reservations: one `ip-address`. DHCPv6 reservations: `ip-addresses` list (can
-have multiple). `query_kea_reservations()` takes `addrs[0]` only. A v6 reservation with
-two addresses → only the first registered. Known, intentional limitation (not a bug).
+have multiple). `query_kea_reservations()` emits one result dict per address in the
+`ip-addresses` list — a reservation with two addresses produces two independent AAAA +
+PTR registrations. Previously the code took `addrs[0]` only and silently dropped all but
+the first; this was fixed and verified against the live test environment (v6res2-multiaddr
+reservation). Covered by the `ipv6_multiple_addresses` scenario.
 
 ### Global reservations — STATUS: UNTESTED | OPNsense: manual config only
 

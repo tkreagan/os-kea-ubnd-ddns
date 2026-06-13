@@ -39,18 +39,29 @@ class UnboundClient:
         return result
 
     def has_record(self, hostname: str, ip: str, rdtype: str = "A") -> bool:
+        """Check whether an exact-type record exists for hostname → ip.
+
+        Uses field-level comparison so "A" does not accidentally match "AAAA"
+        lines (the old substring check "A" in line would do that).
+        """
         data = self.list_local_data()
         target = hostname.rstrip(".")
+        rdtype_upper = rdtype.upper()
         for name, lines in data.items():
             if name.rstrip(".") != target:
                 continue
             for line in lines:
-                if rdtype.upper() in line.upper() and ip in line:
+                # Format: "name. TTL IN TYPE rdata"
+                parts = line.split()
+                if len(parts) >= 5 and parts[3] == rdtype_upper and ip in parts[4:]:
                     return True
         return False
 
     def has_ptr(self, ip: str, hostname: str) -> bool:
-        """Check whether an in-addr.arpa PTR record points to hostname."""
+        """Check whether an in-addr.arpa / ip6.arpa PTR record points to hostname.
+
+        Works for both IPv4 (in-addr.arpa) and IPv6 (full 32-nibble ip6.arpa).
+        """
         arpa = _ip_to_arpa(ip)
         if not arpa:
             return False
@@ -95,8 +106,13 @@ class UnboundClient:
 
 
 def _ip_to_arpa(ip: str) -> str | None:
-    """Convert an IPv4 address to its in-addr.arpa name."""
-    parts = ip.split(".")
-    if len(parts) != 4:
+    """Convert an IPv4 or IPv6 address to its reverse-DNS arpa name.
+
+    IPv4 → x.x.x.x.in-addr.arpa
+    IPv6 → full 32-nibble ip6.arpa
+    """
+    try:
+        import ipaddress
+        return str(ipaddress.ip_address(ip).reverse_pointer)
+    except ValueError:
         return None
-    return ".".join(reversed(parts)) + ".in-addr.arpa"

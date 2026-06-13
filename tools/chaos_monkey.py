@@ -44,6 +44,9 @@ import tools.scenarios.hostile_inputs       # noqa: F401
 import tools.scenarios.collisions           # noqa: F401
 import tools.scenarios.config_toggles       # noqa: F401
 import tools.scenarios.ddns_path            # noqa: F401
+import tools.scenarios.ipv6                 # noqa: F401
+import tools.scenarios.ptr_formats          # noqa: F401
+import tools.scenarios.ddns_ncr_verify      # noqa: F401
 
 REPO_ROOT = pathlib.Path(__file__).parents[1]
 

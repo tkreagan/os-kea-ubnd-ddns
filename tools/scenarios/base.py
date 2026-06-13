@@ -54,7 +54,9 @@ class ChaosContext:
         self.cfg = cfg
         self.events: list[dict] = []
         self._subnet_id: int | None = cfg.test_subnet_id
-        self._ip_counter: int = 200  # start allocating from .200
+        self._subnet6_id: int | None = None
+        self._ip_counter: int = 200   # start allocating from .200
+        self._v6_counter: int = 0x100  # start allocating from prefix::100
 
     @property
     def domain(self) -> str:
@@ -80,10 +82,32 @@ class ChaosContext:
         return ip
 
     def alloc_host(self, suffix: str = "") -> tuple[str, str]:
-        """Return (hostname, ip) for a new test entry."""
+        """Return (hostname, ipv4) for a new DHCPv4 test entry."""
         idx = self._ip_counter
         ip = self.alloc_ip()
         hostname = f"chaos-{idx:03d}{suffix}"
+        return hostname, ip
+
+    def subnet6_id(self) -> int:
+        """Return the DHCPv6 subnet-id, auto-discovering if not set."""
+        if self._subnet6_id is None:
+            discovered = self.kea.discover_subnet_id(service="dhcp6")
+            if discovered is None:
+                raise RuntimeError("Could not discover Kea dhcp6 subnet-id")
+            self._subnet6_id = discovered
+        return self._subnet6_id
+
+    def alloc_v6_addr(self, prefix: str = "fd00::") -> str:
+        """Allocate a unique test IPv6 address from prefix."""
+        addr = f"{prefix}{self._v6_counter:x}"
+        self._v6_counter += 1
+        return addr
+
+    def alloc_v6_host(self, suffix: str = "", prefix: str = "fd00::") -> tuple[str, str]:
+        """Return (hostname, ipv6) for a new DHCPv6 test entry."""
+        idx = self._v6_counter
+        ip = self.alloc_v6_addr(prefix)
+        hostname = f"chaos6-{idx:03x}{suffix}"
         return hostname, ip
 
     def event(self, etype: str, **kwargs: Any) -> None:
@@ -124,12 +148,17 @@ class ChaosContext:
         except Exception:
             return False
 
-    def reset_state(self) -> None:
+    def reset_state(self, v6: bool = False) -> None:
         """Wipe all injected leases + stale records, restore clean baseline."""
         try:
             self.kea.lease4_wipe()
         except Exception:
             pass
+        if v6:
+            try:
+                self.kea.lease6_wipe()
+            except Exception:
+                pass
         try:
             self.run_clean()
         except Exception:

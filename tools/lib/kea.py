@@ -141,8 +141,57 @@ class KeaClient:
         """Remove ALL leases from all subnets (or a specific one)."""
         if subnet_id is not None:
             return self.query("lease4-wipe", arguments={"subnet-id": subnet_id})
-        # No subnet-id → wipe all (Kea 2.x supports this)
         return self.query("lease4-wipe", arguments={})
+
+    # ------------------------------------------------------------------
+    # DHCPv6 lease operations
+    # ------------------------------------------------------------------
+
+    def lease6_add(self, ip: str, duid: str, hostname: str,
+                   valid_lft: int = 7200, subnet_id: int | None = None,
+                   lease_type: int = 0) -> dict:
+        """Add a DHCPv6 IA_NA lease (lease_type=0). Use for test injection."""
+        args: dict[str, Any] = {
+            "ip-address": ip,
+            "duid": duid,
+            "hostname": hostname,
+            "valid-lft": valid_lft,
+            "type": "IA_NA",
+        }
+        if subnet_id is not None:
+            args["subnet-id"] = subnet_id
+        return self.query("lease6-add", service="dhcp6", arguments=args)
+
+    def lease6_del(self, ip: str) -> dict:
+        return self.query("lease6-del", service="dhcp6",
+                          arguments={"ip-address": ip, "type": "IA_NA"})
+
+    def lease6_get(self, ip: str) -> dict | None:
+        try:
+            return self.query("lease6-get", service="dhcp6",
+                              arguments={"ip-address": ip,
+                                         "identifier-type": "address"})
+        except KeaError as exc:
+            if "not found" in str(exc).lower():
+                return None
+            raise
+
+    def lease6_get_all(self) -> list[dict]:
+        try:
+            result = self.query("lease6-get-all", service="dhcp6")
+        except KeaError as exc:
+            if "empty" in str(exc).lower() or "result=3" in str(exc).lower():
+                return []
+            raise
+        if isinstance(result, dict):
+            return result.get("leases", [])
+        return result if isinstance(result, list) else []
+
+    def lease6_wipe(self, subnet_id: int | None = None) -> dict:
+        if subnet_id is not None:
+            return self.query("lease6-wipe", service="dhcp6",
+                              arguments={"subnet-id": subnet_id})
+        return self.query("lease6-wipe", service="dhcp6", arguments={})
 
     # ------------------------------------------------------------------
     # Reservation operations

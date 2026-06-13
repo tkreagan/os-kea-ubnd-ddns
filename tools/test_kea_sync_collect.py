@@ -166,3 +166,310 @@ def test_ptr_emitted_and_ip_guarded():
         records, policy="last_wins", synth=True,
         host_entries={"192.168.1.50": ["..."]})
     assert not any("IN PTR" in line for line in to_add2)
+
+
+# ── private helper aliases ────────────────────────────────────────────────────
+# These expose keaunbound_sync internals for direct unit testing without going
+# through the full sync pipeline.
+import ipaddress as _ia
+
+_normalize_raw_lease = _lib._normalize_raw_lease
+_build_suffix_map = _lib._build_suffix_map
+find_stale_records = _lib.find_stale_records
+_arpa_to_ip = _lib._arpa_to_ip
+
+
+# ── _arpa_to_ip round-trip ────────────────────────────────────────────────────
+
+def test_arpa_to_ip_ipv4_basic():
+    assert _arpa_to_ip("1.1.168.192.in-addr.arpa") == "192.168.1.1"
+
+
+def test_arpa_to_ip_ipv4_trailing_dot():
+    assert _arpa_to_ip("1.1.168.192.in-addr.arpa.") == "192.168.1.1"
+
+
+def test_arpa_to_ip_ipv6_loopback():
+    ptr = "1.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.ip6.arpa"
+    assert _arpa_to_ip(ptr) == "::1"
+
+
+def test_arpa_to_ip_ipv6_ula_roundtrip():
+    ip = "fd00::1ab"
+    ptr = _ia.ip_address(ip).reverse_pointer
+    assert _arpa_to_ip(ptr) == ip
+
+
+def test_arpa_to_ip_ipv6_full_address():
+    # Verify a non-trivial address with many non-zero nibbles.
+    ip = "2001:db8::1"
+    ptr = _ia.ip_address(ip).reverse_pointer
+    assert _arpa_to_ip(ptr) == ip
+
+
+def test_arpa_to_ip_invalid_returns_empty():
+    assert _arpa_to_ip("not.a.ptr.name") == ""
+    assert _arpa_to_ip("1.2.3.in-addr.arpa") == ""   # only 3 octets
+    assert _arpa_to_ip("") == ""
+
+
+# ── _normalize_raw_lease: DHCPv6 lease-type filtering ────────────────────────
+
+_NOW = 1_700_000_000  # fixed epoch well before any expiry used in tests
+
+
+def _v6_lease(**overrides):
+    """Minimal valid DHCPv6 IA_NA lease, suitable for _normalize_raw_lease."""
+    base = {
+        "state": 0,
+        "type": 0,              # IA_NA — the only type that belongs in DNS
+        "subnet-id": 1,
+        "ip-address": "fd00::1",
+        "hostname": "host.example.com",
+        "valid-lft": 3600,
+        "expire": _NOW + 3600,
+    }
+    base.update(overrides)
+    return base
+
+
+def test_normalize_ia_na_passes():
+    result = _normalize_raw_lease(
+        _v6_lease(), is_v4=False,
+        suffix_by_subnet={1: "example.com"}, default_suffix="example.com",
+        now=_NOW)
+    assert result is not None
+    assert result["ipv6"] == "fd00::1"
+    assert result["hostname"] == "host.example.com"
+
+
+def test_normalize_ia_ta_blocked():
+    # IA_TA (type=1) — temporary address, not stable enough for DNS
+    result = _normalize_raw_lease(
+        _v6_lease(type=1), is_v4=False,
+        suffix_by_subnet={}, default_suffix="example.com",
+        now=_NOW)
+    assert result is None
+
+
+def test_normalize_ia_pd_blocked():
+    # IA_PD (type=2) — delegated prefix, ip-address is a network, not a host
+    result = _normalize_raw_lease(
+        _v6_lease(type=2, **{"ip-address": "fd01::"}), is_v4=False,
+        suffix_by_subnet={}, default_suffix="example.com",
+        now=_NOW)
+    assert result is None
+
+
+# ── _normalize_raw_lease: ddns-send-updates subnet filtering ─────────────────
+
+def test_normalize_ddns_disabled_subnet_blocked():
+    # Subnet 1 is in the disabled set — lease must be skipped
+    result = _normalize_raw_lease(
+        _v6_lease(), is_v4=False,
+        suffix_by_subnet={1: "example.com"}, default_suffix="example.com",
+        now=_NOW, ddns_disabled_subnets={1})
+    assert result is None
+
+
+def test_normalize_ddns_enabled_subnet_not_blocked():
+    # Subnet 2 is NOT in the disabled set — lease must pass through
+    result = _normalize_raw_lease(
+        _v6_lease(**{"subnet-id": 2}), is_v4=False,
+        suffix_by_subnet={1: "example.com", 2: "example.com"},
+        default_suffix="example.com",
+        now=_NOW, ddns_disabled_subnets={1})
+    assert result is not None
+
+
+# ── _build_suffix_map: ddns-send-updates inheritance ─────────────────────────
+
+def test_build_suffix_map_global_disabled():
+    dhcp_config = {
+        "ddns-send-updates": False,
+        "subnet6": [{"id": 1, "subnet": "fd00::/64"}],
+    }
+    _, _, disabled = _build_suffix_map("dhcp6", dhcp_config)
+    assert 1 in disabled
+
+
+def test_build_suffix_map_global_enabled_subnet_not_disabled():
+    dhcp_config = {
+        "ddns-send-updates": True,
+        "subnet6": [{"id": 1, "subnet": "fd00::/64"}],
+    }
+    _, _, disabled = _build_suffix_map("dhcp6", dhcp_config)
+    assert 1 not in disabled
+
+
+def test_build_suffix_map_subnet_overrides_global_false():
+    # Global says false, subnet explicitly says true — subnet wins.
+    dhcp_config = {
+        "ddns-send-updates": False,
+        "subnet6": [{"id": 1, "subnet": "fd00::/64", "ddns-send-updates": True}],
+    }
+    _, _, disabled = _build_suffix_map("dhcp6", dhcp_config)
+    assert 1 not in disabled
+
+
+def test_build_suffix_map_subnet_overrides_global_true_to_false():
+    # Global says true, subnet explicitly says false — subnet wins.
+    dhcp_config = {
+        "ddns-send-updates": True,
+        "subnet6": [{"id": 1, "subnet": "fd00::/64", "ddns-send-updates": False}],
+    }
+    _, _, disabled = _build_suffix_map("dhcp6", dhcp_config)
+    assert 1 in disabled
+
+
+def test_build_suffix_map_shared_network_inherits_false():
+    # Shared-network says false; child subnet has no override — inherits disabled.
+    dhcp_config = {
+        "ddns-send-updates": True,          # global is true
+        "shared-networks": [
+            {
+                "name": "net1",
+                "ddns-send-updates": False,  # net overrides to false
+                "subnet6": [{"id": 2, "subnet": "fd00::/64"}],  # no override
+            }
+        ],
+        "subnet6": [],
+    }
+    _, _, disabled = _build_suffix_map("dhcp6", dhcp_config)
+    assert 2 in disabled
+
+
+def test_build_suffix_map_shared_network_subnet_overrides_back():
+    # Shared-network says false; child subnet overrides back to true.
+    dhcp_config = {
+        "ddns-send-updates": True,
+        "shared-networks": [
+            {
+                "name": "net1",
+                "ddns-send-updates": False,
+                "subnet6": [{"id": 3, "subnet": "fd00:1::/64",
+                             "ddns-send-updates": True}],
+            }
+        ],
+        "subnet6": [],
+    }
+    _, _, disabled = _build_suffix_map("dhcp6", dhcp_config)
+    assert 3 not in disabled
+
+
+# ── find_stale_records: dual-stack / per-IP staleness ────────────────────────
+
+def _fwd_line(name, ip, rtype, ttl=120):
+    return f"{name} {ttl} IN {rtype} {ip}"
+
+
+def _ptr_line(ptr_name, target, ttl=120):
+    return f"{ptr_name} {ttl} IN PTR {target}."
+
+
+def _v6_ptr(ip):
+    return _ia.ip_address(ip).reverse_pointer
+
+
+def test_find_stale_records_stale_aaaa_valid_a():
+    """
+    Dual-stack host: A is in Kea, AAAA is not.
+    Only the (name, ipv6) pair should be stale.
+    The valid A's PTR is preserved; the stale AAAA's PTR is orphaned.
+    """
+    host = "host.example.com"
+    ipv4 = "192.168.1.50"
+    ipv6_stale = "fd00::50"
+    ipv4_ptr = _ia.ip_address(ipv4).reverse_pointer
+    ipv6_ptr = _v6_ptr(ipv6_stale)
+
+    unbound_data = {
+        host: [_fwd_line(host, ipv4, "A"), _fwd_line(host, ipv6_stale, "AAAA")],
+        ipv4_ptr: [_ptr_line(ipv4_ptr, host)],
+        ipv6_ptr: [_ptr_line(ipv6_ptr, host)],
+    }
+    kea_pairs = {(host, ipv4)}  # only the A is backed by Kea
+
+    stale_pairs, orphaned_ptrs = find_stale_records(unbound_data, kea_pairs, {})
+
+    assert (host, ipv6_stale) in stale_pairs, "stale AAAA must be flagged"
+    assert (host, ipv4) not in stale_pairs, "valid A must not be flagged"
+    assert len(stale_pairs) == 1
+
+    assert ipv6_ptr in orphaned_ptrs, "PTR for stale AAAA must be orphaned"
+    assert ipv4_ptr not in orphaned_ptrs, "PTR for valid A must be preserved"
+
+
+def test_find_stale_records_stale_a_valid_aaaa():
+    """Mirror case: A is stale, AAAA is valid."""
+    host = "host.example.com"
+    ipv4_stale = "192.168.1.51"
+    ipv6 = "fd00::51"
+    ipv4_ptr = _ia.ip_address(ipv4_stale).reverse_pointer
+    ipv6_ptr = _v6_ptr(ipv6)
+
+    unbound_data = {
+        host: [_fwd_line(host, ipv4_stale, "A"), _fwd_line(host, ipv6, "AAAA")],
+        ipv4_ptr: [_ptr_line(ipv4_ptr, host)],
+        ipv6_ptr: [_ptr_line(ipv6_ptr, host)],
+    }
+    kea_pairs = {(host, ipv6)}
+
+    stale_pairs, orphaned_ptrs = find_stale_records(unbound_data, kea_pairs, {})
+
+    assert (host, ipv4_stale) in stale_pairs
+    assert (host, ipv6) not in stale_pairs
+    assert ipv4_ptr in orphaned_ptrs
+    assert ipv6_ptr not in orphaned_ptrs
+
+
+def test_find_stale_records_fully_stale_dual_stack():
+    """Both A and AAAA are stale — both pairs and both PTRs flagged."""
+    host = "host.example.com"
+    ipv4 = "192.168.1.52"
+    ipv6 = "fd00::52"
+    ipv4_ptr = _ia.ip_address(ipv4).reverse_pointer
+    ipv6_ptr = _v6_ptr(ipv6)
+
+    unbound_data = {
+        host: [_fwd_line(host, ipv4, "A"), _fwd_line(host, ipv6, "AAAA")],
+        ipv4_ptr: [_ptr_line(ipv4_ptr, host)],
+        ipv6_ptr: [_ptr_line(ipv6_ptr, host)],
+    }
+    kea_pairs = set()
+
+    stale_pairs, orphaned_ptrs = find_stale_records(unbound_data, kea_pairs, {})
+
+    assert stale_pairs == {(host, ipv4), (host, ipv6)}
+    assert orphaned_ptrs == {ipv4_ptr, ipv6_ptr}
+
+
+def test_find_stale_records_host_entries_guard_dual_stack():
+    """OPNsense-managed names are never considered stale regardless of family."""
+    host = "static.example.com"
+    ipv4 = "192.168.1.10"
+    ipv6 = "fd00::10"
+
+    unbound_data = {host: [_fwd_line(host, ipv4, "A"), _fwd_line(host, ipv6, "AAAA")]}
+    kea_pairs = set()                           # nothing in Kea
+    host_entries = {host: ["..."]}              # OPNsense owns this name
+
+    stale_pairs, _ = find_stale_records(unbound_data, kea_pairs, host_entries)
+    assert len(stale_pairs) == 0
+
+
+def test_find_stale_records_single_ip_name():
+    """Single-family host: only A, stale. Verify stale_pairs and orphaned PTR."""
+    host = "old.example.com"
+    ip = "192.168.1.99"
+    ptr = _ia.ip_address(ip).reverse_pointer
+
+    unbound_data = {
+        host: [_fwd_line(host, ip, "A")],
+        ptr: [_ptr_line(ptr, host)],
+    }
+    kea_pairs = set()
+
+    stale_pairs, orphaned_ptrs = find_stale_records(unbound_data, kea_pairs, {})
+    assert stale_pairs == {(host, ip)}
+    assert ptr in orphaned_ptrs
