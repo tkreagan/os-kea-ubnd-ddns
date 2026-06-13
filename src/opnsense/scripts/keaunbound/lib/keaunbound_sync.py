@@ -224,7 +224,7 @@ def get_sm_config():
 
 
 # Path to kea-dhcp-ddns.conf — read directly because D2 has no control socket
-# in the OPNsense provisioning (same approach as KcaconfigController.php).
+# in the OPNsense provisioning (same approach as ConfigCheckController.php).
 D2_CONF = "/usr/local/etc/kea/kea-dhcp-ddns.conf"
 
 

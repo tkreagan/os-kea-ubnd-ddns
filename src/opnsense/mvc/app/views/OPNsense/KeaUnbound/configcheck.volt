@@ -52,7 +52,7 @@ function loadKeaConfig() {
     $("#configError").hide();
 
     $.ajax({
-        url: '/api/keaunbound/kcaconfig/check',
+        url: '/api/keaunbound/configcheck/check',
         type: 'GET',
         dataType: 'json',
         timeout: 10000,
@@ -172,6 +172,71 @@ function ddnsConfigTable(ok, wrong, tsig, no_ddns) {
            '</table></div></div>';
 }
 
+// ── Unbound DNS Configuration section ────────────────────────────────────────
+function unboundSection(data) {
+    const checks = data.unbound_checks || [];
+    const warnings = checks.filter(c => c.level === 'warning');
+    const notices  = checks.filter(c => c.level === 'notice');
+
+    let body = '';
+
+    if (checks.length === 0) {
+        body += '<div style="color:#3c763d;"><i class="fa fa-check-circle"></i> No Unbound configuration issues detected.</div>';
+    } else {
+        checks.forEach(function(c) {
+            const isWarn   = c.level === 'warning';
+            const alertCls = isWarn ? 'alert-warning' : 'alert-info';
+            const icon     = isWarn ? 'fa-exclamation-triangle' : 'fa-info-circle';
+            let fixBtn = '';
+            if (c.fixable && c.id === 'regdhcpstatic') {
+                fixBtn = ' <button class="btn btn-xs btn-default" id="btn_fix_regdhcpstatic" style="margin-left:8px;">' +
+                         '<i class="fa fa-wrench"></i> Disable &amp; Restart Unbound</button>';
+            }
+            body += '<div class="alert ' + alertCls + '" style="margin-bottom:8px; padding:8px 12px;">' +
+                    '<strong><i class="fa ' + icon + '"></i> ' + escapeHtml(c.heading) + ':</strong> ' +
+                    escapeHtml(c.message) + fixBtn + '</div>';
+        });
+    }
+
+    const settingsLink  = '<a href="/ui/unbound/general" target="_blank">General Settings</a>';
+    const overridesLink = '<a href="/ui/unbound/overrides" target="_blank">Overrides</a>';
+    body += '<div style="margin-top:8px; font-size:0.88em; color:#777;">' +
+            'Unbound DNS: ' + settingsLink + ' &nbsp;&middot;&nbsp; ' + overridesLink + '</div>';
+
+    return '<div class="panel panel-default" style="margin-bottom:12px;">' +
+           '<div class="panel-heading" style="padding:8px 12px;">' +
+           '<h4 class="panel-title" style="font-size:1em; font-weight:600;">Unbound DNS Configuration</h4>' +
+           '</div><div class="panel-body" style="padding:10px 14px;">' +
+           body + '</div></div>';
+}
+
+function bindUnboundButtons() {
+    $("#btn_fix_regdhcpstatic").off('click').on('click', function() {
+        const $btn = $(this);
+        $btn.prop('disabled', true).html('<i class="fa fa-spinner fa-spin"></i> Applying…');
+        $.ajax({
+            url: '/api/keaunbound/configcheck/disable_regdhcpstatic',
+            type: 'POST',
+            contentType: 'application/json',
+            dataType: 'json',
+            data: JSON.stringify({}),
+            timeout: 30000,
+            success: function(resp) {
+                if (resp.status === 'ok') {
+                    loadKeaConfig();
+                } else {
+                    $btn.prop('disabled', false).html('<i class="fa fa-wrench"></i> Disable &amp; Restart Unbound');
+                    alert('Error: ' + (resp.message || 'unknown error'));
+                }
+            },
+            error: function() {
+                $btn.prop('disabled', false).html('<i class="fa fa-wrench"></i> Disable &amp; Restart Unbound');
+                alert('Request failed.');
+            }
+        });
+    });
+}
+
 function renderKeaConfig(data) {
     window._kuListenerPort = data.our_listener ? data.our_listener.port : 53535;
     const v4  = data.ipv4_subnets || [];
@@ -187,6 +252,9 @@ function renderKeaConfig(data) {
     const problems = total - ok;
 
     let html = '';
+
+    // ── Unbound DNS Configuration ─────────────────────────────────────────────
+    html += unboundSection(data);
 
     // ── Kea & Listener Status ─────────────────────────────────────────────────
     html += statusSection(data);
@@ -233,7 +301,8 @@ function renderKeaConfig(data) {
 
     $("#configContent").html(html);
 
-    // Wire push actions (content is rebuilt each refresh, so bind every time).
+    // Wire actions (content is rebuilt each refresh, so bind every time).
+    bindUnboundButtons();
     $("#btn_push_all").off('click').on('click', openPushAllModal);
     $(".ku-push-subnet").off('click').on('click', function() {
         openPushSubnetModal($(this));
@@ -330,7 +399,7 @@ function doPush(payload, $btn, $result, modalSel) {
     $btn.prop('disabled', true).html('<i class="fa fa-spinner fa-spin"></i> Applying…');
     $result.empty();
     $.ajax({
-        url: '/api/keaunbound/kcaconfig/push_settings',
+        url: '/api/keaunbound/configcheck/push_settings',
         type: 'POST',
         contentType: 'application/json',
         dataType: 'json',

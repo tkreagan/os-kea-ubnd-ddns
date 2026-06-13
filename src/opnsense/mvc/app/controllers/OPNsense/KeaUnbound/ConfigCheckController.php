@@ -29,10 +29,10 @@
 
 namespace OPNsense\KeaUnbound;
 
-class KcaconfigController extends \OPNsense\Base\IndexController
+class ConfigCheckController extends \OPNsense\Base\IndexController
 {
     public function indexAction()
     {
-        $this->view->pick('OPNsense/KeaUnbound/kcaconfig');
+        $this->view->pick('OPNsense/KeaUnbound/configcheck');
     }
 }

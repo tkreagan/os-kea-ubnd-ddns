@@ -88,11 +88,11 @@ def test_api_audit_returns_json(api, test_log):
         assert key in result, f"Missing key in audit response: {key}"
 
 
-def test_api_kcaconfig_check(api, test_log):
-    """Kea Config Check tab: kcaconfig/check must return config summary."""
-    result = api.api_get("kcaconfig/check")
+def test_api_configcheck_check(api, test_log):
+    """Config Check tab: configcheck/check must return config summary."""
+    result = api.api_get("configcheck/check")
     test_log("observed", {"keys": list(result.keys())})
-    # Exact fields depend on KcaconfigController implementation;
+    # Exact fields depend on ConfigCheckController implementation;
     # at minimum it should not 404 or raise
     assert isinstance(result, dict)
 
@@ -112,7 +112,7 @@ def _find_kea_subnet(config_get_args, cidr, key="Dhcp4", subnet_key="subnet4"):
 
 def _pick_pushable_subnet(api):
     """Return (subnet_entry, listener_port) for a dhcp4 subnet with a config UUID."""
-    check = api.api_get("kcaconfig/check")
+    check = api.api_get("configcheck/check")
     port = (check.get("our_listener") or {}).get("port", 53535)
     subs = [s for s in check.get("ipv4_subnets", []) if s.get("opnsense_uuid")]
     if not subs:
@@ -134,7 +134,7 @@ class TestPushSettings:
         sub, port = _pick_pushable_subnet(api)
         cidr = sub["subnet"]
 
-        resp = api.api_post("kcaconfig/push_settings", {
+        resp = api.api_post("configcheck/push_settings", {
             "scope": "subnet",
             "service": sub["service"],
             "uuid": sub["opnsense_uuid"],
@@ -161,7 +161,7 @@ class TestPushSettings:
     def test_push_d2_domain_targets_listener(self, api, ssh, test_log):
         """After a push, kea-dhcp-ddns.conf points the subnet's zone at our listener."""
         sub, port = _pick_pushable_subnet(api)
-        resp = api.api_post("kcaconfig/push_settings", {
+        resp = api.api_post("configcheck/push_settings", {
             "scope": "subnet",
             "service": sub["service"],
             "uuid": sub["opnsense_uuid"],
@@ -181,7 +181,7 @@ class TestPushSettings:
 
     def test_push_all_writes_subnets(self, api, test_log):
         """scope=all applies to every subnet and reports them in changed[]."""
-        resp = api.api_post("kcaconfig/push_settings", {"scope": "all"})
+        resp = api.api_post("configcheck/push_settings", {"scope": "all"})
         _skip_if_d2_disabled(resp)
         test_log("push_all_response", resp)
         assert resp.get("status") == "ok", resp
@@ -189,13 +189,13 @@ class TestPushSettings:
 
     def test_push_rejects_bad_scope(self, api, test_log):
         """An unknown scope is a clean error, not a 500 (no Kea restart)."""
-        resp = api.api_post("kcaconfig/push_settings", {"scope": "bogus"})
+        resp = api.api_post("configcheck/push_settings", {"scope": "bogus"})
         test_log("response", resp)
         assert resp.get("status") == "error", resp
 
     def test_push_rejects_unknown_uuid(self, api, test_log):
         """A non-existent subnet UUID returns 'not found' without touching config."""
-        resp = api.api_post("kcaconfig/push_settings", {
+        resp = api.api_post("configcheck/push_settings", {
             "scope": "subnet", "service": "dhcp4",
             "uuid": "00000000-0000-0000-0000-000000000000",
         })

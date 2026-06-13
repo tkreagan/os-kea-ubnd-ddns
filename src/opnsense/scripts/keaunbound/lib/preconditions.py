@@ -11,7 +11,7 @@ the UI can explain why instead of crash-looping daemon(8).
 The DDNS-enabled resolution is INHERITANCE-AWARE (spike V6). Kea's
 `ddns-send-updates` can be set globally and inherited by subnets, or left absent
 to take Kea's default of true (when the global `dhcp-ddns.enable-updates` master
-is on). KcaconfigController's per-subnet `isset(... ) && === true` check is too
+is on). ConfigCheckController's per-subnet `isset(... ) && === true` check is too
 strict for a startup gate -- it would false-refuse a valid global-DDNS config --
 so it stays a Config-Check advisory while the gate uses the resolution here.
 

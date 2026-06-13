@@ -35,6 +35,7 @@ use OPNsense\Core\Config;
 use OPNsense\Kea\KeaDhcpv4;
 use OPNsense\Kea\KeaDhcpv6;
 use OPNsense\Kea\KeaDdns;
+use OPNsense\Unbound\Unbound as UnboundModel;
 
 /**
  * Check Kea DHCP subnet DDNS configuration against the kea-unbound-ddns plugin.
@@ -45,9 +46,9 @@ use OPNsense\Kea\KeaDdns;
  *   tsig_mismatch - Right IP:port, but TSIG presence/key-name differs
  *   ok            - Correctly points at our listener with consistent TSIG
  *
- * GET /api/keaunbound/kcaconfig/check
+ * GET /api/keaunbound/configcheck/check
  */
-class KcaconfigController extends ApiControllerBase
+class ConfigCheckController extends ApiControllerBase
 {
     private $config_file     = '/conf/config.xml';
     private $ddns_conf_file  = '/usr/local/etc/kea/kea-dhcp-ddns.conf';
@@ -974,7 +975,7 @@ class KcaconfigController extends ApiControllerBase
     }
 
     /**
-     * POST /api/keaunbound/kcaconfig/push_settings
+     * POST /api/keaunbound/configcheck/push_settings
      *
      * Write the recommended DDNS settings into config.xml (via the core Kea
      * models) for one subnet (scope=subnet) or every subnet (scope=all), then
@@ -1175,6 +1176,102 @@ class KcaconfigController extends ApiControllerBase
         ]];
     }
 
+    // ── Unbound DNS checks ────────────────────────────────────────────────────
+
+    /**
+     * Read Unbound settings from the model and return a list of check results.
+     * Each item: ['id', 'level' (warning|notice), 'heading', 'message', 'fixable'].
+     */
+    private function getUnboundChecks()
+    {
+        $checks = [];
+        try {
+            $unbound = new UnboundModel();
+        } catch (\Exception $e) {
+            return $checks;
+        }
+
+        if ((string)$unbound->general->regdhcpstatic === '1') {
+            $checks[] = [
+                'id'      => 'regdhcpstatic',
+                'level'   => 'warning',
+                'heading' => 'Register DHCP Static Mappings is enabled',
+                'message' => 'Unbound\'s built-in "Register DHCP Static Mappings" is also on. '
+                           . 'Names registered there are owned by Unbound — this plugin skips them '
+                           . 'rather than writing duplicates, so those hostnames are managed by '
+                           . 'Unbound, not here. Disable it to let this plugin own all Kea '
+                           . 'static reservation DNS entries.',
+                'fixable' => true,
+            ];
+        }
+
+        if ((string)$unbound->general->noarecords === '1') {
+            $checks[] = [
+                'id'      => 'noarecords',
+                'level'   => 'warning',
+                'heading' => 'AAAA-only mode is enabled',
+                'message' => 'Unbound is configured to strip all A records from every response. '
+                           . 'IPv4 DHCP hostnames registered by this plugin will be written to '
+                           . 'Unbound\'s local store but will never be returned to clients.',
+                'fixable' => false,
+            ];
+        }
+
+        if ((string)$unbound->general->local_zone_type === 'redirect') {
+            $checks[] = [
+                'id'      => 'local_zone_type',
+                'level'   => 'warning',
+                'heading' => 'Local Zone Type is set to "redirect"',
+                'message' => 'Redirect mode makes Unbound return a single address for every name '
+                           . 'in the local zone. Per-name records registered by this plugin are '
+                           . 'written correctly but will be shadowed by the redirect and never '
+                           . 'returned to clients.',
+                'fixable' => false,
+            ];
+        }
+
+        if ((string)$unbound->forwarding->enabled === '1') {
+            $checks[] = [
+                'id'      => 'forwarding',
+                'level'   => 'notice',
+                'heading' => 'Query Forwarding is enabled',
+                'message' => 'Names registered by this plugin are served directly from Unbound\'s '
+                           . 'local store, unaffected by forwarding. Names not yet registered '
+                           . '(e.g. a lease not yet synced) will be forwarded to the upstream '
+                           . 'resolver rather than returning NXDOMAIN.',
+                'fixable' => false,
+            ];
+        }
+
+        return $checks;
+    }
+
+    /**
+     * POST /api/keaunbound/configcheck/disable_regdhcpstatic
+     *
+     * Turn off Unbound's "Register DHCP Static Mappings" and restart Unbound.
+     */
+    public function disableRegdhcpstaticAction()
+    {
+        if (!$this->request->isPost()) {
+            return ['status' => 'error', 'message' => 'POST required'];
+        }
+        try {
+            $unbound = new UnboundModel();
+        } catch (\Exception $e) {
+            return ['status' => 'error', 'message' => 'Could not load Unbound model: ' . $e->getMessage()];
+        }
+        $unbound->general->regdhcpstatic = '0';
+        $msgs = $unbound->performValidation();
+        foreach ($msgs as $msg) {
+            return ['status' => 'error', 'message' => $msg->getField() . ': ' . $msg->getMessage()];
+        }
+        $unbound->serializeToConfig();
+        Config::getInstance()->save();
+        (new Backend())->configdRun('unbound restart');
+        return ['status' => 'ok'];
+    }
+
     // ── Public action ─────────────────────────────────────────────────────────
 
     public function checkAction()
@@ -1207,6 +1304,7 @@ class KcaconfigController extends ApiControllerBase
             'ipv4_subnets'      => [],
             'ipv6_subnets'      => [],
             'summary_advisories' => [],
+            'unbound_checks'    => $this->getUnboundChecks(),
         ];
 
         // HA advisory: config.xml-based, emitted once regardless of daemon reachability.

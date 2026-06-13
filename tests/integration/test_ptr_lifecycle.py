@@ -650,13 +650,13 @@ class TestSynthesizePtrFlag:
         """
         F-adv: Config Check API must return F4/F5 advisories when appropriate.
         """
-        result = api.api_get("kcaconfig/check")
+        result = api.api_get("configcheck/check")
         d2_advisories = result.get("d2_advisories", [])
 
         test_log("observed", {"d2_advisories": d2_advisories})
 
         # This test is informational unless advisories are implemented
-        # (KcaconfigController.php F4/F5 advisory methods not yet deployed)
+        # (ConfigCheckController.php F4/F5 advisory methods not yet deployed)
         # For now assert the response is well-formed
         assert isinstance(d2_advisories, list), \
             "d2_advisories must be a list in Config Check response"
