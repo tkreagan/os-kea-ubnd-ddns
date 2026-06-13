@@ -581,25 +581,34 @@ def is_sane_name(name: str, logger: Optional[logging.Logger] = None) -> bool:
     """
     Return True if name is a plausible hostname we should register.
 
-    Rejects empty strings, the DNS root, reserved names, names whose first
-    label contains invalid characters, and all-numeric names (IPs mistaken for
-    hostnames). Mirrors the daemon's check so the sync path applies the same
-    hygiene as the live listener.
+    Rejects empty strings, the DNS root, reserved names, names with any label
+    containing invalid characters (RFC 1123), all-numeric names (IPs mistaken
+    for hostnames), and names exceeding the 253-char DNS limit. Every label is
+    validated, not just the first — unbound-control accepts invalid middle
+    labels without error, so this is the sole guard against garbage entering
+    the local zone. Mirrors the daemon's check so the sync path applies the
+    same hygiene as the live listener.
     """
     if not name or name in _NONSENSE_NAMES:
         if logger:
             logger.warning("Rejecting nonsense name: %r", name)
         return False
 
-    first_label = name.split(".")[0]
-    if not first_label or not _LABEL_RE.match(first_label):
-        if logger:
-            logger.warning("Rejecting name with invalid first label: %r", name)
-        return False
+    labels = [l for l in name.split(".") if l]  # strip empty trailing label
+    for label in labels:
+        if not _LABEL_RE.match(label):
+            if logger:
+                logger.warning("Rejecting name with invalid label %r in: %r", label, name)
+            return False
 
-    if all(part.isdigit() for part in name.split(".")):
+    if all(part.isdigit() for part in labels):
         if logger:
             logger.warning("Rejecting all-numeric name (looks like an IP): %r", name)
+        return False
+
+    if len(name.rstrip(".")) > 253:
+        if logger:
+            logger.warning("Rejecting name exceeding 253-char limit: %r", name)
         return False
 
     return True

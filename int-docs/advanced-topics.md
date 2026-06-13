@@ -219,6 +219,29 @@ on the plugin. The ones that do matter:
   sync path uses `max(1, lease["expires"] - now)` (remaining lifetime) instead.
   After any reconcile, the sync-computed TTL overwrites the NCR TTL.
 
+**How Unbound handles local-data TTLs (by design):** Unbound serves `local-data`
+records as authoritative zone data — the `aa` (Authoritative Answer) flag is set
+in every response. Authoritative DNS servers return their configured TTL on every
+query; they do not decrement it as time passes. This is confirmed by observation:
+`unbound-control list_local_data` returns the same TTL value 5 seconds, 30
+seconds, or 10 minutes after a record was added.
+
+This has two consequences worth knowing:
+
+1. **TTL countdown happens in DNS resolvers and clients, not in Unbound.** A
+   caching resolver querying Unbound will cache the record and decrement its copy.
+   Unbound itself always returns the full configured value. This is correct and
+   standard for authoritative servers.
+
+2. **Dual-stack sibling preservation on live DELETE does not inflate TTLs.**
+   When the daemon's live path receives a DELETE for one address family, it reads
+   the surviving sibling's TTL from `list_local_data`, removes the name entirely
+   (Unbound has no per-RR remove), then re-adds the sibling with the same TTL. A
+   concern might be that this "resets" a TTL that was counting down. It does not —
+   Unbound was already serving the full static TTL to every querier, so the
+   re-add produces identical behaviour. The next scheduled reconcile will
+   overwrite the TTL with the remaining lease lifetime anyway.
+
 ### Conflict Resolution
 
 - **`ddns-use-conflict-resolution`**: Kea D2 may include DHCID prerequisites in
@@ -292,3 +315,44 @@ as each client renews, cleaning up automatically within one lease period.
 - **Multiple `ip-addresses` in DHCPv6 reservations:** all addresses are synced
   (one AAAA + PTR per address). The collision policy applies per-address within
   the same family. Covered by the `ipv6_multiple_addresses` scenario.
+
+---
+
+## Config Check Accuracy in Manual Configuration Mode
+
+**What "manual config mode" means:** when `//OPNsense/Kea/dhcp{4,6}/general/manual_config`
+is set, the OPNsense Kea plugin stops generating `kea-dhcp4.conf` / `kea-dhcp6.conf`.
+The operator writes and maintains the file directly. The Config Check tab still
+queries Kea via `config-get` and reads whatever is in the running config, but
+its subnet analysis assumes OPNsense-managed config conventions.
+
+**The specific known gap:** `classifySubnet()` in `ConfigCheckController.php`
+checks `ddns-send-updates` at the subnet level only. If a hand-edited config
+relies on the Kea global `ddns-send-updates: true` with no per-subnet override,
+every subnet will be mis-classified as `no_ddns` in the Config Check UI.
+
+**Why this is not fixed in the PHP:** OPNsense's Kea plugin always writes
+`ddns-send-updates` at the subnet level — confirmed by inspecting the generated
+`kea-dhcp4.conf`. The inheritance gap is therefore unreachable through any
+OPNsense-managed config. Fixing the PHP to walk the global→network→subnet
+inheritance chain would add complexity to handle a case that only arises when the
+user has already opted out of OPNsense config management.
+
+**Why global inheritance is not the only hazard:** in manual config mode the
+Config Check may also misread shared-network topologies, non-standard suffix
+structures, or any other config convention that differs from what OPNsense
+generates. The gap in `ddns-send-updates` inheritance is the only *known* specific
+error; others may exist.
+
+**How it's surfaced to the user:** the Config Check UI shows a yellow banner
+whenever manual config mode is active for any Kea service, warning that results
+may be inaccurate and directing the operator to verify DDNS registration
+independently. This is implemented via `describeConnection()` returning
+`manual_config: true` in `kea_control`, which the volt template checks.
+
+**If you need to extend Config Check for manual configs:** implement a full
+`ddns-send-updates` inheritance walk in `classifySubnet()` — add `$global_send`
+as a parameter (already available in `extractSubnets`) and change the check from
+`$subnet['ddns-send-updates'] === true` to resolving the effective value through
+global → shared-network → subnet, the same inheritance order the Python sync path
+uses (`_build_suffix_map` in `keaunbound_sync.py`).

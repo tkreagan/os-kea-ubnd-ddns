@@ -224,12 +224,16 @@ def is_sane_name(name: str, logger: logging.Logger) -> bool:
     if not name or name in _NONSENSE_NAMES:
         logger.warning("Rejecting nonsense name: %r", name)
         return False
-    first_label = name.split(".")[0]
-    if not first_label or not _LABEL_RE.match(first_label):
-        logger.warning("Rejecting name with invalid first label: %r", name)
-        return False
-    if all(part.isdigit() for part in name.split(".")):
+    labels = [l for l in name.split(".") if l]  # strip empty trailing label
+    for label in labels:
+        if not _LABEL_RE.match(label):
+            logger.warning("Rejecting name with invalid label %r in: %r", label, name)
+            return False
+    if all(part.isdigit() for part in labels):
         logger.warning("Rejecting all-numeric name (looks like an IP): %r", name)
+        return False
+    if len(name.rstrip(".")) > 253:
+        logger.warning("Rejecting name exceeding 253-char limit: %r", name)
         return False
     return True
 
@@ -299,7 +303,16 @@ def query_unbound(name: str, record_type: str, logger: logging.Logger,
                   unbound_conf: str) -> list:
     """Local-data query for dual-stack preservation / collision checks. Returns
     [(ip, ttl)]. Best-effort: an empty list on failure (the in-memory store
-    should never fail while Unbound is up; if it is down the mutation fails too)."""
+    should never fail while Unbound is up; if it is down the mutation fails too).
+
+    TTL note: Unbound serves local-data as authoritative zone data (the 'aa' bit
+    is set in responses). Authoritative servers return the configured TTL on every
+    query — they do not count it down. list_local_data therefore always returns
+    the static value written at add time, never a decrementing remainder. When we
+    restore a sibling after a family delete, re-adding it with this TTL is
+    identical to the original add; no TTL inflation occurs. The sync path
+    (kea-sync.py) uses remaining-lease-time as the TTL and overwrites this value
+    on the next reconcile, keeping TTLs accurate between syncs."""
     try:
         result = subprocess.run(
             [UNBOUND_CONTROL, "-c", unbound_conf, "list_local_data"],
@@ -333,7 +346,8 @@ def query_unbound(name: str, record_type: str, logger: logging.Logger,
 # ── Live update processing (lock already held by the caller) ──────────────────
 def process_update(msg: dns.message.Message, unbound_conf: str, dry_run: bool,
                    logger: logging.Logger, cache: HostEntriesCache,
-                   synthesize_ptr: bool, collision_policy: str) -> int:
+                   synthesize_ptr: bool = True,
+                   collision_policy: str = "last_wins") -> int:
     """Apply one DNS UPDATE to Unbound and return the DNS RCODE. The caller MUST
     already hold the mutation lock. Raises UnboundRefused if the control channel
     is down (the caller enters BLOCKED and records the names dirty)."""
@@ -373,23 +387,42 @@ def process_update(msg: dns.message.Message, unbound_conf: str, dry_run: bool,
         if is_delete:
             if rdtype in ("A", "AAAA"):
                 other_type = OTHER_FAMILY[rdtype]
-                preserved = query_unbound(name, other_type, logger, unbound_conf)
-                current_ips = [str(rr) for rr in rrset] or \
-                    [ip for ip, _t in query_unbound(name, rdtype, logger, unbound_conf)]
-                current_ptrs = [p for p in (reverse_ptr(ip) for ip in current_ips) if p]
-                logger.info("Remove: %s %s (preserving %d %s)",
-                            rdtype, name, len(preserved), other_type)
+                # IPs explicitly named in this delete (may be empty for type-only deletes).
+                deleting_ips = {str(rr) for rr in rrset}
+                # Other-family records — always restored after the name-level remove.
+                preserved_other = query_unbound(name, other_type, logger, unbound_conf)
+                # All current same-family records.
+                all_same = query_unbound(name, rdtype, logger, unbound_conf)
+                if not deleting_ips:
+                    # Type-only delete (rdclass=ANY, no rdata): remove all of this family.
+                    deleting_ips = {ip for ip, _t in all_same}
+                # Same-family records NOT in the delete set — must survive.
+                # Without this, a DELETE for ip1 when the host also has ip2 (same family)
+                # would silently drop ip2: local_data_remove wipes all types for a name.
+                preserved_same = [(ip, ttl) for ip, ttl in all_same
+                                  if ip not in deleting_ips]
+                # PTRs to remove: only for the IPs actually being deleted.
+                del_ptrs = [p for p in (reverse_ptr(ip) for ip in deleting_ips) if p]
+                logger.info("Remove: %s %s (preserving %d %s, %d same-family sibling(s))",
+                            rdtype, name, len(preserved_other), other_type, len(preserved_same))
                 if uc(["local_data_remove", name]):
                     if synthesize_ptr:
-                        for ptr in current_ptrs:
+                        for ptr in del_ptrs:
                             if not cache.is_static(ptr):
                                 logger.info("Remove PTR: %s", ptr)
                                 uc(["local_data_remove", ptr])
-                    for ip, ttl in preserved:
+                    for ip, ttl in preserved_other:
                         ptr = reverse_ptr(ip)
                         logger.info("Restore %s: %s -> %s (TTL %ds)",
                                     other_type, name, ip, ttl)
                         uc(["local_data", f"{name} {ttl} IN {other_type} {ip}"])
+                        if synthesize_ptr and ptr and not cache.is_static(ptr):
+                            uc(["local_data", f"{ptr} {ttl} IN PTR {name}."])
+                    for ip, ttl in preserved_same:
+                        ptr = reverse_ptr(ip)
+                        logger.info("Restore %s sibling: %s -> %s (TTL %ds)",
+                                    rdtype, name, ip, ttl)
+                        uc(["local_data", f"{name} {ttl} IN {rdtype} {ip}"])
                         if synthesize_ptr and ptr and not cache.is_static(ptr):
                             uc(["local_data", f"{ptr} {ttl} IN PTR {name}."])
                     removed += 1

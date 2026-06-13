@@ -179,6 +179,29 @@ on the plugin. The ones that do matter:
   sync path uses `max(1, lease["expires"] - now)` (remaining lifetime) instead.
   After any reconcile, the sync-computed TTL overwrites the NCR TTL.
 
+**How Unbound handles local-data TTLs (by design):** Unbound serves `local-data`
+records as authoritative zone data — the `aa` (Authoritative Answer) flag is set
+in every response. Authoritative DNS servers return their configured TTL on every
+query; they do not decrement it as time passes. This is confirmed by observation:
+`unbound-control list_local_data` returns the same TTL value 5 seconds, 30
+seconds, or 10 minutes after a record was added.
+
+This has two consequences worth knowing:
+
+1. **TTL countdown happens in DNS resolvers and clients, not in Unbound.** A
+   caching resolver querying Unbound will cache the record and decrement its copy.
+   Unbound itself always returns the full configured value. This is correct and
+   standard for authoritative servers.
+
+2. **Dual-stack sibling preservation on live DELETE does not inflate TTLs.**
+   When the daemon's live path receives a DELETE for one address family, it reads
+   the surviving sibling's TTL from `list_local_data`, removes the name entirely
+   (Unbound has no per-RR remove), then re-adds the sibling with the same TTL. A
+   concern might be that this "resets" a TTL that was counting down. It does not —
+   Unbound was already serving the full static TTL to every querier, so the
+   re-add produces identical behaviour. The next scheduled reconcile will
+   overwrite the TTL with the remaining lease lifetime anyway.
+
 ### Conflict Resolution
 
 - **`ddns-use-conflict-resolution`**: Kea D2 may include DHCID prerequisites in

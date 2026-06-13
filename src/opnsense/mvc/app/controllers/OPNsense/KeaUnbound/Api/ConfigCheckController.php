@@ -881,8 +881,9 @@ class ConfigCheckController extends ApiControllerBase
     private function describeConnection($service, $reachable)
     {
         $base = [
-            'enabled'   => $this->isServiceEnabled($service),
-            'reachable' => $reachable,
+            'enabled'       => $this->isServiceEnabled($service),
+            'reachable'     => $reachable,
+            'manual_config' => $this->isManualConfig($service),
         ];
         $desc = $this->resolveKeaSocket($service);
         if ($desc === null) {

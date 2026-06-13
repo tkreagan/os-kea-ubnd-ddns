@@ -41,17 +41,28 @@ pytestmark = pytest.mark.unit
 # ── is_sane_name ──────────────────────────────────────────────────────────────
 
 @pytest.mark.parametrize("name,expect", [
-    ("myhost.lan",     True),
-    ("foo-bar.lan",    True),
-    ("a.b.c.d",        True),
-    ("",               False),
-    (".",              False),
-    ("localhost",      False),
-    ("localdomain",    False),
-    ("192.168.1.1",    False),
-    ("10.0.0.1",       False),
-    ("-bad.lan",       False),
-    ("_svc.lan",       False),
+    ("myhost.lan",              True),
+    ("foo-bar.lan",             True),
+    ("a.b.c.d",                 True),
+    ("x1.example.com",          True),
+    ("a" * 63 + ".lan",         True),   # 63-char label is ok
+    # all-label validation: invalid chars in non-first labels
+    ("valid.evil!label.lan",    False),
+    ("valid._svc.lan",          False),
+    ("valid.bad-.lan",          False),
+    ("valid.-bad.lan",          False),
+    ("a" * 64 + ".lan",         False),  # 64-char label exceeds RFC 1035 max
+    # reserved / nonsense
+    ("",                        False),
+    (".",                       False),
+    ("localhost",               False),
+    ("localdomain",             False),
+    # all-numeric
+    ("192.168.1.1",             False),
+    ("10.0.0.1",                False),
+    # invalid first label
+    ("-bad.lan",                False),
+    ("_svc.lan",                False),
 ])
 def test_is_sane_name(name, expect):
     assert is_sane_name(name) is expect

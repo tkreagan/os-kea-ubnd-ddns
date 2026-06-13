@@ -113,6 +113,8 @@ function connLine(label, conn) {
         val = '<span class="text-muted">unix socket:</span> <code>' + escapeHtml(conn.detail) + '</code>';
     } else if (conn.method === 'http') {
         val = '<span class="text-muted">HTTP:</span> <code>' + escapeHtml(conn.detail) + '</code>';
+    } else if (conn.manual_config) {
+        val = '<span class="text-muted">manual config mode &mdash; socket not resolved</span>';
     } else {
         val = '<span class="text-muted">not resolved</span>';
     }
@@ -120,6 +122,22 @@ function connLine(label, conn) {
         ? '<i class="fa-solid fa-circle" title="reachable" style="color:#5cb85c; font-size:0.7em;"></i>'
         : '<i class="fa-regular fa-circle" title="not responding" style="color:#aaa; font-size:0.7em;"></i>';
     return '<div class="ku-row">' + dot + ' <strong>' + label + ':</strong> ' + val + '</div>';
+}
+
+function manualConfigBanner(data) {
+    const kc = data.kea_control || {};
+    const services = ['dhcp4', 'dhcp6'].filter(s => kc[s] && kc[s].manual_config);
+    if (services.length === 0) return '';
+    const names = services.map(s => s === 'dhcp4' ? 'DHCPv4' : 'DHCPv6').join(' and ');
+    return '<div class="alert alert-warning" style="margin-bottom:12px;">' +
+           '<strong>Manual configuration mode active (' + names + ')</strong><br>' +
+           'Kea is running with a hand-edited config file. The Config Check reads the live ' +
+           'Kea configuration via <code>config-get</code> and interprets it as-is, but some ' +
+           'checks assume OPNsense-managed config conventions (e.g. per-subnet ' +
+           '<code>ddns-send-updates</code> rather than global inheritance). ' +
+           'Results may be inaccurate for non-standard config structures. ' +
+           'Verify DDNS registration independently.' +
+           '</div>';
 }
 
 function statusSection(data) {
@@ -255,6 +273,9 @@ function renderKeaConfig(data) {
 
     // ── Unbound DNS Configuration ─────────────────────────────────────────────
     html += unboundSection(data);
+
+    // ── Manual config disclaimer (shown before subnet results if applicable) ──
+    html += manualConfigBanner(data);
 
     // ── Kea & Listener Status ─────────────────────────────────────────────────
     html += statusSection(data);
