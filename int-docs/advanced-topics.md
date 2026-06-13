@@ -1,9 +1,10 @@
-# IPv6 / DHCPv6 Behavior Notes
+# Advanced Topics
 
-Developer and operator reference for how this plugin handles IPv6. Covers which
-Kea lease and reservation types are processed, how IPv6 PTR records are encoded,
-dual-stack coexistence, and the configuration options that affect DHCPv6
-specifically. Companion to `kea-ddns-options-reference.md`.
+Developer and operator reference for edge cases, known limitations, and
+non-obvious behavior in the kea-unbound plugin. Covers IPv6/DHCPv6 specifics,
+dual-stack coexistence, DNS suffix lifecycle, and configuration options with
+subtle effects on the live and sync paths. Companion to
+`kea-ddns-options-reference.md`.
 
 ---
 
@@ -142,6 +143,20 @@ AAAA's PTR is correspondingly orphaned and cleaned up by the PTR pass.
 
 ---
 
+## Live NCR Path — Tested ✅ (June 2026)
+
+A real `dhclient -6` exchange on dev-dhcpclient triggered the full path:
+- DHCPv6 SOLICIT → ADVERTISE → REQUEST → REPLY from kea-dhcp6
+- D2 sent a forward NCR → listener registered `kea6host-fd00--102.dev.plhm.rgn.cm AAAA fd00::102` (latency 29ms)
+- Listener synthesized PTR from the forward NCR
+- D2 also sent a reverse NCR for the same PTR (handled as idempotent double-write)
+
+The generated hostname (`kea6host-fd00--102`) is the `ddns-generated-prefix` default
+in the test config — the client sent no FQDN option (option 39). This also confirms the
+live path correctly handles Kea-generated names for nameless IPv6 clients.
+
+---
+
 ## SLAAC — Not Supported (Intentional Non-Goal)
 
 IPv6 addresses assigned by SLAAC (Stateless Address Autoconfiguration, RFC 4862)
@@ -180,10 +195,13 @@ on the plugin. The ones that do matter:
 
 ### NCR Generation Control (determines whether updates are sent)
 
-- **`ddns-send-updates`**: the sync path does not read this flag — it queries Kea
-  for all leases regardless. A subnet with `ddns-send-updates: false` will still
-  have its leases synced by `kea-sync.py`. This is intentional: the sync is a
-  recovery mechanism, not a DDNS client.
+- **`ddns-send-updates`**: the sync path **respects this flag**. `_build_suffix_map()`
+  reads `ddns-send-updates` per subnet (with shared-network and global inheritance) and
+  passes a `ddns_disabled_subnets` set to `_normalize_raw_lease()`, which returns `None`
+  for leases from disabled subnets. `query_kea_reservations()` applies the same check
+  per source. Result: leases and reservations from a subnet with
+  `ddns-send-updates: false` are excluded from kea-sync.py, local-data-clean.py, and
+  local-data-audit.py — consistent with the live NCR path.
 
 - **`ddns-override-no-update`**: if false (default), a client that sets the DHCPv6
   N-bit opts out of DDNS. The live NCR path respects this (no update is sent).
@@ -211,15 +229,66 @@ on the plugin. The ones that do matter:
 
 ---
 
+## DDNS Suffix Staleness — Old Records After a Suffix Change
+
+**What happens:** Kea writes the full FQDN into the lease record at grant time,
+derived from the client-supplied hostname and the subnet's `ddns-qualifying-suffix`
+at that moment. If `ddns-qualifying-suffix` is later changed, existing leases still
+carry the old FQDN. When D2 sends NCRs for renewals or the sync path reads those
+leases, it uses the stale FQDN — so the old-suffix DNS records remain and appear to
+be backed by active leases.
+
+**Why the plugin cannot auto-detect this:** `find_stale_records()` compares Unbound
+records against Kea leases. An old-suffix record (e.g.,
+`host.old.example.com → 192.168.1.100`) is backed by the lease for `192.168.1.100`,
+whose `hostname` field is still `host.old.example.com`. From the plugin's perspective
+the record is correct — Kea says so. The new-suffix record (`host.new.example.com →
+192.168.1.100`) also exists, backed by a fresh NCR or reconcile. Both look valid.
+
+**Why auto-remediation is not safe:** The plugin treats Kea's lease as authoritative
+for the hostname. Removing a record that Kea says is valid would violate that
+invariant and could delete a legitimately active name if the admin intentionally
+configured two different suffixes for two different subnets.
+
+**How it resolves over time (on its own):**
+1. The client renews its lease. If `ddns-update-on-renew` is true (not the Kea
+   default), D2 sends a fresh NCR with the new suffix and a REMOVE for the old one.
+   With the default (`ddns-update-on-renew: false`), renewal does not trigger NCRs,
+   so the old record persists for the life of the lease.
+2. The lease expires. Kea's ELP queues a REMOVE NCR for the old FQDN. D2 delivers
+   it and the listener removes the record.
+3. The next scheduled bulk clean (`local-data-clean.py`) runs after the lease
+   expires — at that point there is no Kea record to protect the old name.
+
+**Manual remediation:** If you change `ddns-qualifying-suffix` and want immediate
+cleanup without waiting for lease expiry, run:
+```
+configctl keaunbound sync_dynamic   # repopulates new-suffix records
+unbound-control local_data_remove host.old.example.com
+unbound-control local_data_remove <PTR for the old name>
+```
+Or trigger a full clean after deleting the old leases from Kea. There is no bulk
+"remove all records for suffix X" operation.
+
+**Configuration advice:** change `ddns-qualifying-suffix` during a maintenance
+window, set `ddns-update-on-renew: true` temporarily, and wait for all clients to
+renew before turning it off. This causes D2 to send REMOVE NCRs for the old suffix
+as each client renews, cleaning up automatically within one lease period.
+
+---
+
 ## Known Limitations
 
 - **SLAAC addresses:** not supported, by design. See above.
+- **DDNS suffix staleness:** changing `ddns-qualifying-suffix` leaves old-suffix
+  records in Unbound for the duration of existing leases. Not auto-detectable
+  because the record appears backed by an active lease. See the section above.
 - **Shared-network-level reservations** (`shared-networks[].reservations[]`, not
   inside a subnet): not picked up by `query_kea_reservations()`. Subnet-level
   reservations inside shared networks work correctly.
 - **`ddns-override-no-update` N-bit:** the sync path does not respect a client's
   explicit opt-out of DDNS. If the lease has a hostname, it is synced.
 - **IA_TA and IA_PD leases:** explicitly blocked. See the lease type table above.
-- **Multiple `ip-addresses` in DHCPv6 reservations:** all addresses are now
-  synced (one AAAA + PTR per address). The collision policy applies per-address
-  within the same family.
+- **Multiple `ip-addresses` in DHCPv6 reservations:** all addresses are synced
+  (one AAAA + PTR per address). The collision policy applies per-address within
+  the same family. Covered by the `ipv6_multiple_addresses` scenario.
