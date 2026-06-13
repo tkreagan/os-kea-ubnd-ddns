@@ -19,13 +19,11 @@ The daemon processes the UPDATE synchronously; a 2-second settle is sufficient.
 from __future__ import annotations
 
 import ipaddress
-import socket
 import time
 
 from tools.scenarios import register
 from tools.scenarios.base import Scenario, ChaosContext
 
-DDNS_PORT = 53535
 _V6_PREFIX = "fd43::"   # isolated from other scenario prefixes
 
 
@@ -33,10 +31,9 @@ _V6_PREFIX = "fd43::"   # isolated from other scenario prefixes
 # DNS UPDATE wire helpers
 # ---------------------------------------------------------------------------
 
-def _send(host: str, payload: bytes, timeout: float = 1.0) -> None:
-    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
-        s.settimeout(timeout)
-        s.sendto(payload, (host, DDNS_PORT))
+def _send(ctx, payload: bytes) -> None:
+    """Send DNS UPDATE via the remote host's loopback (daemon binds 127.0.0.1 only)."""
+    ctx.send_ncr(payload)
 
 
 def _add_a(hostname: str, ip: str, domain: str, ttl: int = 300) -> bytes:
@@ -107,7 +104,7 @@ class DdnsAddVerifyA(Scenario):
 
     def run(self, ctx: ChaosContext) -> None:
         hostname, ip = ctx.alloc_host("-ddnsA")
-        _send(ctx.cfg.opnsense_host, _add_a(hostname, ip, ctx.domain))
+        _send(ctx, _add_a(hostname, ip, ctx.domain))
         self._hostname = hostname
         self._ip = ip
         self._fqdn = f"{hostname}.{ctx.domain}"
@@ -143,7 +140,7 @@ class DdnsAddVerifyA(Scenario):
 
     def cleanup(self, ctx: ChaosContext) -> None:
         try:
-            _send(ctx.cfg.opnsense_host, _del_name(self._hostname, ctx.domain))
+            _send(ctx, _del_name(self._hostname, ctx.domain))
         except Exception:
             pass
         ctx.wait(1, "delete settle")
@@ -165,7 +162,7 @@ class DdnsAddVerifyAaaa(Scenario):
 
     def run(self, ctx: ChaosContext) -> None:
         hostname, ipv6 = ctx.alloc_v6_host("-ddnsAAAA", prefix=_V6_PREFIX)
-        _send(ctx.cfg.opnsense_host, _add_aaaa(hostname, ipv6, ctx.domain))
+        _send(ctx, _add_aaaa(hostname, ipv6, ctx.domain))
         self._hostname = hostname
         self._ipv6 = ipv6
         self._fqdn = f"{hostname}.{ctx.domain}"
@@ -209,7 +206,7 @@ class DdnsAddVerifyAaaa(Scenario):
 
     def cleanup(self, ctx: ChaosContext) -> None:
         try:
-            _send(ctx.cfg.opnsense_host, _del_name(self._hostname, ctx.domain))
+            _send(ctx, _del_name(self._hostname, ctx.domain))
         except Exception:
             pass
         ctx.wait(1, "delete settle")
@@ -233,9 +230,9 @@ class DdnsDualFamilyNcr(Scenario):
         hostname, ipv4 = ctx.alloc_host("-dsdual")
         _, ipv6 = ctx.alloc_v6_host("-dsdual", prefix=_V6_PREFIX)
         host = ctx.cfg.opnsense_host
-        _send(host, _add_a(hostname, ipv4, ctx.domain))
+        _send(ctx, _add_a(hostname, ipv4, ctx.domain))
         ctx.wait(1, "A NCR settle")
-        _send(host, _add_aaaa(hostname, ipv6, ctx.domain))
+        _send(ctx, _add_aaaa(hostname, ipv6, ctx.domain))
         self._hostname = hostname
         self._ipv4 = ipv4
         self._ipv6 = ipv6
@@ -282,7 +279,7 @@ class DdnsDualFamilyNcr(Scenario):
     def cleanup(self, ctx: ChaosContext) -> None:
         host = ctx.cfg.opnsense_host
         try:
-            _send(host, _del_name(self._hostname, ctx.domain))
+            _send(ctx, _del_name(self._hostname, ctx.domain))
         except Exception:
             pass
         ctx.wait(1, "delete settle")
@@ -308,9 +305,9 @@ class DdnsDeleteAPreservesAaaa(Scenario):
         host = ctx.cfg.opnsense_host
 
         # Establish dual-stack state
-        _send(host, _add_a(hostname, ipv4, ctx.domain))
+        _send(ctx, _add_a(hostname, ipv4, ctx.domain))
         ctx.wait(1, "A add settle")
-        _send(host, _add_aaaa(hostname, ipv6, ctx.domain))
+        _send(ctx, _add_aaaa(hostname, ipv6, ctx.domain))
         ctx.wait(2, "AAAA add settle")
 
         self._hostname = hostname
@@ -327,7 +324,7 @@ class DdnsDeleteAPreservesAaaa(Scenario):
             ctx.event("warn", msg="pre-delete state incomplete — test may give false results")
 
         # Delete only the A record
-        _send(host, _del_a(hostname, ipv4, ctx.domain))
+        _send(ctx, _del_a(hostname, ipv4, ctx.domain))
         ctx.wait(2, "A delete settle")
 
     def verify(self, ctx: ChaosContext) -> list[str]:
@@ -358,7 +355,7 @@ class DdnsDeleteAPreservesAaaa(Scenario):
     def cleanup(self, ctx: ChaosContext) -> None:
         host = ctx.cfg.opnsense_host
         try:
-            _send(host, _del_name(self._hostname, ctx.domain))
+            _send(ctx, _del_name(self._hostname, ctx.domain))
         except Exception:
             pass
         ctx.wait(1, "delete settle")
@@ -383,9 +380,9 @@ class DdnsDeleteAaaaPreservesA(Scenario):
         _, ipv6 = ctx.alloc_v6_host("-delAAAAkeepA", prefix=_V6_PREFIX)
         host = ctx.cfg.opnsense_host
 
-        _send(host, _add_a(hostname, ipv4, ctx.domain))
+        _send(ctx, _add_a(hostname, ipv4, ctx.domain))
         ctx.wait(1, "A add settle")
-        _send(host, _add_aaaa(hostname, ipv6, ctx.domain))
+        _send(ctx, _add_aaaa(hostname, ipv6, ctx.domain))
         ctx.wait(2, "AAAA add settle")
 
         self._hostname = hostname
@@ -399,7 +396,7 @@ class DdnsDeleteAaaaPreservesA(Scenario):
                   ipv4=ipv4, ipv6=ipv6, pre_a=pre_a, pre_aaaa=pre_aaaa)
 
         # Delete only the AAAA record
-        _send(host, _del_aaaa(hostname, ipv6, ctx.domain))
+        _send(ctx, _del_aaaa(hostname, ipv6, ctx.domain))
         ctx.wait(2, "AAAA delete settle")
 
     def verify(self, ctx: ChaosContext) -> list[str]:
@@ -430,7 +427,7 @@ class DdnsDeleteAaaaPreservesA(Scenario):
     def cleanup(self, ctx: ChaosContext) -> None:
         host = ctx.cfg.opnsense_host
         try:
-            _send(host, _del_name(self._hostname, ctx.domain))
+            _send(ctx, _del_name(self._hostname, ctx.domain))
         except Exception:
             pass
         ctx.wait(1, "delete settle")
@@ -455,7 +452,7 @@ class DdnsNcrIdempotent(Scenario):
         host = ctx.cfg.opnsense_host
         payload = _add_a(hostname, ip, ctx.domain)
         for _ in range(3):
-            _send(host, payload)
+            _send(ctx, payload)
             time.sleep(0.5)
         self._hostname = hostname
         self._ip = ip
@@ -491,7 +488,7 @@ class DdnsNcrIdempotent(Scenario):
 
     def cleanup(self, ctx: ChaosContext) -> None:
         try:
-            _send(ctx.cfg.opnsense_host, _del_name(self._hostname, ctx.domain))
+            _send(ctx, _del_name(self._hostname, ctx.domain))
         except Exception:
             pass
         ctx.wait(1, "delete settle")
@@ -525,10 +522,10 @@ class DdnsIpChangeLastWins(Scenario):
         _, ip2 = ctx.alloc_host("-ipcng2")
         host = ctx.cfg.opnsense_host
 
-        _send(host, _add_a(hostname, ip1, ctx.domain))
+        _send(ctx, _add_a(hostname, ip1, ctx.domain))
         ctx.wait(2, "ip1 NCR settle")
 
-        _send(host, _add_a(hostname, ip2, ctx.domain))
+        _send(ctx, _add_a(hostname, ip2, ctx.domain))
         self._hostname = hostname
         self._ip1 = ip1
         self._ip2 = ip2
@@ -567,7 +564,7 @@ class DdnsIpChangeLastWins(Scenario):
     def cleanup(self, ctx: ChaosContext) -> None:
         host = ctx.cfg.opnsense_host
         try:
-            _send(host, _del_name(self._hostname, ctx.domain))
+            _send(ctx, _del_name(self._hostname, ctx.domain))
         except Exception:
             pass
         ctx.wait(1, "delete settle")
@@ -592,7 +589,7 @@ class DdnsOrphanedPtrCleanup(Scenario):
         host = ctx.cfg.opnsense_host
 
         # Add A record
-        _send(host, _add_a(hostname, ipv4, ctx.domain))
+        _send(ctx, _add_a(hostname, ipv4, ctx.domain))
         ctx.wait(2, "A add settle")
 
         self._hostname = hostname
@@ -636,7 +633,7 @@ class DdnsOrphanedPtrCleanup(Scenario):
 
     def cleanup(self, ctx: ChaosContext) -> None:
         try:
-            _send(ctx.cfg.opnsense_host, _del_name(self._hostname, ctx.domain))
+            _send(ctx, _del_name(self._hostname, ctx.domain))
         except Exception:
             pass
         ctx.wait(1, "delete settle")

@@ -16,13 +16,10 @@ need the daemon running but do NOT require Kea interaction.
 from __future__ import annotations
 
 import ipaddress
-import socket
 import time
 
 from tools.scenarios import register
 from tools.scenarios.base import Scenario, ChaosContext
-
-DDNS_PORT = 53535
 
 _TEST_V6_PREFIX = "fd42::"   # isolated from other scenario prefixes
 
@@ -80,10 +77,9 @@ def _build_ptr_update(arpa_name: str, target_fqdn: str, domain: str, ttl: int = 
     return upd.to_wire()
 
 
-def _send(host: str, payload: bytes, timeout: float = 1.0) -> None:
-    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
-        s.settimeout(timeout)
-        s.sendto(payload, (host, DDNS_PORT))
+def _send(ctx, payload: bytes) -> None:
+    """Send DNS UPDATE via the remote host's loopback (daemon binds 127.0.0.1 only)."""
+    ctx.send_ncr(payload)
 
 
 def _expected_arpa_v4(ip: str) -> str:
@@ -258,7 +254,7 @@ class DdnsPtrSynthesisV4(Scenario):
     def run(self, ctx: ChaosContext) -> None:
         hostname, ip = ctx.alloc_host("-ddnsv4ptr")
         payload = _build_a_update(hostname, ip, ctx.domain)
-        _send(ctx.cfg.opnsense_host, payload)
+        _send(ctx, payload)
         self._hostname = hostname
         self._ip = ip
         self._fqdn = f"{hostname}.{ctx.domain}"
@@ -298,7 +294,7 @@ class DdnsPtrSynthesisV4(Scenario):
     def cleanup(self, ctx: ChaosContext) -> None:
         host = ctx.cfg.opnsense_host
         try:
-            _send(host, _build_delete(self._hostname, ctx.domain))
+            _send(ctx, _build_delete(self._hostname, ctx.domain))
         except Exception:
             pass
         ctx.wait(1, "let delete settle")
@@ -321,7 +317,7 @@ class DdnsPtrSynthesisV6(Scenario):
     def run(self, ctx: ChaosContext) -> None:
         hostname, ipv6 = ctx.alloc_v6_host("-ddnsv6ptr", prefix=_TEST_V6_PREFIX)
         payload = _build_aaaa_update(hostname, ipv6, ctx.domain)
-        _send(ctx.cfg.opnsense_host, payload)
+        _send(ctx, payload)
         self._hostname = hostname
         self._ipv6 = ipv6
         self._fqdn = f"{hostname}.{ctx.domain}"
@@ -360,7 +356,7 @@ class DdnsPtrSynthesisV6(Scenario):
     def cleanup(self, ctx: ChaosContext) -> None:
         host = ctx.cfg.opnsense_host
         try:
-            _send(host, _build_delete(self._hostname, ctx.domain))
+            _send(ctx, _build_delete(self._hostname, ctx.domain))
         except Exception:
             pass
         ctx.wait(1, "let delete settle")
@@ -383,14 +379,13 @@ class ExplicitPtrNcr(Scenario):
     def run(self, ctx: ChaosContext) -> None:
         # First add an A record so there's a forward name to associate with
         hostname, ip = ctx.alloc_host("-explptr")
-        _send(ctx.cfg.opnsense_host, _build_a_update(hostname, ip, ctx.domain))
+        _send(ctx, _build_a_update(hostname, ip, ctx.domain))
         ctx.wait(2, "A NCR settle")
 
         # Now send an explicit PTR NCR (as kea-dhcp-ddns would for PTR updates)
         arpa = _expected_arpa_v4(ip)
         fqdn = f"{hostname}.{ctx.domain}"
-        _send(ctx.cfg.opnsense_host,
-              _build_ptr_update(arpa, fqdn, ctx.domain))
+        _send(ctx, _build_ptr_update(arpa, fqdn, ctx.domain))
         self._hostname = hostname
         self._ip = ip
         self._arpa = arpa
@@ -429,7 +424,7 @@ class ExplicitPtrNcr(Scenario):
     def cleanup(self, ctx: ChaosContext) -> None:
         host = ctx.cfg.opnsense_host
         try:
-            _send(host, _build_delete(self._hostname, ctx.domain))
+            _send(ctx, _build_delete(self._hostname, ctx.domain))
         except Exception:
             pass
         ctx.wait(1, "let delete settle")

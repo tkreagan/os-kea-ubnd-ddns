@@ -83,17 +83,29 @@ class SSHSession:
         channel.sendall(code.encode())
         channel.shutdown_write()
         out = b""
+        err = b""
         while True:
-            chunk = channel.recv(65536)
-            if not chunk:
+            if channel.recv_ready():
+                chunk = channel.recv(65536)
+                if chunk:
+                    out += chunk
+                    continue
+            if channel.recv_stderr_ready():
+                chunk = channel.recv_stderr(65536)
+                if chunk:
+                    err += chunk
+                    continue
+            if channel.exit_status_ready() and not channel.recv_ready() and not channel.recv_stderr_ready():
                 break
-            out += chunk
+            time.sleep(0.05)
         rc = channel.recv_exit_status()
         channel.close()
         result = out.decode(errors="replace").strip()
+        err_str = err.decode(errors="replace").strip()
         if rc != 0:
             raise RuntimeError(
                 f"[{self.host}] Script failed (rc={rc}): {result[:400]}"
+                + (f"\n  stderr: {err_str[:400]}" if err_str else "")
             )
         return result
 

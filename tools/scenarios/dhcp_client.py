@@ -13,11 +13,16 @@ from tools.scenarios.base import Scenario, ChaosContext
 def _current_lease_ip(ctx: ChaosContext) -> str | None:
     """Return the current IP held by the DHCP client box, or None."""
     iface = ctx.cfg.dhcpclient_lan_if
-    out = ctx.client.run(
-        f"ip -4 addr show dev {iface} | grep -oP '(?<=inet )\\d+\\.\\d+\\.\\d+\\.\\d+'",
-        check=False
-    )
-    return out.strip() or None
+    code = f"""
+import subprocess
+r = subprocess.run(['ip', '-4', 'addr', 'show', 'dev', '{iface}'], capture_output=True, text=True)
+for line in r.stdout.splitlines():
+    if 'scope global' in line:
+        print(line.split()[1].split('/')[0])
+        break
+"""
+    result = ctx.client.script("python3", code)
+    return result.strip() or None
 
 
 def _current_lease_hostname(ctx: ChaosContext) -> str | None:
@@ -28,8 +33,11 @@ def _current_lease_hostname(ctx: ChaosContext) -> str | None:
 
 def _release_and_renew(ctx: ChaosContext, extra_opts: str = "") -> None:
     iface = ctx.cfg.dhcpclient_lan_if
+    # networkctl renew is the correct way to trigger a fresh DHCP cycle when
+    # systemd-networkd manages the interface; dhclient conflicts with it.
     ctx.client.sudo(
-        f"dhclient -r {iface} 2>/dev/null; dhclient {extra_opts} {iface}",
+        f"networkctl renew {iface} 2>/dev/null || "
+        f"dhclient -r {iface} 2>/dev/null; dhclient {extra_opts} {iface} 2>/dev/null || true",
         timeout=30
     )
 
@@ -147,8 +155,12 @@ class NoHostname(Scenario):
     def verify(self, ctx: ChaosContext) -> list[str]:
         failures = []
         data = ctx.unbound.list_local_data()
-        # Verify no record with an empty name or all-numeric name was created
+        # Verify no record with an empty name or all-numeric name was created.
+        # Skip Unbound's built-in reverse zones (arpa delegations) — those are
+        # normal and have numeric first labels (e.g. 10.in-addr.arpa).
         for name in data:
+            if name.endswith(".in-addr.arpa") or name.endswith(".ip6.arpa"):
+                continue
             if not name.strip():
                 failures.append(f"Empty DNS name found in Unbound: {name!r}")
             bare = name.split(".")[0]
@@ -211,10 +223,18 @@ class MultiClient(Scenario):
         # Record which IPs were acquired
         self._acquired: list[tuple[str, str]] = []
         for vif, name in zip(self._vifs, self.NAMES):
-            ip = ctx.client.run(
-                f"ip -4 addr show dev {vif} | grep -oP '(?<=inet )\\d+\\.\\d+\\.\\d+\\.\\d+'",
-                check=False
-            ).strip()
+            code = f"""
+import subprocess
+out = subprocess.check_output(['ip', '-4', 'addr', 'show', 'dev', '{vif}'], text=True, stderr=subprocess.DEVNULL)
+for line in out.splitlines():
+    if 'scope global' in line:
+        print(line.split()[1].split('/')[0])
+        break
+"""
+            try:
+                ip = ctx.client.script("python3", code).strip()
+            except Exception:
+                ip = ""
             if ip:
                 self._acquired.append((name, ip))
                 ctx.event("lease_acquired", vif=vif, name=name, ip=ip)

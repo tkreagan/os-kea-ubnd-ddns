@@ -111,7 +111,7 @@ class TtlConsistency(Scenario):
 
     def run(self, ctx: ChaosContext) -> None:
         hostname, ip = ctx.alloc_host("-ttl")
-        mac = "aa:bb:cc:00:tt:01"
+        mac = "aa:bb:cc:00:01:01"
         self._hostname = hostname
         self._ip = ip
         self._injected_at = time.time()

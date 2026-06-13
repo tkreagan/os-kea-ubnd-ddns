@@ -76,7 +76,10 @@ class KeaClient:
             print(buf.decode())
         """)
         try:
-            raw = self._ssh.sudo_script("python3", code, timeout=timeout + 5)
+            # dev user is in wheel group and can reach the Kea unix socket
+            # directly — sudo is not needed and would break stdin delivery
+            # (echo|sudo pipeline consumes stdin before python3 can read it).
+            raw = self._ssh.script("python3", code, timeout=timeout + 5)
         except RuntimeError as exc:
             raise KeaError(f"SSH/script error: {exc}") from exc
 

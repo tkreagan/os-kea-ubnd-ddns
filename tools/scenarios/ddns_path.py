@@ -2,20 +2,16 @@
 """
 DDNS path scenarios: RFC 2136 UPDATE flood and malformed packet resilience.
 
-Sends packets directly from the Mac runner to dev-opnsense:53535 using
-dnspython — no ssh required for the injection itself.
+Packets are injected via ctx.send_ncr() which runs a python3 snippet on
+dev-opnsense to send to 127.0.0.1:53535 (the daemon's loopback-only socket).
 """
 from __future__ import annotations
 
-import socket
 import struct
 import time
 
 from tools.scenarios import register
 from tools.scenarios.base import Scenario, ChaosContext
-
-DDNS_PORT = 53535
-DDNS_HOST = None  # filled from ctx.cfg.opnsense_host at runtime
 
 
 def _build_update(hostname: str, ip: str, domain: str) -> bytes:
@@ -68,12 +64,6 @@ def _minimal_update_wire(hostname: str, ip: str, domain: str) -> bytes:
     return header + zone + rr
 
 
-def _send_udp(host: str, port: int, payload: bytes, timeout: float = 2.0) -> None:
-    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
-        s.settimeout(timeout)
-        s.sendto(payload, (host, port))
-
-
 @register
 class DdnsUpdateFlood(Scenario):
     name = "ddns_update_flood"
@@ -82,16 +72,15 @@ class DdnsUpdateFlood(Scenario):
     COUNT = 50
 
     def run(self, ctx: ChaosContext) -> None:
-        host = ctx.cfg.opnsense_host
         self._pairs: list[tuple[str, str]] = []
 
         for i in range(self.COUNT):
             hostname, ip = ctx.alloc_host(f"-ddnsf{i:02d}")
             payload = _build_update(hostname, ip, ctx.domain)
             try:
-                _send_udp(host, DDNS_PORT, payload, timeout=0.5)
+                ctx.send_ncr(payload)
             except Exception:
-                pass  # UDP send-and-forget; timeouts are expected
+                pass
             self._pairs.append((hostname, ip))
 
         ctx.event("flood_sent", count=self.COUNT)
@@ -103,24 +92,25 @@ class DdnsUpdateFlood(Scenario):
             failures.append("Daemon not running after UPDATE flood")
             return failures
 
-        out = ctx.ssh.run("netstat -ul 2>/dev/null | grep 53535 || true", check=False)
+        out = ctx.ssh.sudo(
+            "sockstat -4 2>/dev/null | grep 53535 || "
+            "netstat -an 2>/dev/null | grep 53535 || true",
+            check=False
+        )
         if "53535" not in out:
             failures.append("Port 53535 not bound after flood")
 
-        # We don't verify every record — just that the daemon is alive and responsive
         ctx.event("daemon_alive_after_flood", running=True)
         return failures
 
     def cleanup(self, ctx: ChaosContext) -> None:
-        # Send DELETE for each injected record
-        host = ctx.cfg.opnsense_host
         for hostname, ip in getattr(self, "_pairs", []):
             try:
-                import dns.update, dns.name, dns.rdatatype, dns.rdataclass
+                import dns.update, dns.name
                 zone = dns.name.from_text(ctx.domain + ".")
                 upd = dns.update.UpdateMessage(zone)
                 upd.delete(dns.name.from_text(hostname + "." + ctx.domain + "."))
-                _send_udp(host, DDNS_PORT, upd.to_wire(), timeout=0.3)
+                ctx.send_ncr(upd.to_wire())
             except Exception:
                 pass
         ctx.wait(2, "let deletes settle")
@@ -147,10 +137,9 @@ class DdnsMalformed(Scenario):
     ]
 
     def run(self, ctx: ChaosContext) -> None:
-        host = ctx.cfg.opnsense_host
         for i, payload in enumerate(self.BAD_PAYLOADS):
             try:
-                _send_udp(host, DDNS_PORT, payload, timeout=0.3)
+                ctx.send_ncr(payload)
             except Exception:
                 pass
             ctx.event("malformed_sent", index=i, size=len(payload))
@@ -160,7 +149,11 @@ class DdnsMalformed(Scenario):
         failures = []
         if not ctx.daemon_is_running():
             failures.append("Daemon not running after malformed packet bombardment")
-        out = ctx.ssh.run("netstat -ul 2>/dev/null | grep 53535 || true", check=False)
+        out = ctx.ssh.sudo(
+            "sockstat -4 2>/dev/null | grep 53535 || "
+            "netstat -an 2>/dev/null | grep 53535 || true",
+            check=False
+        )
         if "53535" not in out:
             failures.append("Port 53535 not bound after malformed packets")
         return failures

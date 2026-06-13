@@ -19,7 +19,11 @@ def _get_pid(ctx: ChaosContext, pidfile: str) -> str:
 
 
 def _daemon_port_bound(ctx: ChaosContext) -> bool:
-    out = ctx.ssh.run("netstat -ul 2>/dev/null || ss -ul 2>/dev/null", check=False)
+    out = ctx.ssh.sudo(
+        "sockstat -4 2>/dev/null | grep 53535 || "
+        "netstat -an 2>/dev/null | grep 53535 || true",
+        check=False
+    )
     return "53535" in out
 
 
@@ -113,7 +117,7 @@ class KeaRestart(Scenario):
         ctx.wait(2, "initial sync settle")
 
         # Stop Kea
-        ctx.ssh.sudo("service kea-dhcp4 stop || pkill -f kea-dhcp4 || true",
+        ctx.ssh.sudo("/usr/local/sbin/configctl kea stop || pkill -f kea-dhcp4 || true",
                      check=False, timeout=20)
         ctx.event("kea_stopped")
         ctx.wait(2, "let kea stop")
@@ -126,7 +130,7 @@ class KeaRestart(Scenario):
             ctx.event("sync_with_kea_down", outcome="error", detail=str(exc)[:100])
 
         # Restart Kea
-        ctx.ssh.sudo("service kea-dhcp4 start || /usr/local/sbin/pluginctl -s kea-dhcp4 start || true",
+        ctx.ssh.sudo("/usr/local/sbin/configctl kea start || true",
                      check=False, timeout=20)
         ctx.event("kea_started")
         ctx.wait(5, "let kea start")
@@ -143,7 +147,7 @@ class KeaRestart(Scenario):
     def cleanup(self, ctx: ChaosContext) -> None:
         # Ensure Kea is running
         ctx.ssh.sudo(
-            "service kea-dhcp4 start || /usr/local/sbin/pluginctl -s kea-dhcp4 start || true",
+            "/usr/local/sbin/configctl kea start || true",
             check=False, timeout=20
         )
         time.sleep(3)
@@ -173,7 +177,7 @@ class UnboundRestart(Scenario):
 
         # Restart Unbound (wipes local_data)
         ctx.ssh.sudo(
-            "service unbound restart || /usr/local/sbin/pluginctl -s unbound restart || true",
+            "/usr/local/sbin/configctl unbound restart || /usr/local/sbin/pluginctl -s unbound restart || true",
             check=False, timeout=20
         )
         ctx.event("unbound_restarted")
@@ -228,12 +232,12 @@ class SimultaneousFlip(Scenario):
 
         # Restart in correct order: Unbound first, then Kea
         ctx.ssh.sudo(
-            "service unbound start || /usr/local/sbin/pluginctl -s unbound start || true",
+            "/usr/local/sbin/configctl unbound start || /usr/local/sbin/pluginctl -s unbound start || true",
             check=False, timeout=20
         )
         ctx.wait(3, "let unbound start")
         ctx.ssh.sudo(
-            "service kea-dhcp4 start || /usr/local/sbin/pluginctl -s kea-dhcp4 start || true",
+            "/usr/local/sbin/configctl kea start || true",
             check=False, timeout=20
         )
         ctx.event("both_services_restarted")
@@ -253,7 +257,7 @@ class SimultaneousFlip(Scenario):
     def cleanup(self, ctx: ChaosContext) -> None:
         # Ensure both services are up
         ctx.ssh.sudo(
-            "service unbound start || true; service kea-dhcp4 start || true",
+            "/usr/local/sbin/configctl unbound start || true; /usr/local/sbin/configctl kea start || true",
             check=False, timeout=20
         )
         time.sleep(3)

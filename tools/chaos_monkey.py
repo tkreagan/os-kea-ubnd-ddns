@@ -144,7 +144,14 @@ def verify_baseline(ctx: ChaosContext) -> list[str]:
 
     print("  Checking port 53535...", end=" ", flush=True)
     try:
-        out = ctx.ssh.run("netstat -ul 2>/dev/null || ss -ul 2>/dev/null", check=False)
+        # On FreeBSD, sockstat needs root to see other users' sockets.
+        # On Linux, ss/netstat work without root. Try both.
+        out = ctx.ssh.sudo(
+            "sockstat -4 2>/dev/null | grep 53535 || "
+            "netstat -an 2>/dev/null | grep 53535 || "
+            "ss -uln 2>/dev/null | grep 53535 || true",
+            check=False
+        )
         if "53535" in out:
             print("bound")
         else:
@@ -180,6 +187,9 @@ def run_scenario(scenario_cls, ctx: ChaosContext) -> ScenarioResult:
     desc = scenario.description
     start = time.time()
     ctx.events = []
+    # Reset per-scenario so allocated IPs always stay within .220-.254
+    ctx._ip_counter = 220
+    ctx._v6_counter = 0x100
 
     print(f"\n  ▶ {name}: {desc}")
 

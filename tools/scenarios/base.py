@@ -55,7 +55,7 @@ class ChaosContext:
         self.events: list[dict] = []
         self._subnet_id: int | None = cfg.test_subnet_id
         self._subnet6_id: int | None = None
-        self._ip_counter: int = 200   # start allocating from .200
+        self._ip_counter: int = 220   # start at .220 — above the DHCP pool (.100-.200)
         self._v6_counter: int = 0x100  # start allocating from prefix::100
 
     @property
@@ -147,6 +147,28 @@ class ChaosContext:
             return "is running" in self.daemon_status()
         except Exception:
             return False
+
+    def send_ncr(self, payload: bytes) -> None:
+        """Send a DNS UPDATE packet to the daemon via the remote host's loopback.
+
+        The daemon binds to 127.0.0.1:53535 only; sending from the Mac runner's
+        external interface would be silently dropped.  This method base64-encodes
+        the wire payload and runs a tiny python3 script on dev-opnsense that
+        decodes and sends it locally — no sudo required.
+        """
+        import base64
+        b64 = base64.b64encode(payload).decode()
+        script = (
+            f"import socket, base64\n"
+            f"pkt = base64.b64decode('{b64}')\n"
+            "with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:\n"
+            "    s.settimeout(1.0)\n"
+            "    try:\n"
+            "        s.sendto(pkt, ('127.0.0.1', 53535))\n"
+            "    except Exception:\n"
+            "        pass\n"
+        )
+        self.ssh.script("python3", script)
 
     def reset_state(self, v6: bool = False) -> None:
         """Wipe all injected leases + stale records, restore clean baseline."""
