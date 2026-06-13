@@ -8,10 +8,29 @@ tests/results/
 *.txz
 *.pkg
 
-# Private agent/dev working notes — not for the repo.
+# Claude Code session files and local dev environment
+.claude/
+.env
 CLAUDE.md
 THIS_SESSION_SUMMARY.md
 COMPLETE_PLUGIN_OVERVIEW.md
 KEA_CONFIG_CHECK_SUMMARY.md
 STATUS_VIEW_SUMMARY.md
 PLUGIN_BRIEF.md
+
+# Internal/private documentation — not for public repo
+int-docs/
+
+# SSH keys and credentials
+id_rsa
+id_rsa.pub
+id_dsa
+id_dsa.pub
+id_ecdsa
+id_ecdsa.pub
+id_ed25519
+id_ed25519.pub
+*.pem
+*.key
+*.p12
+*.pfx
