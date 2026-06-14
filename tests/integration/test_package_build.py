@@ -26,19 +26,29 @@ PKG_GLOB = f"{PLUGIN_DIR}/work/pkg/{PACKAGE_NAME}-*.pkg"
 
 # Every file that must appear in the installed package.
 EXPECTED_FILES = [
+    # Daemons / executables in sbin
     "/usr/local/sbin/kea-unbound-ddns.py",
+    "/usr/local/sbin/kea-unbound-logwatch.py",
+    # Scripts
     "/usr/local/opnsense/scripts/keaunbound/start.py",
     "/usr/local/opnsense/scripts/keaunbound/stop.py",
-    "/usr/local/opnsense/scripts/keaunbound/reservation-sync.py",
-    "/usr/local/opnsense/scripts/keaunbound/lease-sync.py",
+    "/usr/local/opnsense/scripts/keaunbound/kea-sync.py",
     "/usr/local/opnsense/scripts/keaunbound/local-data-audit.py",
     "/usr/local/opnsense/scripts/keaunbound/local-data-clean.py",
+    "/usr/local/opnsense/scripts/keaunbound/uninstall.sh",
+    # Script library
     "/usr/local/opnsense/scripts/keaunbound/lib/__init__.py",
     "/usr/local/opnsense/scripts/keaunbound/lib/keaunbound_sync.py",
     "/usr/local/opnsense/scripts/keaunbound/lib/kea_transport.py",
+    "/usr/local/opnsense/scripts/keaunbound/lib/consistency_sm.py",
+    "/usr/local/opnsense/scripts/keaunbound/lib/pid_watch.py",
+    "/usr/local/opnsense/scripts/keaunbound/lib/preconditions.py",
+    "/usr/local/opnsense/scripts/keaunbound/lib/logwatch.py",
+    # OPNsense integration
     "/usr/local/etc/inc/plugins.inc.d/keaunbound.inc",
     "/usr/local/opnsense/service/conf/actions.d/actions_keaunbound.conf",
     "/usr/local/opnsense/service/templates/OPNsense/Syslog/local/keaunbound.conf",
+    # MVC
     "/usr/local/opnsense/mvc/app/models/OPNsense/KeaUnbound/General.xml",
     "/usr/local/opnsense/mvc/app/models/OPNsense/KeaUnbound/General.php",
     "/usr/local/opnsense/mvc/app/models/OPNsense/KeaUnbound/ACL/ACL.xml",
@@ -288,13 +298,16 @@ class TestInstalledFiles:
         issues = []
         checks = [
             ("/usr/local/sbin/kea-unbound-ddns.py", "755"),
+            ("/usr/local/sbin/kea-unbound-logwatch.py", "755"),
             ("/usr/local/opnsense/scripts/keaunbound/start.py", "755"),
-            ("/usr/local/opnsense/scripts/keaunbound/lease-sync.py", "755"),
+            ("/usr/local/opnsense/scripts/keaunbound/kea-sync.py", "755"),
             ("/usr/local/opnsense/scripts/keaunbound/local-data-audit.py", "755"),
             ("/usr/local/opnsense/scripts/keaunbound/local-data-clean.py", "755"),
+            ("/usr/local/opnsense/scripts/keaunbound/uninstall.sh", "755"),
             ("/usr/local/etc/inc/plugins.inc.d/keaunbound.inc", "644"),
             ("/usr/local/opnsense/service/conf/actions.d/actions_keaunbound.conf", "644"),
             ("/usr/local/opnsense/mvc/app/models/OPNsense/KeaUnbound/General.xml", "644"),
+            ("/usr/local/opnsense/scripts/keaunbound/lib/consistency_sm.py", "644"),
         ]
         for path, expected_perm in checks:
             perm = ssh(f"stat -f '%Lp' {path} 2>/dev/null || echo missing", check=False).strip()
