@@ -80,13 +80,35 @@ class SupervisorKill(Scenario):
             f"pkill -F {SUPERVISOR_PIDFILE} || true", check=False
         )
         ctx.event("supervisor_killed")
-        ctx.wait(3, "let processes settle")
+        # Wait for both supervisor and child pidfiles to disappear — the child
+        # receives SIGTERM from the supervisor and takes a moment to exit.
+        # daemon(8) refuses to start a new supervisor if the child pidfile still
+        # references a running process, so we must not call start until both are
+        # gone.  Poll for up to 10s before giving up and removing them manually.
+        for _ in range(10):
+            time.sleep(1)
+            sup_gone = ctx.ssh.sudo(
+                f"test -f {SUPERVISOR_PIDFILE} && echo exists || echo gone",
+                check=False
+            ).strip()
+            child_gone = ctx.ssh.sudo(
+                f"test -f {PIDFILE} && echo exists || echo gone",
+                check=False
+            ).strip()
+            if sup_gone == "gone" and child_gone == "gone":
+                break
+        else:
+            # Timed out — force-remove stale pidfiles so start can proceed
+            ctx.ssh.sudo(
+                f"rm -f {SUPERVISOR_PIDFILE} {PIDFILE}", check=False
+            )
+        ctx.event("pidfiles_cleared")
 
     def verify(self, ctx: ChaosContext) -> list[str]:
         if getattr(self, "_skipped", False):
             return []
         failures = []
-        # After killing supervisor, daemon should be stopped
+        # After killing supervisor, no orphaned daemon processes should remain
         zombies = ctx.ssh.run(
             "pgrep -f kea-unbound-ddns.py || true", check=False
         )
@@ -96,7 +118,7 @@ class SupervisorKill(Scenario):
             )
         # Restart and verify clean start
         ctx.ssh.sudo(f"{CONFIGCTL} start", timeout=15, check=False)
-        time.sleep(3)
+        time.sleep(5)
         if not ctx.daemon_is_running():
             failures.append("Daemon failed to restart after supervisor kill")
         if not _daemon_port_bound(ctx):

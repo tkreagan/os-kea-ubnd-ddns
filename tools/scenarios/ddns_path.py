@@ -86,7 +86,8 @@ class DdnsUpdateFlood(Scenario):
             self._pairs.append((hostname, ip))
 
         ctx.event("flood_sent", count=self.COUNT)
-        ctx.wait(3, "let daemon process flood")
+        # 10s: daemon processes flood + supervisor respawn window (-R 5) if crash
+        ctx.wait(10, "let daemon process flood and recover if needed")
 
     def verify(self, ctx: ChaosContext) -> list[str]:
         failures = []
@@ -145,7 +146,8 @@ class DdnsMalformed(Scenario):
             except Exception:
                 pass
             ctx.event("malformed_sent", index=i, size=len(payload))
-        ctx.wait(3, "let daemon recover")
+        # 10s: covers supervisor respawn delay (-R 5) + startup + port bind
+        ctx.wait(10, "let daemon recover after malformed packets")
 
     def verify(self, ctx: ChaosContext) -> list[str]:
         failures = []

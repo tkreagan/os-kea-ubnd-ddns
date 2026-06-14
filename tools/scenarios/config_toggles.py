@@ -73,7 +73,7 @@ class SynthesizePtrToggle(Scenario):
         hostname, ip = ctx.alloc_host("-synptr")
         self._hostname = hostname
         self._ip = ip
-        mac = "aa:cc:00:sy:pt:01"
+        mac = "aa:cc:00:5e:01:01"
 
         # Disable synthesize_ptr
         _set_config(ctx, SYNTH_PTR_PATH, "0")
@@ -123,6 +123,16 @@ class CollisionPolicyCycle(Scenario):
 
     def setup(self, ctx: ChaosContext) -> None:
         self._original = _get_config(ctx, COLLISION_PATH)
+        # Requires host_cmds hook for reservation-add; skip if not loaded.
+        from tools.lib.kea import KeaError
+        try:
+            ctx.kea.query("subnet4-reservation-get",
+                          arguments={"subnet-id": 99999, "ip-address": "0.0.0.0"})
+        except KeaError as exc:
+            if "not supported" in str(exc):
+                raise RuntimeError(
+                    "host_cmds hook not loaded — enable it in kea-dhcp4.conf to run this scenario"
+                )
 
     def run(self, ctx: ChaosContext) -> None:
         self._results: dict[str, dict] = {}
@@ -217,7 +227,7 @@ class AggressiveCleanupToggle(Scenario):
         ctx.event("aggressive_cleanup_enabled")
 
         # Now inject a lease for the same IP and sync — should trigger aggressive cleanup
-        ctx.kea.lease4_add(ip, "aa:ac:le:an:00:01", hostname,
+        ctx.kea.lease4_add(ip, "aa:ac:00:01:00:01", hostname,
                            valid_lft=600, subnet_id=ctx.subnet_id())
         ctx.run_sync("dynamic")
         ctx.wait(2, "aggressive cleanup settle")
