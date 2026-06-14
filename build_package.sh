@@ -50,6 +50,8 @@ _build_on_box() {
         install -m 755 "src/opnsense/scripts/keaunbound/$f" \
             "$STAGE/usr/local/opnsense/scripts/keaunbound/$f"
     done
+    install -m 755 src/opnsense/scripts/keaunbound/uninstall.sh \
+        "$STAGE/usr/local/opnsense/scripts/keaunbound/uninstall.sh"
 
     for f in __init__.py keaunbound_sync.py kea_transport.py \
               consistency_sm.py pid_watch.py preconditions.py logwatch.py; do
@@ -85,10 +87,42 @@ _build_on_box() {
     fi
 
     # ── Build +MANIFEST ───────────────────────────────────────────────────────
-    cat > "$STAGE/+MANIFEST" <<MANIFEST
-name: ${PKGNAME}
-version: ${VERSION}
-origin: opnsense-plugins/${PKGNAME}
+    # Use Python to generate the manifest with embedded lifecycle scripts so we
+    # avoid shell heredoc nesting conflicts.  Scripts are JSON-encoded strings
+    # (the format pkg(8) uses internally, confirmed from live package inspection).
+    #
+    # pre-deinstall: calls our installed uninstall.sh while files are still present
+    #   — handles daemon stop and config.xml cleanup.
+    # post-deinstall: removes runtime dirs and restarts configd after pkg deletes files.
+    export STAGE PKGNAME VERSION
+    python3 - << 'PYEOF'
+import json, os
+
+stage   = os.environ['STAGE']
+pkgname = os.environ['PKGNAME']
+version = os.environ['VERSION']
+
+# Scripts are encoded as JSON strings (escape \n, \", etc.) per the UCL format
+# pkg uses internally.  json.dumps() produces exactly the right encoding.
+pre_deinstall = json.dumps(
+    "#!/bin/sh\n"
+    "# Stop daemon and clean config while installed files are still present.\n"
+    "/usr/local/opnsense/scripts/keaunbound/uninstall.sh 2>/dev/null || true\n"
+)
+
+post_deinstall = json.dumps(
+    "#!/bin/sh\n"
+    "# Remove runtime state left after pkg deletes installed files.\n"
+    "rm -rf /var/run/keaunbound\n"
+    "service configd restart >/dev/null 2>&1 || true\n"
+    "printf 'kea-unbound removed.\\n"
+    "Log files (if any) are preserved at /var/log/keaunbound/\\n"
+    "To purge: rm -rf /var/log/keaunbound\\n'\n"
+)
+
+manifest = f"""name: {pkgname}
+version: {version}
+origin: opnsense-plugins/{pkgname}
 comment: Kea DHCP to Unbound DNS registration (DDNS bridge)
 www: https://github.com/tkreagan/os-kea-unbound
 maintainer: tk@rgn.ltd
@@ -98,10 +132,19 @@ Automatically registers Kea DHCP leases and static reservations in Unbound DNS.
 Runs an RFC 2136 DNS UPDATE stub listener for kea-dhcp-ddns, plus on-demand
 synchronisation scripts and a scheduled stale-record cleanup.
 EOD
-deps: {
-  py313-dnspython: {origin: "net/py-dnspython", version: "2.8"}
-}
-MANIFEST
+deps: {{
+  py313-dnspython: {{origin: "net/py-dnspython", version: "2.8"}}
+}}
+scripts: {{
+  pre-deinstall: {pre_deinstall};
+  post-deinstall: {post_deinstall};
+}}
+"""
+
+with open(stage + '/+MANIFEST', 'w') as f:
+    f.write(manifest)
+print(f"    +MANIFEST written with lifecycle scripts")
+PYEOF
 
     # ── Build package ─────────────────────────────────────────────────────────
     pkg create -M "$STAGE/+MANIFEST" -r "$STAGE" -o /tmp/
