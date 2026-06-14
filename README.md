@@ -46,10 +46,10 @@ never touched by either path.
 
 - OPNsense 26.1 or later (OPNsense 24.7+ should have the necessary capabilities,
   but nothing prior to 26.1 has been tested)
-- Kea DHCP4 and/or Kea DHCP6 (built into OPNsense)
+- Kea DHCP4 and/or Kea DHCP6 (built into OPNsense) — enabled and serving leases
+- Unbound DNS resolver (built into OPNsense) — must be the active resolver
 - `kea-dhcp-ddns` configured and running (for the dynamic path; the static sync
   path works without it)
-- Unbound DNS resolver (built into OPNsense, must be the active resolver)
 - `py313-dnspython` — listed in `PLUGIN_DEPENDS`, installed automatically by `pkg`
 
 > **High availability / multi-router setups are not supported.** The plugin
@@ -102,9 +102,28 @@ pkg add work/pkg/os-kea-unbound-0.9.pkg
 > from a Mac, copy the `src/` tree to your OPNsense box, place it inside a
 > plugins checkout, and run `make upgrade` there.
 
-## Configuration
+## Setup
 
-### Step 1 — Configure Kea subnets for DDNS
+### Before you begin
+
+Confirm the following before enabling the plugin:
+
+- **Kea DHCP is enabled and running.** Go to **Services → Kea DHCP → DHCPv4** (and/or DHCPv6). The service status must show running and you should have at least one subnet configured with an address pool.
+- **Unbound is the active DNS resolver.** Go to **Services → Unbound DNS → General** and confirm it is enabled. The plugin writes directly to Unbound's runtime and does not work with any other resolver.
+- **Clients send hostnames.** The plugin creates DNS records from DHCP-provided hostnames. Clients that send no hostname — common with MAC address randomization — will not get a record. See [Clients without hostnames and generated names](#clients-without-hostnames-and-generated-names) for options.
+
+### Plugin setup
+
+Go to **Services → Kea Unbound DDNS → Settings**. The plugin ships with all sync
+and cleanup settings defaulted to **on**. Review the [Settings reference](#settings-reference)
+below, but the defaults are appropriate for most deployments.
+
+Do not click **Apply** yet — finish the Kea configuration below first, then come
+back to check **Enabled** and apply.
+
+### Kea setup
+
+#### Configure each subnet for DDNS
 
 Go to **Services → Kea DHCP → DHCPv4 (or DHCPv6) → Subnets**, edit each subnet
 that should register DNS entries, and switch to **Advanced** mode. Under the
@@ -128,7 +147,7 @@ Save and apply after editing each subnet.
 > **Trailing dot required on the forward zone:** The DNS forward zone field must
 > end with a trailing dot — `home.lan.` not `home.lan`. Without it, kea-dhcp-ddns
 > silently drops every DNS UPDATE and nothing is registered. This is the most
-> common configuration mistake. The **Kea Config Check** tab detects and flags it.
+> common configuration mistake.
 
 > **Recommended DDNS settings (verified in v0.9 testing):** For this plugin's
 > architecture — Unbound is updated via the bridge and there is no external DDNS
@@ -152,37 +171,63 @@ Save and apply after editing each subnet.
 > send no hostname/FQDN at all (e.g. MAC-randomizing phones) get no record; closing
 > that would require `ddns-generated-prefix` + `ddns-replace-client-name`.
 
-### Step 2 — Enable kea-dhcp-ddns
+#### Enable kea-dhcp-ddns
 
 Go to **Services → Kea DHCP → DHCP-DDNS**, enable the daemon, and save. The
 default settings are correct — no port or forward zone configuration is needed
-here. The per-subnet DDNS settings configured in Step 1 tell kea-dhcp-ddns where
-to send updates.
+here. The per-subnet DDNS settings configured above tell kea-dhcp-ddns where to
+send updates.
 
-### Step 3 — Enable the plugin
+#### Validate your Kea configuration
 
-Go to **Services → Kea Unbound DDNS → Settings**.
+Open the **Kea Config Check** tab (**Services → Kea Unbound DDNS → Kea Config
+Check**). It reads the live Kea configuration and flags common problems — missing
+trailing dots on zone names, subnets with DDNS disabled, kea-dhcp-ddns listener
+state. Resolve any errors shown before proceeding.
 
-All sync and cleanup settings default to **on**. The only required action is to
-check **Enabled** and click **Apply**. Review the other settings and adjust if
-needed before applying.
+### Unbound setup
 
-Use the **Kea Config Check** tab to verify your Kea DDNS configuration, and the
-**Lease Audit** tab to inspect current DNS registration status.
+No changes to Unbound are required. The plugin discovers and writes to Unbound
+automatically.
 
-### Step 4 — Optionally disable "Register DHCP Static Mappings" in Unbound
+**Optional — disable "Register DHCP Static Mappings":** After enabling this
+plugin's static reservation sync, the built-in Unbound setting at **Services →
+Unbound DNS → General → Register DHCP Static Mappings** becomes redundant — both
+features register the same Kea reservations in DNS. Disabling the built-in setting
+is recommended to avoid duplication, but the plugin guards OPNsense-registered
+entries and will never overwrite them, so leaving it on is safe if you prefer a
+gradual transition.
 
-After enabling the plugin's static reservation sync, you can turn off Unbound's
-built-in **Register DHCP Static Mappings** setting (**Services → Unbound DNS →
-General → Register DHCP Static Mappings**). Both features register the same Kea
-reservations in DNS, so running both is redundant. The plugin provides additional
-visibility — per-reservation status, PTR tracking, and the Lease Audit view — that
-the built-in setting does not.
+### Enable the plugin
 
-OPNsense-registered entries are always guarded and never overwritten by the plugin,
-so leaving the built-in setting on is safe if you prefer a gradual transition.
+Go back to **Services → Kea Unbound DDNS → Settings**, check **Enabled**, and
+click **Apply**.
 
-### Settings reference
+### After enabling
+
+Once running, active leases and static reservations should appear in the
+**Lease Audit** tab within a few seconds of the daemon starting. Each row shows
+the hostname, IP, record source (reservation or lease), and current DNS
+registration state. If the tab is empty or shows unexpected gaps, see
+[Troubleshooting](#troubleshooting) below.
+
+## Troubleshooting
+
+**Logs** are written to `/var/log/keaunbound/` and are also visible in the
+**Log File** tab. All components — the daemon, sync scripts, and audit/cleanup
+jobs — write to the same log facility.
+
+**Common problems and where to look:**
+
+| Symptom | Likely cause | Where to check |
+|---|---|---|
+| No records appear after a new lease | kea-dhcp-ddns not running, or forward zone missing trailing dot | **Kea Config Check** tab — look for errors |
+| Daemon shows stopped / not running | Startup preconditions not met (no DDNS-enabled subnet found, or Unbound not reachable) | **Log File** tab for the specific precondition failure |
+| PTR records missing | Reverse zone not set on the subnet, or **Synthesize PTR records** disabled | Subnet DDNS settings → DNS reverse zone; **Settings** tab |
+| Records disappear after Unbound restart | Expected — Unbound flushes runtime `local_data` on restart; the daemon detects the restart and reconciles within seconds | **Lease Audit** tab should repopulate automatically |
+| Leases visible but not registering via DDNS | `update-on-renew` not set and lease has not renewed since enabling the plugin | Wait for a lease renewal, or use the **Sync** button on the Lease Audit tab to force a static reconcile |
+
+## Settings reference
 
 | Setting | Default | Notes |
 |---|---|---|
@@ -198,7 +243,7 @@ so leaving the built-in setting on is safe if you prefer a gradual transition.
 | Max reconcile attempts *(advanced)* | `5` | Failed reconciles before the daemon marks itself degraded |
 | Readiness watchdog *(advanced)* | `10 min` | Time to wait for Kea/Unbound before the watchdog restarts the daemon. 0 = wait forever |
 
-#### Hostname collision policy
+### Hostname collision policy
 
 When a DHCP client registers a hostname that is already in Unbound for a
 different IP address, the plugin applies one of three policies:
@@ -224,7 +269,7 @@ On networks where clients randomize their MAC address, First wins can permanentl
 block a hostname from updating if the original registrant's lease expired without
 sending a DELETE.
 
-#### Warning: settings that can remove DNS entries from other sources
+### Warning: settings that can remove DNS entries from other sources
 
 **Auto-clean** calls `unbound-control local_data_remove`, which removes records
 from Unbound's **runtime in-memory zone** — including entries sourced from config
