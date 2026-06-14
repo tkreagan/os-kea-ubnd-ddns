@@ -25,8 +25,9 @@ REPO="$(cd "$(dirname "$0")" && pwd)"
 # ── Read version from Makefile ────────────────────────────────────────────────
 VERSION=$(grep '^PLUGIN_VERSION' "$REPO/Makefile" | awk '{print $NF}')
 PKGNAME="os-kea-unbound"
-OUTFILE_REMOTE="/tmp/${PKGNAME}-${VERSION}.txz"
-OUTFILE_LOCAL="${REPO}/${PKGNAME}-${VERSION}.txz"
+# pkg(8) uses .pkg (zstd) on FreeBSD 14+, .txz on older versions
+OUTFILE_REMOTE="/tmp/${PKGNAME}-${VERSION}.pkg"
+OUTFILE_LOCAL="${REPO}/${PKGNAME}-${VERSION}.pkg"
 
 # ── Build on FreeBSD (OPNsense box) ──────────────────────────────────────────
 _build_on_box() {
@@ -96,14 +97,25 @@ _build_on_box() {
     # post-deinstall: removes runtime dirs and restarts configd after pkg deletes files.
     export STAGE PKGNAME VERSION
     python3 - << 'PYEOF'
-import json, os
+import hashlib, json, os
 
 stage   = os.environ['STAGE']
 pkgname = os.environ['PKGNAME']
 version = os.environ['VERSION']
 
-# Scripts are encoded as JSON strings (escape \n, \", etc.) per the UCL format
-# pkg uses internally.  json.dumps() produces exactly the right encoding.
+# Build files: section — pkg create -M requires explicit file list with checksums
+files_lines = []
+for root, dirs, fnames in os.walk(stage):
+    dirs[:] = sorted(d for d in dirs if not d.startswith('+'))
+    for fname in sorted(fnames):
+        if fname.startswith('+'):
+            continue
+        fpath = os.path.join(root, fname)
+        rel = fpath[len(stage):]  # e.g. /usr/local/sbin/kea-unbound-ddns.py
+        sha = hashlib.sha256(open(fpath, 'rb').read()).hexdigest()
+        files_lines.append(f'  {rel}: "sha256:{sha}"')
+files_section = 'files: {\n' + '\n'.join(files_lines) + '\n}' if files_lines else ''
+
 pre_deinstall = json.dumps(
     "#!/bin/sh\n"
     "# Stop daemon and clean config while installed files are still present.\n"
@@ -121,7 +133,7 @@ post_deinstall = json.dumps(
 )
 
 manifest = f"""name: {pkgname}
-version: {version}
+version: "{version}"
 origin: opnsense-plugins/{pkgname}
 comment: Kea DHCP to Unbound DNS registration (DDNS bridge)
 www: https://github.com/tkreagan/os-kea-unbound
@@ -139,15 +151,24 @@ scripts: {{
   pre-deinstall: {pre_deinstall};
   post-deinstall: {post_deinstall};
 }}
+{files_section}
 """
 
 with open(stage + '/+MANIFEST', 'w') as f:
     f.write(manifest)
-print(f"    +MANIFEST written with lifecycle scripts")
+print(f"    +MANIFEST written ({len(files_lines)} files, lifecycle scripts)")
 PYEOF
 
     # ── Build package ─────────────────────────────────────────────────────────
     pkg create -M "$STAGE/+MANIFEST" -r "$STAGE" -o /tmp/
+
+    # Detect actual output file (FreeBSD 14+ uses .pkg/zstd; older used .txz)
+    ACTUAL_OUT=$(ls /tmp/${PKGNAME}-${VERSION}.pkg /tmp/${PKGNAME}-${VERSION}.txz 2>/dev/null | head -1)
+    if [ -z "$ACTUAL_OUT" ]; then
+        echo "ERROR: pkg create produced no output file in /tmp/" >&2
+        exit 1
+    fi
+    OUTFILE_REMOTE="$ACTUAL_OUT"
 
     # ── Verify package contents ───────────────────────────────────────────────
     echo "==> Verifying package contents..."
@@ -217,7 +238,16 @@ rm -rf /tmp/keaunbound-build /tmp/keaunbound-build.tar.gz
 REMOTE_HEREDOC
 
     echo "==> Downloading package..."
-    SSH_AUTH_SOCK="" scp $SSH_OPTS "${REMOTE}:${OUTFILE_REMOTE}" "$OUTFILE_LOCAL"
+    # Detect actual remote filename (.pkg on FreeBSD 14+, .txz on older)
+    REMOTE_FILE=$(SSH_AUTH_SOCK="" ssh $SSH_OPTS "$REMOTE" \
+        "ls /tmp/${PKGNAME}-${VERSION}.pkg /tmp/${PKGNAME}-${VERSION}.txz 2>/dev/null | head -1")
+    if [ -z "$REMOTE_FILE" ]; then
+        echo "ERROR: Cannot find built package on ${HOST}" >&2
+        exit 1
+    fi
+    EXT="${REMOTE_FILE##*.}"
+    OUTFILE_LOCAL="${REPO}/${PKGNAME}-${VERSION}.${EXT}"
+    SSH_AUTH_SOCK="" scp $SSH_OPTS "${REMOTE}:${REMOTE_FILE}" "$OUTFILE_LOCAL"
     echo "Package: ${OUTFILE_LOCAL}"
 }
 

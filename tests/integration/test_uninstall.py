@@ -73,20 +73,21 @@ def _fresh_install(ssh, txz_path: str) -> None:
 def _build_txz(ssh) -> str:
     """
     Upload build_package.sh from the local repo and run it on the box.
-    Returns the remote path of the produced .txz.
+    Returns the remote path of the produced package (.pkg or .txz).
     """
     ssh.sftp_put(REPO / "build_package.sh", "/tmp/build_package.sh")
     out = ssh(
         f"cd {PLUGIN_DIR} && sh /tmp/build_package.sh",
         timeout=120,
     )
-    txz = next(
-        (ln.strip() for ln in reversed(out.splitlines()) if ln.strip().endswith(".txz")),
+    pkg = next(
+        (ln.strip() for ln in reversed(out.splitlines())
+         if ln.strip().endswith(".pkg") or ln.strip().endswith(".txz")),
         None,
     )
-    if not txz:
-        pytest.fail(f"build_package.sh produced no .txz.\nOutput:\n{out}")
-    return txz
+    if not pkg:
+        pytest.fail(f"build_package.sh produced no package file.\nOutput:\n{out}")
+    return pkg
 
 
 # ── Module-level fixtures ─────────────────────────────────────────────────────

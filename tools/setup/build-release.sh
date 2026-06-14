@@ -43,7 +43,8 @@ VM_OPN="${PROXMOX_VM_DEV_OPNSENSE:-113}"
 OPN_HOST="${DEV_OPNSENSE_HOST:-dev-opnsense.plhm.rgn.cm}"
 
 VERSION=$(grep '^PLUGIN_VERSION' "$REPO_ROOT/Makefile" | awk '{print $NF}')
-PKGFILE="${REPO_ROOT}/os-kea-unbound-${VERSION}.txz"
+# pkg(8) uses .pkg on FreeBSD 14+; detect whichever exists after build
+PKGFILE=""
 
 # ── Parse args ────────────────────────────────────────────────────────────────
 SKIP_ROLLBACK=0
@@ -77,8 +78,10 @@ bash "$REPO_ROOT/build_package.sh"
 
 # ── 3. Verify local package ───────────────────────────────────────────────────
 step "Verifying package"
-[[ -f "$PKGFILE" ]] || die "Package not found after build: ${PKGFILE}"
-xz -t "$PKGFILE" || die "Package failed XZ integrity check"
+# Detect whichever format pkg(8) produced (.pkg on FreeBSD 14+, .txz on older)
+PKGFILE=$(ls "${REPO_ROOT}/os-kea-unbound-${VERSION}".pkg \
+              "${REPO_ROOT}/os-kea-unbound-${VERSION}".txz 2>/dev/null | head -1)
+[[ -n "$PKGFILE" && -f "$PKGFILE" ]] || die "Package not found after build (looked for .pkg and .txz)"
 SUM=$(shasum -a 256 "$PKGFILE" | awk '{print $1}')
 info "$(basename "$PKGFILE")"
 info "sha256: ${SUM}"
