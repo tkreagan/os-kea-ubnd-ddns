@@ -746,6 +746,8 @@ class Daemon:
                     # Unexpected error in process_update — log it, stay up.
                     self.log.error("process_update raised %s: %s",
                                    type(e).__name__, e, exc_info=True)
+                    self.sm.note_dirty(names)
+                    self._arm_timer(self.sm.cfg.normal_drain_poll)
                     return dns.rcode.SERVFAIL
         except BlockingIOError:
             # A reconcile / external clean holds the lock. Defer + re-resolve on
