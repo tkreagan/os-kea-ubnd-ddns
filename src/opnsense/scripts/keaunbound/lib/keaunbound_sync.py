@@ -9,12 +9,13 @@ Provides:
   - Unbound control wrapper
   - host_entries.conf parser
   - Stale/orphaned record detection (shared by audit and clean)
-  - Hostname sanity checks
+  - Hostname sanity checks and IP/PTR conversion
   - Error handling for missing/unavailable services
   - Syslog logging
 
-Uses only the Python standard library (no third-party dependencies) so it runs
-on a stock OPNsense install without extra packages.
+Requires dnspython (py3X-dnspython) which is a package dependency — all scripts
+that import this lib run in the same environment as the daemon and have access
+to it.
 """
 
 from __future__ import annotations
@@ -31,6 +32,10 @@ import syslog
 import time
 import xml.etree.ElementTree as ET
 from typing import Dict, List, Optional, Set, Tuple
+
+import dns.exception
+import dns.name
+import dns.reversename
 
 # Kea connection lives in the transport layer (unix socket / HTTP, with the
 # config-reading resolver). The exception types are defined there and re-exported
@@ -236,22 +241,17 @@ def _arpa_to_ip(ptr_name: str) -> str:
     Used to bridge OPNsense's IP-keyed local-data-ptr format:
       local-data-ptr: "192.168.1.1 hostname."
     when the caller holds only the arpa form "1.1.168.192.in-addr.arpa".
+
+    Delegates the arpa→address decoding to dns.reversename (dnspython), then
+    normalises through ipaddress to get canonical form (e.g. "::1" not
+    "0:0:0:0:0:0:0:1").  Returns '' on any parse or conversion failure so
+    callers can use a simple truthiness check.
     """
-    name = ptr_name.rstrip(".")
-    if name.endswith(".in-addr.arpa"):
-        labels = name[:-len(".in-addr.arpa")].split(".")
-        if len(labels) == 4 and all(l.isdigit() for l in labels):
-            return ".".join(reversed(labels))
-    elif name.endswith(".ip6.arpa"):
-        nibbles = name[:-len(".ip6.arpa")].split(".")
-        if len(nibbles) == 32 and all(len(n) == 1 for n in nibbles):
-            rev = "".join(reversed(nibbles))
-            groups = [rev[i:i + 4] for i in range(0, 32, 4)]
-            try:
-                return str(ipaddress.ip_address(":".join(groups)))
-            except ValueError:
-                return ""
-    return ""
+    try:
+        raw = dns.reversename.to_address(dns.name.from_text(ptr_name))
+        return str(ipaddress.ip_address(raw))
+    except (dns.exception.DNSException, ValueError):
+        return ""
 
 
 def read_d2_reverse_zones() -> Set[str]:
@@ -591,40 +591,63 @@ def is_ptr_name(name: str) -> bool:
 
 def is_sane_name(name: str, logger: Optional[logging.Logger] = None) -> bool:
     """
-    Return True if name is a plausible hostname we should register.
+    Return True if *name* is a plausible hostname suitable for registration in
+    Unbound's local zone.  Called on every name before any write; both the live
+    listener (kea-unbound-ddns.py) and the sync path (kea-sync.py) use this
+    single implementation so the two paths accept exactly the same set of names.
 
-    Rejects empty strings, the DNS root, reserved names, names with any label
-    containing invalid characters (RFC 1123), all-numeric names (IPs mistaken
-    for hostnames), and names exceeding the 253-char DNS limit. Every label is
-    validated, not just the first — unbound-control accepts invalid middle
-    labels without error, so this is the sole guard against garbage entering
-    the local zone. Mirrors the daemon's check so the sync path applies the
-    same hygiene as the live listener.
+    Three-layer filter:
+
+    Layer 1 — semantic fast-path
+        Rejects names that are structurally valid DNS but meaningless or
+        dangerous here: the empty string, the DNS root, and bare stub hostnames
+        ("localhost", "localdomain") that should never appear in our zone.
+
+    Layer 2 — structural validity (via dnspython + _LABEL_RE)
+        dns.name.from_text() enforces label length ≤ 63 bytes and total wire
+        length ≤ 255 bytes (RFC 1035 §2.3.4) without us reimplementing it.
+        _LABEL_RE then checks RFC 1123 §2.1 character-set constraints
+        (alphanumeric + hyphen, not starting or ending with a hyphen) because
+        dnspython's parser accepts a wider character set than we want.  Every
+        label is validated — not just the first — because unbound-control
+        silently accepts records with invalid middle labels and this is the only
+        gate that stops garbage entering the local zone.
+
+    Layer 3 — DHCP-artifact filter
+        Rejects names whose first label is all-numeric.  This is not a DNS
+        rule; it is specific to Kea behaviour: when a DHCP client sends a bare
+        integer as DHCP option 12 (hostname), or when Kea generates a synthetic
+        hostname from the lease sequence number, qualify_hostname() appends the
+        domain suffix and produces "123456789.lan" — structurally valid DNS but
+        never a real hostname.  Checking only labels[0] is intentional: the
+        domain-suffix labels ("lan", "local", …) are legitimately non-numeric.
     """
+    # Layer 1: semantic fast-path
     if not name or name in _NONSENSE_NAMES:
         if logger:
             logger.warning("Rejecting nonsense name: %r", name)
         return False
 
-    labels = [l for l in name.split(".") if l]  # strip empty trailing label
+    # Layer 2a: structural validity — length and empty-label detection
+    try:
+        dns.name.from_text(name if name.endswith(".") else name + ".")
+    except dns.exception.DNSException as exc:
+        if logger:
+            logger.warning("Rejecting structurally invalid name %r: %s", name, exc)
+        return False
+
+    # Layer 2b: character-set check (dnspython does not enforce RFC 1123 chars)
+    labels = [l for l in name.split(".") if l]
     for label in labels:
         if not _LABEL_RE.match(label):
             if logger:
                 logger.warning("Rejecting name with invalid label %r in: %r", label, name)
             return False
 
-    # Reject when the first label is all-numeric — it looks like an IP octet or
-    # counter, not a real hostname.  The domain-suffix appended by qualify_hostname
-    # makes the all(…) check unreliable: "123456789.lan" would pass because "lan"
-    # is not all-digit, so we check only the first label.
+    # Layer 3: DHCP-artifact filter
     if labels[0].isdigit():
         if logger:
             logger.warning("Rejecting all-numeric first label (looks like IP/counter): %r", name)
-        return False
-
-    if len(name.rstrip(".")) > 253:
-        if logger:
-            logger.warning("Rejecting name exceeding 253-char limit: %r", name)
         return False
 
     return True

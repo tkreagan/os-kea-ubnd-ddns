@@ -66,7 +66,6 @@ import errno
 import ipaddress
 import logging
 import os
-import re
 import select
 import signal
 import socket
@@ -108,7 +107,8 @@ except ImportError:
 # machine, and the pid-watch level read. The plugin installs all halves together.
 sys.path.insert(0, "/usr/local/opnsense/scripts/keaunbound")
 from lib.keaunbound_sync import (  # noqa: E402
-    _arpa_to_ip, setup_logging, get_collision_policy, get_sm_config,
+    _arpa_to_ip, is_sane_name, reverse_ptr,
+    setup_logging, get_collision_policy, get_sm_config,
     read_host_entries, unbound_mutation_lock, MUTATION_LOCK_PATH,
 )
 from lib import consistency_sm as csm  # noqa: E402
@@ -212,37 +212,10 @@ def _read_host_entries_at(path: str) -> dict:
 # ── DNS record helpers ────────────────────────────────────────────────────────
 HANDLED_TYPES = {"A", "AAAA", "PTR"}
 OTHER_FAMILY = {"A": "AAAA", "AAAA": "A"}
-_NONSENSE_NAMES = {"", ".", "localhost", "localdomain"}
-_LABEL_RE = re.compile(r'^[a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?$')
 
 
 def fqdn(name: dns.name.Name) -> str:
     return str(name).rstrip(".")
-
-
-def is_sane_name(name: str, logger: logging.Logger) -> bool:
-    if not name or name in _NONSENSE_NAMES:
-        logger.warning("Rejecting nonsense name: %r", name)
-        return False
-    labels = [l for l in name.split(".") if l]  # strip empty trailing label
-    for label in labels:
-        if not _LABEL_RE.match(label):
-            logger.warning("Rejecting name with invalid label %r in: %r", label, name)
-            return False
-    if labels[0].isdigit():
-        logger.warning("Rejecting all-numeric first label (looks like IP/counter): %r", name)
-        return False
-    if len(name.rstrip(".")) > 253:
-        logger.warning("Rejecting name exceeding 253-char limit: %r", name)
-        return False
-    return True
-
-
-def reverse_ptr(ip: str):
-    try:
-        return str(ipaddress.ip_address(ip).reverse_pointer)
-    except ValueError:
-        return None
 
 
 def extract_dirty_names(msg: dns.message.Message) -> set:
