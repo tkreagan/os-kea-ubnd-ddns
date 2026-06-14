@@ -129,8 +129,8 @@ setup_opnsense() {
 
     check_key_auth "${OPNSENSE_HOST}"
 
-    echo "  [1/1] Running chaos monkey --setup-env (Kea subnet + d2 + plugin config)..."
-    python3 tools/chaos_monkey.py --setup-env
+    echo "  [1/1] Running configure-chaos-env.sh --opnsense-only..."
+    bash tools/setup/configure-chaos-env.sh --opnsense-only
     echo "  dev-opnsense ready."
 }
 

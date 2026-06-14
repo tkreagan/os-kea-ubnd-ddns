@@ -157,6 +157,7 @@ class KeaClient:
         args: dict[str, Any] = {
             "ip-address": ip,
             "duid": duid,
+            "iaid": 1,
             "hostname": hostname,
             "valid-lft": valid_lft,
             "type": "IA_NA",

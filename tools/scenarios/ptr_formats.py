@@ -21,7 +21,6 @@ import time
 from tools.scenarios import register
 from tools.scenarios.base import Scenario, ChaosContext
 
-_TEST_V6_PREFIX = "fd42::"   # isolated from other scenario prefixes
 
 
 # ---------------------------------------------------------------------------
@@ -172,7 +171,7 @@ class PtrFormatV6Sync(Scenario):
         ctx.require_dhcp6()
 
     def run(self, ctx: ChaosContext) -> None:
-        hostname, ipv6 = ctx.alloc_v6_host("-ptrf6", prefix=_TEST_V6_PREFIX)
+        hostname, ipv6 = ctx.alloc_v6_host("-ptrf6", prefix=ctx.v6_prefix)
         duid = "00:03:00:01:aa:bb:cc:f6:01:01"
         ctx.kea.lease6_add(ipv6, duid, hostname, valid_lft=3600,
                            subnet_id=ctx.subnet6_id())
@@ -199,23 +198,25 @@ class PtrFormatV6Sync(Scenario):
                 f"PTR missing: expected {expected_arpa} → {fqdn}"
             )
 
-        # Verify 32-nibble format: key must end with ".ip6.arpa" and have 32 labels before it
+        # Verify 32-nibble format: check only the PTR key we created, not
+        # Unbound's built-in RFC 6303 empty-zone stubs (fe80::/10, fc00::/7, etc.)
+        # which appear in list_local_data with fewer nibble labels.
         raw_data = ctx.unbound.list_local_data()
-        ip6_keys = [k for k in raw_data if k.endswith(".ip6.arpa")]
-        if not ip6_keys:
-            failures.append("No ip6.arpa PTR key found in Unbound local_data")
+        if expected_arpa not in raw_data:
+            failures.append(
+                f"Expected PTR key not found in local_data: {expected_arpa!r}"
+            )
         else:
-            for k in ip6_keys:
-                nibble_part = k[:-len(".ip6.arpa")]
-                nibbles = nibble_part.split(".")
-                if len(nibbles) != 32:
-                    failures.append(
-                        f"ip6.arpa PTR key has {len(nibbles)} labels (expected 32): {k!r}"
-                    )
-                elif not all(len(n) == 1 and n in "0123456789abcdef" for n in nibbles):
-                    failures.append(
-                        f"ip6.arpa PTR key contains non-hex or multi-char nibble: {k!r}"
-                    )
+            nibble_part = expected_arpa[:-len(".ip6.arpa")]
+            nibbles = nibble_part.split(".")
+            if len(nibbles) != 32:
+                failures.append(
+                    f"ip6.arpa PTR key has {len(nibbles)} labels (expected 32): {expected_arpa!r}"
+                )
+            elif not all(len(n) == 1 and n in "0123456789abcdef" for n in nibbles):
+                failures.append(
+                    f"ip6.arpa PTR key contains non-hex or multi-char nibble: {expected_arpa!r}"
+                )
 
         # Live DNS query via drill
         result = ctx.dns.verify_pair(self._hostname, self._ipv6, ctx.domain, "AAAA")
@@ -311,7 +312,7 @@ class DdnsPtrSynthesisV6(Scenario):
             raise RuntimeError("Daemon not running — cannot test DDNS path")
 
     def run(self, ctx: ChaosContext) -> None:
-        hostname, ipv6 = ctx.alloc_v6_host("-ddnsv6ptr", prefix=_TEST_V6_PREFIX)
+        hostname, ipv6 = ctx.alloc_v6_host("-ddnsv6ptr", prefix=ctx.v6_prefix)
         payload = _build_aaaa_update(hostname, ipv6, ctx.domain)
         _send(ctx, payload)
         self._hostname = hostname

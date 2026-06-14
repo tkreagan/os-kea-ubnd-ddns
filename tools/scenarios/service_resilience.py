@@ -271,20 +271,8 @@ class SimultaneousFlip(Scenario):
             check=False, timeout=20
         )
         ctx.wait(5, "let kea start")
-        # d2 must also be running so the daemon can leave BLOCKED state
-        ctx.ssh.sudo(
-            "pkill -f kea-dhcp-ddns 2>/dev/null || true; sleep 1; "
-            "/usr/local/sbin/kea-dhcp-ddns "
-            "-c /usr/local/etc/kea/kea-dhcp-ddns.conf -d "
-            ">> /var/log/kea/kea_startup.log 2>&1 &",
-            check=False, timeout=15,
-        )
         ctx.event("both_services_restarted")
-        ctx.wait(5, "let d2 start and daemon transition to NORMAL")
-
-        # OPNsense regenerates kea-dhcp4.conf on restart; re-inject test subnet.
-        from tools.chaos_monkey import _ensure_kea_subnet
-        _ensure_kea_subnet(ctx)
+        ctx.wait(5, "let all Kea daemons (including d2) stabilise")
 
         # Wait for Kea to be responsive, then sync (retry a few times).
         for attempt in range(3):

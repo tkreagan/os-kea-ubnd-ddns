@@ -94,6 +94,7 @@ def _load_config() -> ChaosConfig:
         dhcpclient_lan_if=os.environ.get("DEV_DHCPCLIENT_LAN_IF", "ens19"),
         dev_domain=os.environ.get("DEV_DOMAIN", "lan"),
         test_ip_prefix=os.environ.get("TEST_IP_PREFIX", "192.168.99."),
+        test_v6_prefix=os.environ.get("TEST_V6_PREFIX", "fd00:cafe::"),
         test_subnet_id=(
             int(os.environ["TEST_SUBNET_ID"])
             if os.environ.get("TEST_SUBNET_ID", "").strip()
@@ -319,101 +320,22 @@ def verify_baseline(ctx: ChaosContext) -> list[str]:
     return failures
 
 
-# ---------------------------------------------------------------------------
-# Post-scenario Kea subnet guard
-# ---------------------------------------------------------------------------
+def _ensure_kea_services(ctx: ChaosContext) -> None:
+    """Restart Kea services if any stopped during a scenario.
 
-def _ensure_kea_subnet(ctx: ChaosContext) -> None:
-    """Restore the test subnet if Kea lost it (e.g. OPNsense regenerated configs).
-
-    Writes kea-dhcp4.conf with the subnet and sends config-reload via the
-    control socket — no Kea restart needed.  Silent on errors (best-effort).
-    """
-    import json as _json
-    import tempfile as _tmp
-
-    try:
-        existing_id = ctx.kea.discover_subnet_id()
-        if existing_id is not None:
-            return  # subnet is fine
-    except Exception:
-        pass  # kea might be down; let the scenario handle that
-
-    domain = ctx.cfg.dev_domain or "lan"
-    prefix = ctx.cfg.test_ip_prefix
-    subnet_cidr = ".".join(prefix.split(".")[:3]) + ".0/24"
-    subnet_pool = prefix + "100 - " + prefix + "200"
-
-    try:
-        raw4 = ctx.ssh.sudo("cat /usr/local/etc/kea/kea-dhcp4.conf", timeout=10)
-        cfg4 = _json.loads(raw4)
-        dhcp4 = cfg4.setdefault("Dhcp4", {})
-        dhcp4["ddns-send-updates"] = True
-        dhcp4["ddns-qualifying-suffix"] = domain
-        dhcp4["ddns-override-no-update"] = True
-        dhcp4["dhcp-ddns"] = {"enable-updates": True,
-                               "server-ip": "127.0.0.1", "server-port": 53001}
-        existing = dhcp4.get("subnet4", [])
-        if not any(s.get("subnet") == subnet_cidr for s in existing):
-            existing.insert(0, {
-                "id": 1,
-                "subnet": subnet_cidr,
-                "interface": "em1",
-                "pools": [{"pool": subnet_pool}],
-                "ddns-send-updates": True,
-                "ddns-qualifying-suffix": domain,
-                "ddns-override-no-update": True,
-                "option-data": [
-                    {"name": "domain-name", "data": domain},
-                    {"name": "routers", "data": prefix + "1"},
-                    {"name": "domain-name-servers", "data": prefix + "1"},
-                ],
-            })
-        dhcp4["subnet4"] = existing
-
-        # Write via sftp + sudo cp
-        with _tmp.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as tf:
-            _json.dump(cfg4, tf, indent=2)
-            tmp_local = pathlib.Path(tf.name)
-        try:
-            ctx.ssh.sftp_put(tmp_local, "/tmp/_kea_subnet_restore.json")
-        finally:
-            tmp_local.unlink(missing_ok=True)
-        ctx.ssh.sudo(
-            "cp /tmp/_kea_subnet_restore.json /usr/local/etc/kea/kea-dhcp4.conf"
-            " && rm /tmp/_kea_subnet_restore.json",
-            timeout=10,
-        )
-
-        # Reload Kea config in-place — no process restart
-        ctx.kea.query("config-reload")
-        ctx._subnet_id = None  # invalidate cached value
-    except Exception:
-        pass  # best-effort; next scenario will fail its own verify if still broken
-
-
-def _ensure_d2_running(ctx: ChaosContext) -> None:
-    """Restart kea-dhcp-ddns (d2) if it stopped during a scenario.
-
-    The consistency SM watches d2's pidfile and won't reconcile (and won't
-    reach NORMAL) unless all watched services including d2 are present.
-    Best-effort — swallows all errors.
+    Uses OPNsense's service management (configctl kea restart) so the
+    manual_config=1 flag is respected and Kea configs are not regenerated.
+    Best-effort — swallows all errors so it never breaks scenario accounting.
     """
     try:
+        # Check if d2 pidfile is present (d2 must run for SM to reach NORMAL)
         out = ctx.ssh.sudo(
             "test -f /var/run/kea/kea-dhcp-ddns.kea-dhcp-ddns.pid && echo yes || echo no",
             check=False, timeout=10,
         )
-        if "yes" in out:
-            return
-        ctx.ssh.sudo(
-            "pkill -f kea-dhcp-ddns 2>/dev/null || true; sleep 1; "
-            "/usr/local/sbin/kea-dhcp-ddns "
-            "-c /usr/local/etc/kea/kea-dhcp-ddns.conf -d "
-            ">> /var/log/kea/kea_startup.log 2>&1 &",
-            check=False, timeout=15,
-        )
-        time.sleep(3)
+        if "yes" not in out:
+            ctx.ssh.sudo("/usr/local/sbin/configctl kea restart", check=False, timeout=30)
+            time.sleep(5)
     except Exception:
         pass
 
@@ -479,14 +401,11 @@ def run_scenario(scenario_cls, ctx: ChaosContext) -> ScenarioResult:
                 "t": time.time(), "type": "cleanup_error",
                 "detail": str(cleanup_exc)[:200]
             })
-        # Some scenarios restart Kea via OPNsense which regenerates kea-dhcp4.conf
-        # (empty subnets). Detect and heal so subsequent scenarios can run.
-        _ensure_kea_subnet(ctx)
-        # d2 (kea-dhcp-ddns) must be running for the daemon to reach NORMAL state
-        # (the SM watches d2's pidfile). Restart if a scenario killed it.
-        _ensure_d2_running(ctx)
-        # If the daemon died during the scenario (e.g. supervisor killed, malformed
-        # packet crash), restart it so subsequent scenarios don't all fail.
+        # If Kea services (including d2) died during the scenario, restart via
+        # OPNsense's service management so manual_config=1 is respected.
+        _ensure_kea_services(ctx)
+        # If the daemon died during the scenario (supervisor killed, etc.),
+        # restart it so subsequent scenarios don't all fail.
         _ensure_daemon_running(ctx)
 
     if error:
@@ -510,238 +429,6 @@ def run_scenario(scenario_cls, ctx: ChaosContext) -> ScenarioResult:
         duration_s=duration, error=error,
     )
 
-
-# ---------------------------------------------------------------------------
-# Test-environment setup (Kea subnet + d2 + plugin enabled in config.xml)
-# ---------------------------------------------------------------------------
-
-def _setup_env(ssh, ctx: ChaosContext) -> list[str]:
-    """Configure the dev-opnsense box for chaos monkey testing.
-
-    Idempotent: safe to run on an already-configured box.
-    Returns a list of setup errors (empty = success).
-    """
-    import json as _json
-    import tempfile as _tmp
-    errors: list[str] = []
-    domain = ctx.cfg.dev_domain or "lan"
-    prefix = ctx.cfg.test_ip_prefix  # e.g. "192.168.1."
-    subnet_cidr = ".".join(prefix.split(".")[:3]) + ".0/24"
-    subnet_pool = prefix + "100 - " + prefix + "200"
-    # Reverse of first 3 octets for PTR zone
-    rev_zone = ".".join(reversed(prefix.rstrip(".").split("."))) + ".in-addr.arpa."
-
-    print(f"  domain={domain!r}  prefix={prefix!r}  subnet={subnet_cidr}")
-
-    def _upload_text(content: str, remote_dest: str, label: str) -> bool:
-        """Write content to a temp file, sftp it to /tmp, sudo-move to dest."""
-        try:
-            with _tmp.NamedTemporaryFile(mode="w", suffix=".tmp", delete=False) as tf:
-                tf.write(content)
-                tmp_local = pathlib.Path(tf.name)
-            tmp_remote = f"/tmp/_keaunbound_setup_{pathlib.Path(remote_dest).name}"
-            ssh.sftp_put(tmp_local, tmp_remote)
-            tmp_local.unlink(missing_ok=True)
-            ssh.sudo(f"cp {tmp_remote} {remote_dest} && rm {tmp_remote}", timeout=10)
-            print(f"    {label} written → {remote_dest}")
-            return True
-        except Exception as exc:
-            errors.append(f"{label} failed: {exc}")
-            return False
-
-    # ── 1. Enable plugin in config.xml ──────────────────────────────────────
-    print("  [1/4] Enabling plugin in config.xml...")
-    try:
-        raw = ssh.sudo("cat /conf/config.xml", timeout=15)
-        import xml.etree.ElementTree as ET
-        root = ET.fromstring(raw)
-        opns = root.find("OPNsense")
-        if opns is None:
-            opns = ET.SubElement(root, "OPNsense")
-        ku = opns.find("KeaUnbound")
-        if ku is None:
-            ku = ET.SubElement(opns, "KeaUnbound")
-        general = ku.find("general")
-        if general is None:
-            general = ET.SubElement(ku, "general")
-        def _set(parent, tag, val):
-            el = parent.find(tag)
-            if el is None:
-                el = ET.SubElement(parent, tag)
-            el.text = val
-        _set(general, "enabled", "1")
-        _set(general, "sync_static_reservations", "1")
-        _set(general, "collision_policy", "last_wins")
-        _set(general, "listen_port", "53535")
-        xml_out = ET.tostring(root, encoding="unicode")
-        _upload_text(xml_out, "/conf/config.xml", "config.xml")
-    except Exception as exc:
-        errors.append(f"config.xml read/parse failed: {exc}")
-
-    # ── 2. Update kea-dhcp4.conf with a DDNS-enabled subnet ─────────────────
-    print("  [2/4] Configuring Kea DHCPv4 subnet with DDNS...")
-    try:
-        raw4 = ssh.sudo("cat /usr/local/etc/kea/kea-dhcp4.conf", timeout=10)
-        cfg4 = _json.loads(raw4)
-        dhcp4 = cfg4.setdefault("Dhcp4", {})
-        dhcp4["ddns-send-updates"] = True
-        dhcp4["ddns-qualifying-suffix"] = domain
-        dhcp4["ddns-override-no-update"] = True
-        dhcp4["ddns-generated-prefix"] = "kea"
-        dhcp4["dhcp-ddns"] = {
-            "enable-updates": True,
-            "server-ip": "127.0.0.1",
-            "server-port": 53001,
-        }
-        existing = dhcp4.get("subnet4", [])
-        if not any(s.get("subnet") == subnet_cidr for s in existing):
-            existing.insert(0, {
-                "id": 1,
-                "subnet": subnet_cidr,
-                "interface": "em1",
-                "pools": [{"pool": subnet_pool}],
-                "ddns-send-updates": True,
-                "ddns-qualifying-suffix": domain,
-                "ddns-override-no-update": True,
-                "option-data": [
-                    {"name": "domain-name", "data": domain},
-                    {"name": "routers", "data": prefix + "1"},
-                    {"name": "domain-name-servers", "data": prefix + "1"},
-                ],
-            })
-        dhcp4["subnet4"] = existing
-        if _upload_text(_json.dumps(cfg4, indent=2),
-                        "/usr/local/etc/kea/kea-dhcp4.conf", "kea-dhcp4.conf"):
-            ssh.sudo("/usr/local/sbin/pluginctl -s kea restart 2>/dev/null || true",
-                     check=False, timeout=20)
-            time.sleep(3)
-    except Exception as exc:
-        errors.append(f"kea-dhcp4.conf read/parse failed: {exc}")
-
-    # ── 3. Update kea-dhcp-ddns.conf to forward to 127.0.0.1:53535 ──────────
-    print("  [3/4] Configuring kea-dhcp-ddns to forward to port 53535...")
-    d2_conf = {
-        "DhcpDdns": {
-            "ip-address": "127.0.0.1",
-            "port": 53001,
-            "tsig-keys": [],
-            "forward-ddns": {
-                "ddns-domains": [{
-                    "name": f"{domain}.",
-                    "dns-servers": [{"ip-address": "127.0.0.1", "port": 53535}],
-                }]
-            },
-            "reverse-ddns": {
-                "ddns-domains": [{
-                    "name": rev_zone,
-                    "dns-servers": [{"ip-address": "127.0.0.1", "port": 53535}],
-                }]
-            },
-            "loggers": [{
-                "name": "kea-dhcp-ddns",
-                "output_options": [{"output": "syslog"}],
-                "severity": "INFO",
-            }],
-        }
-    }
-    _upload_text(_json.dumps(d2_conf, indent=2),
-                 "/usr/local/etc/kea/kea-dhcp-ddns.conf", "kea-dhcp-ddns.conf")
-
-    # ── 4. Restart configd + re-apply kea config + start daemon ─────────────
-    # OPNsense regenerates kea-dhcp4.conf from templates when configd restarts,
-    # overwriting our changes.  So we:
-    #   (a) restart configd first (picks up config.xml plugin enable),
-    #   (b) write kea-dhcp4.conf again after configd has regenerated it,
-    #   (c) restart kea-dhcp4 directly (bypassing OPNsense service so it doesn't
-    #       regenerate the config again),
-    #   (d) then start the daemon.
-    print("  [4/4] Restart configd, re-apply Kea config, start daemon...")
-    try:
-        print("    restarting configd...")
-        ssh.sudo("service configd restart", timeout=30)
-        time.sleep(3)
-
-        # Re-apply kea-dhcp4.conf (configd regenerated the original above)
-        print("    re-writing kea-dhcp4.conf after configd reset...")
-        try:
-            raw4 = ssh.sudo("cat /usr/local/etc/kea/kea-dhcp4.conf", timeout=10)
-            cfg4 = _json.loads(raw4)
-            dhcp4 = cfg4.setdefault("Dhcp4", {})
-            dhcp4["ddns-send-updates"] = True
-            dhcp4["ddns-qualifying-suffix"] = domain
-            dhcp4["ddns-override-no-update"] = True
-            dhcp4["ddns-generated-prefix"] = "kea"
-            dhcp4["dhcp-ddns"] = {
-                "enable-updates": True,
-                "server-ip": "127.0.0.1",
-                "server-port": 53001,
-            }
-            existing = dhcp4.get("subnet4", [])
-            if not any(s.get("subnet") == subnet_cidr for s in existing):
-                existing.insert(0, {
-                    "id": 1,
-                    "subnet": subnet_cidr,
-                    "interface": "em1",
-                    "pools": [{"pool": subnet_pool}],
-                    "ddns-send-updates": True,
-                    "ddns-qualifying-suffix": domain,
-                    "ddns-override-no-update": True,
-                    "option-data": [
-                        {"name": "domain-name", "data": domain},
-                        {"name": "routers", "data": prefix + "1"},
-                        {"name": "domain-name-servers", "data": prefix + "1"},
-                    ],
-                })
-            dhcp4["subnet4"] = existing
-            _upload_text(_json.dumps(cfg4, indent=2),
-                         "/usr/local/etc/kea/kea-dhcp4.conf", "kea-dhcp4.conf (post-configd)")
-        except Exception as exc:
-            errors.append(f"kea-dhcp4.conf post-configd update failed: {exc}")
-
-        # Restart kea-dhcp4 directly so OPNsense doesn't regenerate the config
-        print("    restarting kea-dhcp4 directly...")
-        ssh.sudo(
-            "pkill -f kea-dhcp4 2>/dev/null || true ; sleep 2 ; "
-            "/usr/local/sbin/kea-dhcp4 -c /usr/local/etc/kea/kea-dhcp4.conf -d "
-            ">> /var/log/kea/kea_startup.log 2>&1 &",
-            check=False, timeout=15,
-        )
-        time.sleep(4)
-
-        # Start kea-dhcp-ddns (d2) — required for the daemon to reach NORMAL state
-        # (the consistency SM watches d2's pidfile and won't reconcile until all
-        # watched services including d2 are present).
-        print("    starting kea-dhcp-ddns (d2)...")
-        ssh.sudo(
-            "pkill -f kea-dhcp-ddns 2>/dev/null || true ; sleep 1 ; "
-            "/usr/local/sbin/kea-dhcp-ddns -c /usr/local/etc/kea/kea-dhcp-ddns.conf -d "
-            ">> /var/log/kea/kea_startup.log 2>&1 &",
-            check=False, timeout=15,
-        )
-        time.sleep(3)
-
-        # Start the plugin daemon
-        print("    starting kea-unbound-ddns...")
-        ssh.sudo("/usr/local/sbin/configctl keaunbound restart",
-                 timeout=30, check=False)
-        time.sleep(3)
-        status = ssh.sudo(
-            "/usr/local/sbin/pluginctl -s kea-unbound-ddns status",
-            timeout=10, check=False,
-        )
-        if "is running" in status:
-            print("    daemon running ✓")
-        else:
-            why = ssh.sudo(
-                "/usr/local/opnsense/scripts/keaunbound/start.py",
-                timeout=10, check=False,
-            )
-            print(f"    daemon NOT running; start.py: {why.strip()[:200]}")
-            errors.append("daemon did not start after setup")
-    except Exception as exc:
-        errors.append(f"daemon start failed: {exc}")
-
-    return errors
 
 
 # ---------------------------------------------------------------------------
@@ -793,8 +480,6 @@ def main() -> None:
                         help="Run make upgrade on dev-opnsense before starting")
     parser.add_argument("--setup-only", action="store_true",
                         help="Verify baseline only, then exit")
-    parser.add_argument("--setup-env", action="store_true",
-                        help="Configure Kea subnet + d2 + plugin in config.xml, then exit")
     parser.add_argument("--config", default="tools/.env",
                         help="Path to .env file (default: tools/.env)")
     parser.add_argument("--output", default="tools/results",
@@ -857,18 +542,6 @@ def main() -> None:
             print("  Deploy complete.")
         except Exception as exc:
             print(f"  [WARN] Deploy failed: {exc}")
-
-    # Optional env setup (Kea + d2 + config.xml)
-    if args.setup_env:
-        print("\nSetting up test environment...")
-        errs = _setup_env(ssh, ctx)
-        if errs:
-            print("\n[ERROR] Environment setup had failures:")
-            for e in errs:
-                print(f"  ✗ {e}")
-            sys.exit(1)
-        print("  Environment setup complete.\n")
-        return
 
     # Baseline verification
     print("\nVerifying baseline...")

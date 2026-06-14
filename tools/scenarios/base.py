@@ -25,7 +25,8 @@ class ChaosConfig:
     dhcpclient_pass: str
     dhcpclient_lan_if: str
     dev_domain: str
-    test_ip_prefix: str      # e.g. "192.168.99."
+    test_ip_prefix: str      # e.g. "192.168.1."
+    test_v6_prefix: str      # e.g. "fd00:cafe::" — must match the DHCPv6 subnet
     test_subnet_id: int | None
     opnsense_key: str | None = None   # path to SSH private key (key auth)
     dhcpclient_key: str | None = None
@@ -67,6 +68,10 @@ class ChaosContext:
     @property
     def ip_prefix(self) -> str:
         return self.cfg.test_ip_prefix
+
+    @property
+    def v6_prefix(self) -> str:
+        return self.cfg.test_v6_prefix
 
     def subnet_id(self) -> int:
         """Return the Kea subnet-id, auto-discovering if not configured."""
@@ -113,13 +118,14 @@ class ChaosContext:
         if subnet is None:
             raise RuntimeError("DHCPv6 not configured — no kea-dhcp6 subnet found")
 
-    def alloc_v6_addr(self, prefix: str = "fd00::") -> str:
-        """Allocate a unique test IPv6 address from prefix."""
-        addr = f"{prefix}{self._v6_counter:x}"
+    def alloc_v6_addr(self, prefix: str | None = None) -> str:
+        """Allocate a unique test IPv6 address from the configured v6 prefix."""
+        pfx = prefix if prefix is not None else self.cfg.test_v6_prefix
+        addr = f"{pfx}{self._v6_counter:x}"
         self._v6_counter += 1
         return addr
 
-    def alloc_v6_host(self, suffix: str = "", prefix: str = "fd00::") -> tuple[str, str]:
+    def alloc_v6_host(self, suffix: str = "", prefix: str | None = None) -> tuple[str, str]:
         """Return (hostname, ipv6) for a new DHCPv6 test entry."""
         idx = self._v6_counter
         ip = self.alloc_v6_addr(prefix)

@@ -21,9 +21,6 @@ from tools.scenarios.base import ChaosContext, Scenario
 # DUID used for all test leases — arbitrary bytes, unique enough for isolation.
 _TEST_DUID = "00:03:00:01:aa:bb:cc:dd:ee:01"
 
-# ULA prefix used in tools/setup_dhcp6_testenv.sh / kea-dhcp6-test.conf.
-_V6_PREFIX = "fd00::"
-
 
 @register
 class DualStackHost(Scenario):
@@ -39,7 +36,7 @@ class DualStackHost(Scenario):
 
     def run(self, ctx: ChaosContext) -> None:
         hostname, ipv4 = ctx.alloc_host("-ds")
-        _, ipv6 = ctx.alloc_v6_host("-ds", prefix=_V6_PREFIX)
+        _, ipv6 = ctx.alloc_v6_host("-ds", prefix=ctx.v6_prefix)
         # Use the same hostname for both families.
         ipv6_hostname = hostname
 
@@ -103,8 +100,8 @@ class StaleAaaaCleanup(Scenario):
 
     def run(self, ctx: ChaosContext) -> None:
         hostname, ipv4 = ctx.alloc_host("-stale6")
-        _, ipv6_new = ctx.alloc_v6_host("-stale6", prefix=_V6_PREFIX)
-        _, ipv6_old = ctx.alloc_v6_host("-stale6-old", prefix=_V6_PREFIX)
+        _, ipv6_new = ctx.alloc_v6_host("-stale6", prefix=ctx.v6_prefix)
+        _, ipv6_old = ctx.alloc_v6_host("-stale6-old", prefix=ctx.v6_prefix)
 
         mac = f"aa:bb:cc:dd:02:{ctx._ip_counter % 256:02x}"
         # Inject v4 lease.
@@ -186,7 +183,7 @@ class Ipv6OnlyHost(Scenario):
         ctx.require_dhcp6()
 
     def run(self, ctx: ChaosContext) -> None:
-        hostname, ipv6 = ctx.alloc_v6_host("-v6only", prefix=_V6_PREFIX)
+        hostname, ipv6 = ctx.alloc_v6_host("-v6only", prefix=ctx.v6_prefix)
         ctx.kea.lease6_add(ipv6, _TEST_DUID, hostname, valid_lft=3600,
                            subnet_id=ctx.subnet6_id())
         self._hostname = hostname
@@ -246,10 +243,19 @@ class DualStackFamilyIsolation(Scenario):
 
     def setup(self, ctx: ChaosContext) -> None:
         ctx.require_dhcp6()
+        from tools.lib.kea import KeaError
+        try:
+            ctx.kea.query("subnet4-reservation-get",
+                          arguments={"subnet-id": 99999, "ip-address": "0.0.0.0"})
+        except KeaError as exc:
+            if "not supported" in str(exc):
+                raise RuntimeError(
+                    "host_cmds hook not loaded — enable it in kea-dhcp4.conf to run this scenario"
+                )
 
     def run(self, ctx: ChaosContext) -> None:
         hostname, ipv4 = ctx.alloc_host("-fiso")
-        _, ipv6 = ctx.alloc_v6_host("-fiso", prefix=_V6_PREFIX)
+        _, ipv6 = ctx.alloc_v6_host("-fiso", prefix=ctx.v6_prefix)
         hostname_v6 = hostname  # same name, different family
 
         mac = f"aa:bb:cc:dd:03:{ctx._ip_counter % 256:02x}"
@@ -305,10 +311,19 @@ class Ipv6MultipleAddresses(Scenario):
 
     def setup(self, ctx: ChaosContext) -> None:
         ctx.require_dhcp6()
+        from tools.lib.kea import KeaError
+        try:
+            ctx.kea.query("subnet6-reservation-get", service="dhcp6",
+                          arguments={"subnet-id": 99999, "ip-address": "::"})
+        except KeaError as exc:
+            if "not supported" in str(exc):
+                raise RuntimeError(
+                    "host_cmds hook not loaded — enable it in kea-dhcp6.conf to run this scenario"
+                )
 
     def run(self, ctx: ChaosContext) -> None:
-        hostname, ipv6a = ctx.alloc_v6_host("-multi", prefix=_V6_PREFIX)
-        _, ipv6b = ctx.alloc_v6_host("-multi2", prefix=_V6_PREFIX)
+        hostname, ipv6a = ctx.alloc_v6_host("-multi", prefix=ctx.v6_prefix)
+        _, ipv6b = ctx.alloc_v6_host("-multi2", prefix=ctx.v6_prefix)
 
         subnet6 = ctx.subnet6_id()
         # Add a reservation with two addresses via the host_cmds API.

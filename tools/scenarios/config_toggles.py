@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: BSD-2-Clause
 """
-Config toggle scenarios: synthesize_ptr, collision_policy, aggressive_cleanup.
+Config toggle scenarios: synthesize_ptr, collision_policy, stale_record_cleanup.
 """
 from __future__ import annotations
 
@@ -57,7 +57,6 @@ print(node.text or '')
 
 SYNTH_PTR_PATH = "OPNsense/KeaUnbound/general/synthesize_ptr"
 COLLISION_PATH = "OPNsense/KeaUnbound/general/collision_policy"
-ACLEAN_PATH = "OPNsense/KeaUnbound/general/aggressive_cleanup"
 
 
 @register
@@ -197,69 +196,61 @@ class CollisionPolicyCycle(Scenario):
 
 
 @register
-class AggressiveCleanupToggle(Scenario):
-    name = "aggressive_cleanup_toggle"
+class StaleRecordCleanup(Scenario):
+    name = "stale_record_cleanup"
     description = (
-        "Enable aggressive_cleanup; send DDNS ADD for IP with stale record; "
-        "verify old record removed"
+        "Plant orphaned Unbound records with no Kea backing; run bulk clean; "
+        "verify stale records removed and active lease records preserved"
     )
-    tags = ["config", "ddns", "cleanup"]
-
-    def setup(self, ctx: ChaosContext) -> None:
-        self._original = _get_config(ctx, ACLEAN_PATH)
+    tags = ["config", "cleanup"]
 
     def run(self, ctx: ChaosContext) -> None:
-        hostname, ip = ctx.alloc_host("-aclean")
-        self._ip = ip
-        self._hostname = hostname
-        old_name = f"{hostname}-stale"
+        # Plant two stale records (no lease, no reservation)
+        _, stale_ip1 = ctx.alloc_host("-stclean-s1")
+        _, stale_ip2 = ctx.alloc_host("-stclean-s2")
+        self._stale1 = f"stclean-stale1.{ctx.domain}"
+        self._stale2 = f"stclean-stale2.{ctx.domain}"
 
-        # Plant a stale record at this IP
-        ctx.unbound.add_record(
-            f"{old_name}.{ctx.domain}. 300 IN A {ip}"
-        )
-        ctx.event("stale_planted", name=old_name, ip=ip)
+        ctx.unbound.add_record(f"{self._stale1}. 300 IN A {stale_ip1}")
+        ctx.unbound.add_record(f"{self._stale2}. 300 IN A {stale_ip2}")
+        ctx.event("stale_planted", names=[self._stale1, self._stale2])
 
-        # Enable aggressive_cleanup and restart daemon to pick up config change
-        _set_config(ctx, ACLEAN_PATH, "1")
-        ctx.ssh.sudo("/usr/local/sbin/configctl keaunbound restart", timeout=20)
-        ctx.wait(3, "daemon restart")
-        ctx.event("aggressive_cleanup_enabled")
-
-        # Now inject a lease for the same IP and sync — should trigger aggressive cleanup
-        ctx.kea.lease4_add(ip, "aa:ac:00:01:00:01", hostname,
+        # Add a live lease so clean() knows there's real state
+        hostname, live_ip = ctx.alloc_host("-stclean-live")
+        self._live_hostname = hostname
+        self._live_ip = live_ip
+        ctx.kea.lease4_add(live_ip, "aa:bb:00:01:00:01", hostname,
                            valid_lft=600, subnet_id=ctx.subnet_id())
         ctx.run_sync("dynamic")
-        ctx.wait(2, "aggressive cleanup settle")
+        ctx.event("live_lease_synced", hostname=hostname, ip=live_ip)
 
-        self._stale_name = old_name
+        # Run bulk clean — should remove orphaned records
+        ctx.run_clean()
+        ctx.wait(2, "clean settle")
 
     def verify(self, ctx: ChaosContext) -> list[str]:
         failures = []
         data = ctx.unbound.list_local_data()
-        stale_fqdn = f"{self._stale_name}.{ctx.domain}"
-        if stale_fqdn in data or self._stale_name in data:
-            failures.append(
-                f"Stale record {self._stale_name} still present after aggressive_cleanup"
-            )
-        # New record should be there
-        new_fqdn = f"{self._hostname}.{ctx.domain}"
-        if new_fqdn not in data and self._hostname not in data:
-            failures.append(f"New record {self._hostname} not registered after ADD")
+
+        if self._stale1 in data or "stclean-stale1" in str(data):
+            failures.append(f"Stale record {self._stale1} still present after clean")
+        if self._stale2 in data or "stclean-stale2" in str(data):
+            failures.append(f"Stale record {self._stale2} still present after clean")
+
+        live_fqdn = f"{self._live_hostname}.{ctx.domain}"
+        if live_fqdn not in data and self._live_hostname not in str(data):
+            failures.append(f"Active lease record {live_fqdn} was incorrectly removed")
+
         return failures
 
     def cleanup(self, ctx: ChaosContext) -> None:
-        _set_config(ctx, ACLEAN_PATH, self._original or "1")
         try:
-            ctx.kea.lease4_del(self._ip)
+            ctx.kea.lease4_del(self._live_ip)
         except Exception:
             pass
-        try:
-            ctx.unbound.remove_record(f"{self._stale_name}.{ctx.domain}.")
-        except Exception:
-            pass
-        ctx.ssh.sudo(
-            "/usr/local/sbin/configctl keaunbound restart", timeout=20, check=False
-        )
-        ctx.wait(3, "daemon restart after cleanup")
+        for name in (self._stale1, self._stale2):
+            try:
+                ctx.unbound.remove_record(f"{name}.")
+            except Exception:
+                pass
         ctx.run_clean()
