@@ -22,7 +22,7 @@ Environment variables (all required unless noted):
   DHCPCLIENT_LAN_IF    Network interface that holds the DHCP lease
   DHCPCLIENT_HOSTNAME  Short hostname sent in DHCP requests (no domain)
   PLUGIN_DIR           Plugin build tree on the OPNsense box
-                       (default: /usr/plugins/net/kea-unbound)
+                       (default: /usr/plugins/net/kea-ubnd-ddns)
   TEST_IP_PREFIX       IP prefix for injected test data, e.g. "192.168.1."
                        (default: "192.168.99." — safe for any network)
   TEST_IP_START        First octet of test range, e.g. 201
@@ -50,7 +50,7 @@ REPO = pathlib.Path(__file__).parents[2]
 # is accepted by lease4-add even when out of the configured DHCP pool).
 TEST_HOST_PREFIX = "testhost-"
 
-PLUGIN_DIR_DEFAULT = "/usr/plugins/net/kea-unbound"
+PLUGIN_DIR_DEFAULT = "/usr/plugins/net/kea-ubnd-ddns"
 
 
 # ── Environment loading ───────────────────────────────────────────────────────
@@ -245,7 +245,7 @@ def api(opnsense_info):
                                   opnsense_info["api_secret"])
     session.verify = False
     session.headers.update({"Content-Type": "application/json"})
-    _base = f"https://{opnsense_info['host']}/api/keaunbound"
+    _base = f"https://{opnsense_info['host']}/api/keaubnd"
 
     def get(path: str, **kw) -> dict:
         r = session.get(f"{_base}/{path.lstrip('/')}", **kw)
@@ -417,7 +417,7 @@ def deploy(ssh: SSHSession, opnsense_info):
 
     Steps:
       1. Build a clean tarball of src/ locally (COPYFILE_DISABLE=1, no xattrs).
-      2. Upload via SFTP to /tmp/keaunbound-src.tar.gz on the OPNsense box.
+      2. Upload via SFTP to /tmp/keaubnd-src.tar.gz on the OPNsense box.
       3. Extract into the plugin build tree src/ directory.
       4. Run `make upgrade` (rebuilds .pkg and upgrades the installed package).
     """
@@ -444,12 +444,12 @@ def deploy(ssh: SSHSession, opnsense_info):
             check=True,
         )
 
-        ssh.sftp_put(tarball, "/tmp/keaunbound-src.tar.gz")
+        ssh.sftp_put(tarball, "/tmp/keaubnd-src.tar.gz")
 
         # Extract into the build-tree src/ (replaces source files only)
         ssh(
             f"tar --no-xattrs --no-acls --no-fflags "
-            f"-xzf /tmp/keaunbound-src.tar.gz "
+            f"-xzf /tmp/keaubnd-src.tar.gz "
             f"-C {plugin_dir}/src",
             timeout=30,
         )

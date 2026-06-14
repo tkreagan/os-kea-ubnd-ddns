@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: BSD-2-Clause
 # Copyright (c) 2026 Thomas Reagan
 """
-Unit tests for kea-unbound-ddns.py.
+Unit tests for kea-ubnd-ddns.py.
 
 Covers: is_sane_name, reverse_ptr, HostEntriesCache.is_static, process_update,
 parse_tsig_key, query_unbound.  All unbound-control calls are mocked.
@@ -25,7 +25,7 @@ from .conftest import load_script
 
 pytestmark = pytest.mark.unit
 
-daemon = load_script("kea-unbound-ddns.py")
+daemon = load_script("kea-ubnd-ddns.py")
 
 _log = logging.getLogger("test-daemon")
 _log.addHandler(logging.NullHandler())

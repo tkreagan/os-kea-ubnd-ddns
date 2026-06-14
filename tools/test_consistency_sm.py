@@ -16,10 +16,10 @@ import sys
 import pytest
 
 # Load the module directly from the plugin source tree (it normally lives at
-# /usr/local/opnsense/scripts/keaunbound/lib/ on the box). Register it in
+# /usr/local/opnsense/scripts/keaubnd/lib/ on the box). Register it in
 # sys.modules before exec so dataclass type introspection can resolve it.
 _SM_PATH = (pathlib.Path(__file__).parents[1]
-            / "src/opnsense/scripts/keaunbound/lib/consistency_sm.py")
+            / "src/opnsense/scripts/keaubnd/lib/consistency_sm.py")
 _spec = importlib.util.spec_from_file_location("consistency_sm", _SM_PATH)
 sm_mod = importlib.util.module_from_spec(_spec)
 sys.modules["consistency_sm"] = sm_mod

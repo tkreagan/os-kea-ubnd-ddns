@@ -1,4 +1,4 @@
-# os-kea-unbound
+# os-kea-ubnd-ddns
 
 An [OPNsense](https://opnsense.org) plugin that automatically registers Kea DHCP
 leases and static reservations in the Unbound DNS resolver. Hostnames resolve the
@@ -19,7 +19,7 @@ Two synchronization paths run in parallel:
 │  Kea reservations                                     RFC 2136 UPDATE        │
 │  Kea active leases                                          │                │
 │       │                                                     │                │
-│       └────────────────────► kea-unbound-ddns ◄─────────────┘                │
+│       └────────────────────► kea-ubnd-ddns ◄─────────────┘                │
 │                              (127.0.0.1:53535)                               │
 │                                     │                                        │
 │                               unbound-control                                │
@@ -62,13 +62,13 @@ never touched by either path.
 
 ### Option A — pre-built package (recommended)
 
-Download `os-kea-unbound-0.9.pkg` from the
-[latest release](https://github.com/tkreagan/os-kea-unbound/releases/latest),
+Download `os-kea-ubnd-ddns-0.9.pkg` from the
+[latest release](https://github.com/tkreagan/os-kea-ubnd-ddns/releases/latest),
 copy it to your OPNsense box, and install it with `pkg`:
 
 ```sh
 # On OPNsense (as root or via sudo):
-pkg add os-kea-unbound-0.9.pkg
+pkg add os-kea-ubnd-ddns-0.9.pkg
 ```
 
 No package repository is required — OPNsense's `pkg` accepts a local `.pkg` file
@@ -86,15 +86,15 @@ host (or a FreeBSD build host that matches your OPNsense version).
 git clone https://github.com/opnsense/plugins /usr/plugins
 
 # 2. Clone this repository into the correct category directory
-git clone https://github.com/tkreagan/os-kea-unbound /usr/plugins/net/kea-unbound
+git clone https://github.com/tkreagan/os-kea-ubnd-ddns /usr/plugins/net/kea-ubnd-ddns
 
 # 3. Build the package
-cd /usr/plugins/net/kea-unbound
+cd /usr/plugins/net/kea-ubnd-ddns
 make package
-# → work/pkg/os-kea-unbound-0.9.pkg
+# → work/pkg/os-kea-ubnd-ddns-0.9.pkg
 
 # 4. Install
-pkg add work/pkg/os-kea-unbound-0.9.pkg
+pkg add work/pkg/os-kea-ubnd-ddns-0.9.pkg
 ```
 
 > **macOS / Linux cross-build note:** The `make package` target must run on a
@@ -213,7 +213,7 @@ registration state. If the tab is empty or shows unexpected gaps, see
 
 ## Troubleshooting
 
-**Logs** are written to `/var/log/keaunbound/` and are also visible in the
+**Logs** are written to `/var/log/keaubnd/` and are also visible in the
 **Log File** tab. All components — the daemon, sync scripts, and audit/cleanup
 jobs — write to the same log facility.
 
@@ -299,7 +299,7 @@ before enabling either cleanup setting.
 
 ### TSIG authentication
 
-TSIG support is partially implemented in the daemon (`kea-unbound-ddns.py`) and
+TSIG support is partially implemented in the daemon (`kea-ubnd-ddns.py`) and
 daemon-start code, but has not been tested end-to-end and is not configurable via
 the Settings UI. It is deferred indefinitely. The listener only accepts
 connections from `127.0.0.1`, so unsigned updates from kea-dhcp-ddns are safe

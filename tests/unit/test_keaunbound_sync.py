@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: BSD-2-Clause
 # Copyright (c) 2026 Thomas Reagan
 """
-Unit tests for lib/keaunbound_sync.py.
+Unit tests for lib/keaubnd_sync.py.
 
 Covers: is_sane_name, qualify_hostname, reverse_ptr, is_ptr_name,
 read_host_entries, is_in_host_entries, find_stale_records,
@@ -15,8 +15,8 @@ import unittest.mock as mock
 
 import pytest
 
-from lib import keaunbound_sync
-from lib.keaunbound_sync import (
+from lib import keaubnd_sync
+from lib.keaubnd_sync import (
     KeaServiceUnavailableError,
     KeaUnavailableError,
     _arpa_to_ip,
@@ -113,34 +113,34 @@ def test_is_ptr_name(name, expect):
 # ── read_host_entries ─────────────────────────────────────────────────────────
 
 def test_read_host_entries_parses_fixture(host_entries_path, monkeypatch):
-    monkeypatch.setattr(keaunbound_sync, "HOST_ENTRIES", str(host_entries_path))
+    monkeypatch.setattr(keaubnd_sync, "HOST_ENTRIES", str(host_entries_path))
     entries = read_host_entries()
     assert "router.lan" in entries
     assert "static-host.lan" in entries
 
 
 def test_read_host_entries_ptr_by_ip(host_entries_path, monkeypatch):
-    monkeypatch.setattr(keaunbound_sync, "HOST_ENTRIES", str(host_entries_path))
+    monkeypatch.setattr(keaubnd_sync, "HOST_ENTRIES", str(host_entries_path))
     entries = read_host_entries()
     assert "192.168.1.1" in entries
 
 
 def test_read_host_entries_missing_file_returns_empty(monkeypatch):
-    monkeypatch.setattr(keaunbound_sync, "HOST_ENTRIES", "/nonexistent/file.conf")
+    monkeypatch.setattr(keaubnd_sync, "HOST_ENTRIES", "/nonexistent/file.conf")
     assert read_host_entries() == {}
 
 
 def test_read_host_entries_empty_file(tmp_path, monkeypatch):
     f = tmp_path / "he.conf"
     f.write_text("")
-    monkeypatch.setattr(keaunbound_sync, "HOST_ENTRIES", str(f))
+    monkeypatch.setattr(keaubnd_sync, "HOST_ENTRIES", str(f))
     assert read_host_entries() == {}
 
 
 def test_read_host_entries_skips_comments(tmp_path, monkeypatch):
     f = tmp_path / "he.conf"
     f.write_text("# this is a comment\n")
-    monkeypatch.setattr(keaunbound_sync, "HOST_ENTRIES", str(f))
+    monkeypatch.setattr(keaubnd_sync, "HOST_ENTRIES", str(f))
     assert read_host_entries() == {}
 
 
@@ -279,8 +279,8 @@ def _mock_kea_config_response(reservations, suffix="lan"):
     }
 
 
-@mock.patch("lib.keaunbound_sync.query_kea_api")
-@mock.patch("lib.keaunbound_sync.get_system_domain", return_value="lan")
+@mock.patch("lib.keaubnd_sync.query_kea_api")
+@mock.patch("lib.keaubnd_sync.get_system_domain", return_value="lan")
 def test_query_kea_reservations_basic(mock_dom, mock_api):
     mock_api.return_value = _mock_kea_config_response([
         {"hw-address": "aa:bb:cc:00:00:01",
@@ -293,8 +293,8 @@ def test_query_kea_reservations_basic(mock_dom, mock_api):
     assert reservations[0]["ip"] == "192.168.1.100"
 
 
-@mock.patch("lib.keaunbound_sync.query_kea_api")
-@mock.patch("lib.keaunbound_sync.get_system_domain", return_value="lan")
+@mock.patch("lib.keaubnd_sync.query_kea_api")
+@mock.patch("lib.keaubnd_sync.get_system_domain", return_value="lan")
 def test_query_kea_reservations_skips_blank_hostname(mock_dom, mock_api):
     mock_api.return_value = _mock_kea_config_response([
         {"hw-address": "aa:bb:cc:00:00:01", "ip-address": "192.168.1.100", "hostname": ""},
@@ -321,8 +321,8 @@ def _mock_lease_response(leases):
     return {"result": 0, "arguments": {"leases": leases}}
 
 
-@mock.patch("lib.keaunbound_sync.query_kea_api")
-@mock.patch("lib.keaunbound_sync.get_system_domain", return_value="lan")
+@mock.patch("lib.keaubnd_sync.query_kea_api")
+@mock.patch("lib.keaubnd_sync.get_system_domain", return_value="lan")
 def test_query_kea_leases_active(mock_dom, mock_api):
     future = int(time.time()) + 3600
     mock_api.side_effect = [
@@ -342,8 +342,8 @@ def test_query_kea_leases_active(mock_dom, mock_api):
     assert leases[0]["expires"] == future
 
 
-@mock.patch("lib.keaunbound_sync.query_kea_api")
-@mock.patch("lib.keaunbound_sync.get_system_domain", return_value="lan")
+@mock.patch("lib.keaubnd_sync.query_kea_api")
+@mock.patch("lib.keaubnd_sync.get_system_domain", return_value="lan")
 def test_query_kea_leases_skips_declined(mock_dom, mock_api):
     future = int(time.time()) + 3600
     mock_api.side_effect = [
@@ -360,8 +360,8 @@ def test_query_kea_leases_skips_declined(mock_dom, mock_api):
     assert leases == []
 
 
-@mock.patch("lib.keaunbound_sync.query_kea_api")
-@mock.patch("lib.keaunbound_sync.get_system_domain", return_value="lan")
+@mock.patch("lib.keaubnd_sync.query_kea_api")
+@mock.patch("lib.keaubnd_sync.get_system_domain", return_value="lan")
 def test_query_kea_leases_skips_expired(mock_dom, mock_api):
     past = int(time.time()) - 100
     mock_api.side_effect = [
@@ -378,8 +378,8 @@ def test_query_kea_leases_skips_expired(mock_dom, mock_api):
     assert leases == []
 
 
-@mock.patch("lib.keaunbound_sync.query_kea_api")
-@mock.patch("lib.keaunbound_sync.get_system_domain", return_value="lan")
+@mock.patch("lib.keaubnd_sync.query_kea_api")
+@mock.patch("lib.keaubnd_sync.get_system_domain", return_value="lan")
 def test_query_kea_leases_infinite_expiry(mock_dom, mock_api):
     mock_api.side_effect = [
         _mock_lease_config(),
@@ -399,33 +399,33 @@ def test_query_kea_leases_infinite_expiry(mock_dom, mock_api):
 # ── get_synthesize_ptr ────────────────────────────────────────────────────────
 
 def test_get_synthesize_ptr_default_when_missing(tmp_path, monkeypatch):
-    xml = "<opnsense><OPNsense><KeaUnbound><general></general></KeaUnbound></OPNsense></opnsense>"
+    xml = "<opnsense><OPNsense><KeaUbnd><general></general></KeaUbnd></OPNsense></opnsense>"
     f = tmp_path / "config.xml"
     f.write_text(xml)
-    monkeypatch.setattr(keaunbound_sync, "CONFIG_XML", str(f))
+    monkeypatch.setattr(keaubnd_sync, "CONFIG_XML", str(f))
     assert get_synthesize_ptr() is True
 
 
 def test_get_synthesize_ptr_returns_true_when_one(tmp_path, monkeypatch):
-    xml = "<opnsense><OPNsense><KeaUnbound><general><synthesize_ptr>1</synthesize_ptr></general></KeaUnbound></OPNsense></opnsense>"
+    xml = "<opnsense><OPNsense><KeaUbnd><general><synthesize_ptr>1</synthesize_ptr></general></KeaUbnd></OPNsense></opnsense>"
     f = tmp_path / "config.xml"
     f.write_text(xml)
-    monkeypatch.setattr(keaunbound_sync, "CONFIG_XML", str(f))
+    monkeypatch.setattr(keaubnd_sync, "CONFIG_XML", str(f))
     assert get_synthesize_ptr() is True
 
 
 def test_get_synthesize_ptr_returns_false_when_zero(tmp_path, monkeypatch):
-    xml = "<opnsense><OPNsense><KeaUnbound><general><synthesize_ptr>0</synthesize_ptr></general></KeaUnbound></OPNsense></opnsense>"
+    xml = "<opnsense><OPNsense><KeaUbnd><general><synthesize_ptr>0</synthesize_ptr></general></KeaUbnd></OPNsense></opnsense>"
     f = tmp_path / "config.xml"
     f.write_text(xml)
-    monkeypatch.setattr(keaunbound_sync, "CONFIG_XML", str(f))
+    monkeypatch.setattr(keaubnd_sync, "CONFIG_XML", str(f))
     assert get_synthesize_ptr() is False
 
 
 def test_get_synthesize_ptr_default_on_bad_xml(tmp_path, monkeypatch):
     f = tmp_path / "config.xml"
     f.write_text("not xml")
-    monkeypatch.setattr(keaunbound_sync, "CONFIG_XML", str(f))
+    monkeypatch.setattr(keaubnd_sync, "CONFIG_XML", str(f))
     assert get_synthesize_ptr() is True
 
 
@@ -466,14 +466,14 @@ def test_read_d2_reverse_zones_parses(tmp_path, monkeypatch):
     import json
     f = tmp_path / "kea-dhcp-ddns.conf"
     f.write_text(json.dumps(conf))
-    monkeypatch.setattr(keaunbound_sync, "D2_CONF", str(f))
+    monkeypatch.setattr(keaubnd_sync, "D2_CONF", str(f))
     zones = read_d2_reverse_zones()
     assert "1.168.192.in-addr.arpa" in zones
     assert "2.168.192.in-addr.arpa" in zones
 
 
 def test_read_d2_reverse_zones_absent_file(monkeypatch):
-    monkeypatch.setattr(keaunbound_sync, "D2_CONF", "/nonexistent/kea-dhcp-ddns.conf")
+    monkeypatch.setattr(keaubnd_sync, "D2_CONF", "/nonexistent/kea-dhcp-ddns.conf")
     assert read_d2_reverse_zones() == set()
 
 
@@ -482,7 +482,7 @@ def test_read_d2_reverse_zones_no_reverse_domains(tmp_path, monkeypatch):
     import json
     f = tmp_path / "kea-dhcp-ddns.conf"
     f.write_text(json.dumps(conf))
-    monkeypatch.setattr(keaunbound_sync, "D2_CONF", str(f))
+    monkeypatch.setattr(keaubnd_sync, "D2_CONF", str(f))
     assert read_d2_reverse_zones() == set()
 
 

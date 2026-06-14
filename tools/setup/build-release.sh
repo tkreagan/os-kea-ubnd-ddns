@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# build-release.sh — Build a distributable os-kea-unbound package for release.
+# build-release.sh — Build a distributable os-kea-ubnd-ddns package for release.
 #
 # Rolls back dev-opnsense to its latest clean snapshot, builds the .txz
 # package on that box using pkg(8), downloads it locally, and prints the
@@ -60,7 +60,7 @@ done
 
 echo
 echo "============================================================"
-echo "  os-kea-unbound release build v${VERSION}"
+echo "  os-kea-ubnd-ddns release build v${VERSION}"
 echo "============================================================"
 
 # ── 1. Rollback to clean snapshot ─────────────────────────────────────────────
@@ -79,8 +79,8 @@ bash "$REPO_ROOT/build_package.sh"
 # ── 3. Verify local package ───────────────────────────────────────────────────
 step "Verifying package"
 # Detect whichever format pkg(8) produced (.pkg on FreeBSD 14+, .txz on older)
-PKGFILE=$(ls "${REPO_ROOT}/os-kea-unbound-${VERSION}".pkg \
-              "${REPO_ROOT}/os-kea-unbound-${VERSION}".txz 2>/dev/null | head -1)
+PKGFILE=$(ls "${REPO_ROOT}/os-kea-ubnd-ddns-${VERSION}".pkg \
+              "${REPO_ROOT}/os-kea-ubnd-ddns-${VERSION}".txz 2>/dev/null | head -1)
 [[ -n "$PKGFILE" && -f "$PKGFILE" ]] || die "Package not found after build (looked for .pkg and .txz)"
 SUM=$(shasum -a 256 "$PKGFILE" | awk '{print $1}')
 info "$(basename "$PKGFILE")"

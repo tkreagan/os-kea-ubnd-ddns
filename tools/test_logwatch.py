@@ -14,7 +14,7 @@ import pathlib
 import sys
 import time
 
-_LIB_DIR = pathlib.Path(__file__).parents[1] / "src/opnsense/scripts/keaunbound"
+_LIB_DIR = pathlib.Path(__file__).parents[1] / "src/opnsense/scripts/keaubnd"
 if str(_LIB_DIR) not in sys.path:
     sys.path.insert(0, str(_LIB_DIR))
 
@@ -58,15 +58,15 @@ _UNRELATED_LINE = (
 # Listener log lines
 _LISTENER_OP_ADD = (
     '<30>1 2026-06-12T10:15:00+00:00 dev-opnsense.plhm.rgn.cm kea-ub 12345 - '
-    '[meta sequenceId="1"] INFO  [keaunbound] Add: host1.dev.plhm.rgn.cm A 192.168.1.100'
+    '[meta sequenceId="1"] INFO  [keaubnd] Add: host1.dev.plhm.rgn.cm A 192.168.1.100'
 )
 _LISTENER_UPDATE_ERRORS = (
     '<30>1 2026-06-12T10:15:00+00:00 dev-opnsense.plhm.rgn.cm kea-ub 12345 - '
-    '[meta sequenceId="3"] INFO  [keaunbound] Update complete: added=1 removed=0 skipped=0 errors=2'
+    '[meta sequenceId="3"] INFO  [keaubnd] Update complete: added=1 removed=0 skipped=0 errors=2'
 )
 _LISTENER_UPDATE_OK = (
     '<30>1 2026-06-12T10:15:00+00:00 dev-opnsense.plhm.rgn.cm kea-ub 12345 - '
-    '[meta sequenceId="3"] INFO  [keaunbound] Update complete: added=1 removed=0 skipped=0 errors=0'
+    '[meta sequenceId="3"] INFO  [keaubnd] Update complete: added=1 removed=0 skipped=0 errors=0'
 )
 
 

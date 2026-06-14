@@ -39,8 +39,8 @@ _v6 = pytest.mark.v6
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
-UNBOUND_AUDIT = "/usr/local/opnsense/scripts/keaunbound/local-data-audit.py"
-CLEAN_SCRIPT  = "/usr/local/opnsense/scripts/keaunbound/local-data-clean.py"
+UNBOUND_AUDIT = "/usr/local/opnsense/scripts/keaubnd/local-data-audit.py"
+CLEAN_SCRIPT  = "/usr/local/opnsense/scripts/keaubnd/local-data-clean.py"
 
 
 def _audit_json(ssh) -> dict:
@@ -96,9 +96,9 @@ def _ptr_name(ip: str) -> str:
 
 
 def _wait_for_ncr(ssh, expected_log_fragment: str, timeout: int = 10) -> bool:
-    """Poll the kea-ub log until expected_log_fragment appears or timeout."""
+    """Poll the kea-ubnd log until expected_log_fragment appears or timeout."""
     import datetime
-    log_path = (f"/var/log/keaunbound/keaunbound_"
+    log_path = (f"/var/log/keaubnd/keaubnd_"
                 f"{datetime.date.today().strftime('%Y%m%d')}.log")
     deadline = time.time() + timeout
     while time.time() < deadline:
@@ -168,7 +168,7 @@ class TestStaticPtrGuard:
             _inject_lease4(kea, dhcp4_subnet_id, hostname, ip)
 
             # Step 3: run reservation-sync (re-registers from Kea)
-            ssh("/usr/local/opnsense/scripts/keaunbound/reservation-sync.py --dry-run",
+            ssh("/usr/local/opnsense/scripts/keaubnd/reservation-sync.py --dry-run",
                 check=False)
 
             # Use listener test infrastructure: send a synthetic A-add NCR
@@ -586,14 +586,14 @@ class TestSynthesizePtrFlag:
     """
 
     def _restart_daemon_with_flag(self, ssh, flag: str = "") -> None:
-        """Restart kea-unbound-ddns with an optional extra flag."""
-        ssh("configctl keaunbound stop", check=False)
+        """Restart kea-ubnd-ddns with an optional extra flag."""
+        ssh("configctl keaubnd stop", check=False)
         time.sleep(1)
         # Temporarily modify the start command by running the script directly
         # with the extra flag (don't change config.xml persistently)
-        script = "/usr/local/sbin/kea-unbound-ddns.py"
-        pidfile = "/var/run/kea-unbound-ddns.pid"
-        supfile = "/var/run/kea-unbound-ddns.supervisor.pid"
+        script = "/usr/local/sbin/kea-ubnd-ddns.py"
+        pidfile = "/var/run/kea-ubnd-ddns.pid"
+        supfile = "/var/run/kea-ubnd-ddns.supervisor.pid"
         daemon_cmd = (
             f"/usr/sbin/daemon -f -p {pidfile} -P {supfile} -r -R 5 "
             f"{script} --port 53535 {flag} &"
@@ -602,9 +602,9 @@ class TestSynthesizePtrFlag:
         time.sleep(1)
 
     def _restore_daemon(self, ssh) -> None:
-        ssh("configctl keaunbound stop", check=False)
+        ssh("configctl keaubnd stop", check=False)
         time.sleep(1)
-        ssh("configctl keaunbound start")
+        ssh("configctl keaubnd start")
         time.sleep(1)
 
     def test_f_off_no_ptr_synthesized(

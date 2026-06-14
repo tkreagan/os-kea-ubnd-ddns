@@ -35,7 +35,7 @@ def test_get_config_reads_full_fixture(config_full_path, monkeypatch):
 
 
 def test_get_config_uses_defaults_for_missing_keys(tmp_path, monkeypatch):
-    xml = "<opnsense><OPNsense><KeaUnbound><general><enabled>1</enabled></general></KeaUnbound></OPNsense></opnsense>"
+    xml = "<opnsense><OPNsense><KeaUbnd><general><enabled>1</enabled></general></KeaUbnd></OPNsense></opnsense>"
     cfg_file = tmp_path / "config.xml"
     cfg_file.write_text(xml)
     monkeypatch.setattr(start, "CONFIG_XML", str(cfg_file))
@@ -118,13 +118,13 @@ def test_start_main_exits_zero_when_disabled(config_disabled_path, monkeypatch):
 def test_start_main_exits_one_tsig_missing_secret(config_tsig_path, monkeypatch):
     """TSIG enabled but key secret left blank → refuse to start."""
     import tempfile
-    xml = """<opnsense><OPNsense><KeaUnbound><general>
+    xml = """<opnsense><OPNsense><KeaUbnd><general>
         <enabled>1</enabled><port>53535</port>
         <enable_tsig>1</enable_tsig>
         <tsig_key_name>mykey</tsig_key_name>
         <tsig_key_secret></tsig_key_secret>
         <tsig_algorithm>HMAC-SHA256</tsig_algorithm>
-        </general></KeaUnbound></OPNsense></opnsense>"""
+        </general></KeaUbnd></OPNsense></opnsense>"""
     with tempfile.NamedTemporaryFile("w", suffix=".xml", delete=False) as f:
         f.write(xml)
         name = f.name
@@ -181,14 +181,14 @@ def test_start_builds_correct_daemon_command(mock_run, config_full_path,
 @mock.patch("subprocess.run")
 def test_start_includes_tsig_args(mock_run, tmp_path, monkeypatch):
     mock_run.return_value = mock.Mock(returncode=0)
-    xml = """<opnsense><OPNsense><KeaUnbound><general>
+    xml = """<opnsense><OPNsense><KeaUbnd><general>
         <enabled>1</enabled><port>53535</port>
         <enable_tsig>1</enable_tsig>
         <tsig_key_name>mykey</tsig_key_name>
         <tsig_key_secret>dGVzdA==</tsig_key_secret>
         <tsig_algorithm>HMAC-SHA256</tsig_algorithm>
         <aggressive_cleanup>0</aggressive_cleanup>
-        </general></KeaUnbound></OPNsense></opnsense>"""
+        </general></KeaUbnd></OPNsense></opnsense>"""
     cfg = tmp_path / "config.xml"
     cfg.write_text(xml)
     monkeypatch.setattr(start, "CONFIG_XML", str(cfg))
@@ -208,7 +208,7 @@ def test_start_includes_tsig_args(mock_run, tmp_path, monkeypatch):
 
 def test_get_config_synthesize_ptr_default(tmp_path, monkeypatch):
     """synthesize_ptr defaults to '1' when absent from config.xml."""
-    xml = "<opnsense><OPNsense><KeaUnbound><general><enabled>1</enabled></general></KeaUnbound></OPNsense></opnsense>"
+    xml = "<opnsense><OPNsense><KeaUbnd><general><enabled>1</enabled></general></KeaUbnd></OPNsense></opnsense>"
     cfg_file = tmp_path / "config.xml"
     cfg_file.write_text(xml)
     monkeypatch.setattr(start, "CONFIG_XML", str(cfg_file))
@@ -217,12 +217,12 @@ def test_get_config_synthesize_ptr_default(tmp_path, monkeypatch):
 
 
 def _make_start_xml(tmp_path, extra=""):
-    xml = f"""<opnsense><OPNsense><KeaUnbound><general>
+    xml = f"""<opnsense><OPNsense><KeaUbnd><general>
         <enabled>1</enabled><port>53535</port>
         <enable_tsig>0</enable_tsig>
         <aggressive_cleanup>0</aggressive_cleanup>
         {extra}
-        </general></KeaUnbound></OPNsense></opnsense>"""
+        </general></KeaUbnd></OPNsense></opnsense>"""
     p = tmp_path / "config.xml"
     p.write_text(xml)
     return p

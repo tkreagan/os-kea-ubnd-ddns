@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: BSD-2-Clause
 """
 Regression guard for the live-path delete detection in
-src/sbin/kea-unbound-ddns.py (process_update).
+src/sbin/kea-ubnd-ddns.py (process_update).
 
 THE BUG THIS GUARDS (root-caused 2026-06-12, dnspython 2.8.0):
   d2 sends correct RFC 2136 delete records on a DNS UPDATE — wire class NONE
@@ -32,7 +32,7 @@ def _roundtrip(update: dns.update.Update) -> dns.message.Message:
     return dns.message.from_wire(update.to_wire())
 
 
-# The predicate the listener uses (mirror of kea-unbound-ddns.py:process_update).
+# The predicate the listener uses (mirror of kea-ubnd-ddns.py:process_update).
 def _is_delete(rrset) -> bool:
     return rrset.deleting is not None
 

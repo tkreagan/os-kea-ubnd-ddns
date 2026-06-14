@@ -5,7 +5,7 @@
     <domain>lan</domain>
   </system>
   <OPNsense>
-    <KeaUnbound>
+    <KeaUbnd>
       <general>
         <enabled>1</enabled>
         <port>53535</port>
@@ -19,7 +19,7 @@
         <enable_auto_clean>1</enable_auto_clean>
         <auto_clean_interval>h6</auto_clean_interval>
       </general>
-    </KeaUnbound>
+    </KeaUbnd>
     <Kea>
       <dhcp4>
         <general>

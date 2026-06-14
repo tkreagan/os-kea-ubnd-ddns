@@ -8,9 +8,9 @@ FreeBSD-specific paths are mocked; no live services are required.
 
 Import strategy
 ---------------
-* lib/keaunbound_sync.py and lib/kea_transport.py are regular modules once
+* lib/keaubnd_sync.py and lib/kea_transport.py are regular modules once
   SCRIPTS_DIR is on sys.path — import them directly.
-* Scripts with hyphens in names (kea-unbound-ddns.py, reservation-sync.py,
+* Scripts with hyphens in names (kea-ubnd-ddns.py, reservation-sync.py,
   etc.) are loaded via importlib; we expose a load_script() helper.
 * The syslog module is replaced with a MagicMock before any imports so that
   syslog.openlog() / syslog.syslog() never touch the host system.
@@ -29,7 +29,7 @@ import unittest.mock as mock
 import pytest
 
 REPO = pathlib.Path(__file__).parents[2]
-SCRIPTS = REPO / "src" / "opnsense" / "scripts" / "keaunbound"
+SCRIPTS = REPO / "src" / "opnsense" / "scripts" / "keaubnd"
 SBIN = REPO / "src" / "sbin"
 
 # Insert BEFORE other manipulations so our path wins over the FreeBSD

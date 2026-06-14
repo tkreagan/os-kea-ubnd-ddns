@@ -5,11 +5,11 @@
     <domain>lan</domain>
   </system>
   <OPNsense>
-    <KeaUnbound>
+    <KeaUbnd>
       <general>
         <enabled>1</enabled>
       </general>
-    </KeaUnbound>
+    </KeaUbnd>
     <Kea>
       <dhcp4>
         <general>

@@ -32,8 +32,8 @@ _YXRRSET = 9
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 _CONFIG_XML    = "/conf/config.xml"
-_DAEMON_SUP    = "/var/run/kea-unbound-ddns.supervisor.pid"
-_START_SCRIPT  = "/usr/local/opnsense/scripts/keaunbound/start.py"
+_DAEMON_SUP    = "/var/run/kea-ubnd-ddns.supervisor.pid"
+_START_SCRIPT  = "/usr/local/opnsense/scripts/keaubnd/start.py"
 _LISTENER_PORT = 53535
 
 
@@ -43,11 +43,11 @@ def _set_collision_policy(ssh, policy: str) -> None:
 import xml.etree.ElementTree as ET
 tree = ET.parse("/conf/config.xml")
 root = tree.getroot()
-node = root.find("OPNsense/KeaUnbound/general/collision_policy")
+node = root.find("OPNsense/KeaUbnd/general/collision_policy")
 if node is None:
-    general = root.find("OPNsense/KeaUnbound/general")
+    general = root.find("OPNsense/KeaUbnd/general")
     if general is None:
-        raise SystemExit("OPNsense/KeaUnbound/general missing from config.xml")
+        raise SystemExit("OPNsense/KeaUbnd/general missing from config.xml")
     node = ET.SubElement(general, "collision_policy")
 node.text = {policy!r}
 tree.write("/conf/config.xml", xml_declaration=True, encoding="UTF-8")

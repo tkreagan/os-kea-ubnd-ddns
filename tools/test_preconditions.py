@@ -15,7 +15,7 @@ import sys
 import types
 
 _ROOT = pathlib.Path(__file__).parents[1]
-_PC = _ROOT / "src/opnsense/scripts/keaunbound/lib/preconditions.py"
+_PC = _ROOT / "src/opnsense/scripts/keaubnd/lib/preconditions.py"
 
 # Stub kea_transport (preconditions imports constants + enablement helpers).
 _pkg = types.ModuleType("lib"); _pkg.__path__ = []

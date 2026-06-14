@@ -35,7 +35,7 @@ def test_clean_removes_stale_record(ssh, stale_record, unbound, test_log):
     hostname, ip = stale_record
     assert unbound.has_record(hostname, ip, "A"), "Pre-condition: stale record not found"
 
-    ssh("/usr/local/sbin/configctl keaunbound clean")
+    ssh("/usr/local/sbin/configctl keaubnd clean")
     time.sleep(2)
 
     still_present = unbound.has_record(hostname, ip, "A")
@@ -54,7 +54,7 @@ def test_clean_removes_orphaned_ptr(ssh, test_host, unbound, test_log):
         f"local_data '{ptr} 300 IN PTR {hostname}.'")
     test_log("injected", {"type": "orphaned_ptr", "ptr": ptr, "target": hostname})
 
-    ssh("/usr/local/sbin/configctl keaunbound clean")
+    ssh("/usr/local/sbin/configctl keaubnd clean")
     time.sleep(2)
 
     data = unbound.list_local_data()
@@ -79,7 +79,7 @@ def test_clean_preserves_kea_backed_record(ssh, kea, dhcp4_subnet_id,
         f"local_data '{hostname} 300 IN A {ip}'")
     test_log("injected", {"type": "kea_backed_record", "hostname": hostname, "ip": ip})
 
-    ssh("/usr/local/sbin/configctl keaunbound clean")
+    ssh("/usr/local/sbin/configctl keaubnd clean")
     time.sleep(2)
 
     still_present = unbound.has_record(hostname, ip, "A")
@@ -94,7 +94,7 @@ def test_clean_preserves_kea_backed_record(ssh, kea, dhcp4_subnet_id,
 def test_clean_does_not_touch_host_entries(ssh, unbound, test_log):
     """Records from host_entries.conf must survive a clean run."""
     before = unbound.list_local_data().get("router.lan", [])
-    ssh("/usr/local/sbin/configctl keaunbound clean")
+    ssh("/usr/local/sbin/configctl keaubnd clean")
     time.sleep(2)
     after = unbound.list_local_data().get("router.lan", [])
     test_log("observed", {"before": before, "after": after})
@@ -103,7 +103,7 @@ def test_clean_does_not_touch_host_entries(ssh, unbound, test_log):
 
 def test_clean_dry_run_does_not_remove(ssh, stale_record, unbound, test_log):
     hostname, ip = stale_record
-    ssh("/usr/local/opnsense/scripts/keaunbound/local-data-clean.py --dry-run")
+    ssh("/usr/local/opnsense/scripts/keaubnd/local-data-clean.py --dry-run")
     time.sleep(1)
     still_present = unbound.has_record(hostname, ip, "A")
     test_log("observed", {"still_present_after_dry_run": still_present})

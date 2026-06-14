@@ -55,8 +55,8 @@ print(node.text or '')
     return ctx.ssh.sudo_script("python3", code, timeout=10).strip()
 
 
-SYNTH_PTR_PATH = "OPNsense/KeaUnbound/general/synthesize_ptr"
-COLLISION_PATH = "OPNsense/KeaUnbound/general/collision_policy"
+SYNTH_PTR_PATH = "OPNsense/KeaUbnd/general/synthesize_ptr"
+COLLISION_PATH = "OPNsense/KeaUbnd/general/collision_policy"
 
 
 @register

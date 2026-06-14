@@ -2,7 +2,7 @@
 """
 DDNS NCR record-level verification scenarios.
 
-Tests that the live DDNS listener (kea-unbound-ddns.py) correctly handles
+Tests that the live DDNS listener (kea-ubnd-ddns.py) correctly handles
 DNS UPDATE packets and produces the right output in Unbound:
 
   * A vs AAAA record types stored with exact type (not confused)

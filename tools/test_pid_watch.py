@@ -14,7 +14,7 @@ import sys
 import types
 
 _ROOT = pathlib.Path(__file__).parents[1]
-_PW = _ROOT / "src/opnsense/scripts/keaunbound/lib/pid_watch.py"
+_PW = _ROOT / "src/opnsense/scripts/keaubnd/lib/pid_watch.py"
 
 # Stub the kea_transport relative import (pid_watch re-exports _is_service_enabled).
 _pkg = types.ModuleType("lib"); _pkg.__path__ = []

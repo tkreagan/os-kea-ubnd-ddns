@@ -4,7 +4,7 @@
 Unit tests for reservation-sync.py (sync_reservations function).
 
 Patches at the rsync module level because the script imports names
-directly into its own namespace (from lib.keaunbound_sync import ...).
+directly into its own namespace (from lib.keaubnd_sync import ...).
 """
 
 from __future__ import annotations
@@ -13,7 +13,7 @@ import unittest.mock as mock
 
 import pytest
 
-from lib.keaunbound_sync import KeaServiceUnavailableError, KeaUnavailableError
+from lib.keaubnd_sync import KeaServiceUnavailableError, KeaUnavailableError
 from .conftest import load_script
 
 pytestmark = pytest.mark.unit

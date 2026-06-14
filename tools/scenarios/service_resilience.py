@@ -10,9 +10,9 @@ from tools.scenarios import register
 from tools.scenarios.base import Scenario, ChaosContext
 from tools.lib.kea import KeaError
 
-CONFIGCTL = "/usr/local/sbin/configctl keaunbound"
-PIDFILE = "/var/run/kea-unbound-ddns.pid"
-SUPERVISOR_PIDFILE = "/var/run/kea-unbound-ddns.supervisor.pid"
+CONFIGCTL = "/usr/local/sbin/configctl keaubnd"
+PIDFILE = "/var/run/kea-ubnd-ddns.pid"
+SUPERVISOR_PIDFILE = "/var/run/kea-ubnd-ddns.supervisor.pid"
 
 
 def _get_pid(ctx: ChaosContext, pidfile: str) -> str:
@@ -110,11 +110,11 @@ class SupervisorKill(Scenario):
         failures = []
         # After killing supervisor, no orphaned daemon processes should remain
         zombies = ctx.ssh.run(
-            "pgrep -f kea-unbound-ddns.py || true", check=False
+            "pgrep -f kea-ubnd-ddns.py || true", check=False
         )
         if zombies.strip():
             failures.append(
-                f"Zombie kea-unbound-ddns processes remain: {zombies[:80]}"
+                f"Zombie kea-ubnd-ddns processes remain: {zombies[:80]}"
             )
         # Restart and verify clean start
         ctx.ssh.sudo(f"{CONFIGCTL} start", timeout=15, check=False)
@@ -249,7 +249,7 @@ class SimultaneousFlip(Scenario):
 
         # Stop both simultaneously.
         # Use pkill -x (exact process-name match) for unbound so we don't
-        # accidentally kill kea-unbound-ddns.py whose cmdline also contains
+        # accidentally kill kea-ubnd-ddns.py whose cmdline also contains
         # "unbound". For kea-dhcp4 the exact name is safe.
         ctx.ssh.sudo(
             "service kea-dhcp4 stop; service unbound stop; "
@@ -304,7 +304,7 @@ class SimultaneousFlip(Scenario):
         time.sleep(3)
         if not ctx.daemon_is_running():
             ctx.ssh.sudo(
-                "/usr/local/sbin/configctl keaunbound start || true",
+                "/usr/local/sbin/configctl keaubnd start || true",
                 check=False, timeout=15
             )
             time.sleep(3)

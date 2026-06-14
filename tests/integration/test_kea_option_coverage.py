@@ -124,7 +124,7 @@ def test_dhcp4_conflict_resolution_flag(dhcp4_conf, test_log):
 def test_no_spdx_headers_missing(ssh, test_log):
     """All Python source files must have SPDX-License-Identifier headers."""
     out = ssh(
-        "find /usr/local/opnsense/scripts/keaunbound /usr/local/sbin/kea-unbound-ddns.py "
+        "find /usr/local/opnsense/scripts/keaubnd /usr/local/sbin/kea-ubnd-ddns.py "
         "-name '*.py' -not -name '__init__.py' | "
         "xargs grep -L 'SPDX-License-Identifier' 2>/dev/null || true",
         check=False,

@@ -8,11 +8,11 @@ the OPNsense test box (OPNSENSE_HOST).  Tests exercise the full path:
 
   DHCP renew on client box
     → Kea issues / updates lease on OPNsense
-    → configctl keaunbound sync_dynamic
+    → configctl keaubnd sync_dynamic
     → Unbound registers <client-hostname>.lan A record
     → local-data-audit shows status "ok"
     → DHCP release → stale record
-    → configctl keaunbound clean removes it
+    → configctl keaubnd clean removes it
 
 Requires OPNSENSE_HOST, OPNSENSE_SSH_*, DHCPCLIENT_HOST, DHCPCLIENT_SSH_*,
 DHCPCLIENT_LAN_IF, and DHCPCLIENT_HOSTNAME to be set in tests/.env.
@@ -131,7 +131,7 @@ def test_sync_dynamic_registers_client(ssh, dhcpclient, client_if, client_fqdn,
     # Ensure no stale record from a previous run
     unbound.remove_record(client_fqdn)
 
-    ssh("/usr/local/sbin/configctl keaunbound sync_dynamic")
+    ssh("/usr/local/sbin/configctl keaubnd sync_dynamic")
     time.sleep(2)
 
     has_a   = unbound.has_record(client_fqdn, ip, "A")
@@ -161,11 +161,11 @@ def test_audit_shows_lease_as_ok(ssh, dhcpclient, client_if, client_fqdn,
         pytest.skip("DHCP client has no IP")
 
     unbound.remove_record(client_fqdn)
-    ssh("/usr/local/sbin/configctl keaunbound sync_dynamic")
+    ssh("/usr/local/sbin/configctl keaubnd sync_dynamic")
     time.sleep(2)
 
     raw = ssh(
-        "/usr/local/opnsense/scripts/keaunbound/local-data-audit.py --report-json",
+        "/usr/local/opnsense/scripts/keaubnd/local-data-audit.py --report-json",
         check=False,
     )
     try:
@@ -204,7 +204,7 @@ def test_renew_updates_registration(ssh, dhcpclient, client_if, client_fqdn,
     if not ip_after:
         pytest.skip("Client did not get an IP after renew")
 
-    ssh("/usr/local/sbin/configctl keaunbound sync_dynamic")
+    ssh("/usr/local/sbin/configctl keaubnd sync_dynamic")
     time.sleep(2)
 
     has_a = unbound.has_record(client_fqdn, ip_after, "A")
@@ -236,7 +236,7 @@ def test_stale_record_cleaned_after_release(ssh, dhcpclient, client_if, client_f
 
     # Register current lease in Unbound
     unbound.remove_record(client_fqdn)
-    ssh("/usr/local/sbin/configctl keaunbound sync_dynamic")
+    ssh("/usr/local/sbin/configctl keaubnd sync_dynamic")
     time.sleep(2)
     assert unbound.has_record(client_fqdn, ip, "A"), \
         "Pre-condition: record not in Unbound after sync"
@@ -247,7 +247,7 @@ def test_stale_record_cleaned_after_release(ssh, dhcpclient, client_if, client_f
     _release_lease(dhcpclient, client_if)
 
     # Run the clean script — should remove the now-stale record
-    ssh("/usr/local/sbin/configctl keaunbound clean")
+    ssh("/usr/local/sbin/configctl keaubnd clean")
     time.sleep(2)
 
     still_present = unbound.has_record(client_fqdn, ip, "A")
@@ -286,7 +286,7 @@ def test_ttl_reflects_remaining_lease_time(ssh, kea, dhcpclient, client_if, clie
     remaining_kea = max(1, expire - int(_time.time())) if expire else None
 
     unbound.remove_record(client_fqdn)
-    ssh("/usr/local/sbin/configctl keaunbound sync_dynamic")
+    ssh("/usr/local/sbin/configctl keaubnd sync_dynamic")
     time.sleep(1)
 
     data = unbound.list_local_data()

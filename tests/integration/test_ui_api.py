@@ -18,7 +18,7 @@ pytestmark = [pytest.mark.integration, pytest.mark.slow]
 
 
 def test_api_general_get_returns_schema(api, deploy, test_log):
-    """Settings tab: GET /api/keaunbound/general/get returns expected fields."""
+    """Settings tab: GET /api/keaubnd/general/get returns expected fields."""
     result = api.api_get("general/get")
     test_log("observed", {"keys": list(result.keys())})
     assert "general" in result
@@ -47,7 +47,7 @@ def test_api_general_set_roundtrip(api, test_log):
 
 def test_api_service_start_stop(api, ssh, test_log):
     """Service control buttons: start → stop must work via API."""
-    ssh("/usr/local/sbin/configctl keaunbound stop", check=False)
+    ssh("/usr/local/sbin/configctl keaubnd stop", check=False)
     time.sleep(0.5)
 
     r = api.api_post("service/start")
@@ -61,21 +61,21 @@ def test_api_service_start_stop(api, ssh, test_log):
 
 
 def test_api_service_restart(api, ssh, test_log):
-    ssh("/usr/local/sbin/configctl keaunbound start", check=False)
+    ssh("/usr/local/sbin/configctl keaubnd start", check=False)
     time.sleep(2)
-    pid_before = ssh("cat /var/run/kea-unbound-ddns.pid 2>/dev/null || echo none",
+    pid_before = ssh("cat /var/run/kea-ubnd-ddns.pid 2>/dev/null || echo none",
                      check=False).strip()
 
     r = api.api_post("service/restart")
     time.sleep(3)
-    pid_after = ssh("cat /var/run/kea-unbound-ddns.pid 2>/dev/null || echo none",
+    pid_after = ssh("cat /var/run/kea-ubnd-ddns.pid 2>/dev/null || echo none",
                     check=False).strip()
 
     test_log("observed", {"pid_before": pid_before, "pid_after": pid_after,
                           "response": r})
     assert pid_before != pid_after, "PID did not change after restart"
 
-    ssh("/usr/local/sbin/configctl keaunbound stop", check=False)
+    ssh("/usr/local/sbin/configctl keaubnd stop", check=False)
     test_log("cleaned", True)
 
 

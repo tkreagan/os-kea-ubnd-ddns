@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: BSD-2-Clause
 """
-Production monitor for os-kea-unbound.
+Production monitor for os-kea-ubnd-ddns.
 
 Runs hourly checks against the production box, archives snapshots locally,
 and generates a weekly summary comparing audit script output against raw
@@ -38,7 +38,7 @@ from tools.lib.unbound import UnboundClient
 
 SCRIPT_PATH = pathlib.Path(__file__).resolve()
 REPO_ROOT = SCRIPT_PATH.parents[1]
-LAUNCHD_LABEL = "com.tkr.kea-unbound-monitor"
+LAUNCHD_LABEL = "com.tkr.kea-ubnd-monitor"
 LAUNCHD_PLIST = (
     pathlib.Path.home() / "Library" / "LaunchAgents" / f"{LAUNCHD_LABEL}.plist"
 )
@@ -72,7 +72,7 @@ def _get_prod_domain() -> str:
 
 
 def _get_archive_dir() -> pathlib.Path:
-    d = os.environ.get("MONITOR_ARCHIVE_DIR", "~/.kea-unbound-monitor")
+    d = os.environ.get("MONITOR_ARCHIVE_DIR", "~/.kea-ubnd-monitor")
     return pathlib.Path(d).expanduser()
 
 
@@ -88,7 +88,7 @@ def check_service_health(ssh: SSHSession) -> CheckResult:
     # Daemon status
     try:
         status = ssh.sudo(
-            "/usr/local/sbin/pluginctl -s kea-unbound-ddns status", timeout=10
+            "/usr/local/sbin/pluginctl -s kea-ubnd-ddns status", timeout=10
         )
         running = "is running" in status
         raw["daemon_status"] = status[:200]
@@ -102,8 +102,8 @@ def check_service_health(ssh: SSHSession) -> CheckResult:
 
     # PID file consistency
     try:
-        pid = ssh.sudo("cat /var/run/kea-unbound-ddns.pid", check=False).strip()
-        sup = ssh.sudo("cat /var/run/kea-unbound-ddns.supervisor.pid", check=False).strip()
+        pid = ssh.sudo("cat /var/run/kea-ubnd-ddns.pid", check=False).strip()
+        sup = ssh.sudo("cat /var/run/kea-ubnd-ddns.supervisor.pid", check=False).strip()
         raw["child_pid"] = pid
         raw["supervisor_pid"] = sup
         if pid and sup and pid == sup:
@@ -177,7 +177,7 @@ def check_unbound_health(unbound: UnboundClient) -> CheckResult:
 def check_audit_snapshot(ssh: SSHSession) -> CheckResult:
     try:
         raw_output = ssh.sudo(
-            "/usr/local/opnsense/scripts/keaunbound/local-data-audit.py --report-json",
+            "/usr/local/opnsense/scripts/keaubnd/local-data-audit.py --report-json",
             timeout=30,
         )
         audit = json.loads(raw_output)
@@ -336,7 +336,7 @@ def check_log_harvest(
     ssh: SSHSession, archive: Archive, host: str
 ) -> CheckResult:
     today = datetime.date.today().strftime("%Y%m%d")
-    log_path = f"/var/log/keaunbound/keaunbound_{today}.log"
+    log_path = f"/var/log/keaubnd/keaubnd_{today}.log"
     try:
         log_bytes = ssh.sftp_read(log_path)
         saved = archive.append_log_lines(host, today, log_bytes)
@@ -477,7 +477,7 @@ def uninstall_launchd() -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Production monitor for os-kea-unbound",
+        description="Production monitor for os-kea-ubnd-ddns",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument("--once", action="store_true",

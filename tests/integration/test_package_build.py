@@ -3,7 +3,7 @@
 """
 Integration tests — package build and installation.
 
-Builds os-kea-unbound-*.pkg on the dev box using the opnsense/plugins
+Builds os-kea-ubnd-ddns-*.pkg on the dev box using the opnsense/plugins
 make(1) toolchain (make package / make upgrade), then inspects the result.
 
 Checks three distinct surfaces for macOS artifact contamination:
@@ -20,40 +20,40 @@ import pytest
 
 pytestmark = [pytest.mark.integration, pytest.mark.packaging]
 
-PACKAGE_NAME = "os-kea-unbound"
-PLUGIN_DIR = "/usr/plugins/net/kea-unbound"
+PACKAGE_NAME = "os-kea-ubnd-ddns"
+PLUGIN_DIR = "/usr/plugins/net/kea-ubnd-ddns"
 PKG_GLOB = f"{PLUGIN_DIR}/work/pkg/{PACKAGE_NAME}-*.pkg"
 
 # Every file that must appear in the installed package.
 EXPECTED_FILES = [
     # Daemons / executables in sbin
-    "/usr/local/sbin/kea-unbound-ddns.py",
-    "/usr/local/sbin/kea-unbound-logwatch.py",
+    "/usr/local/sbin/kea-ubnd-ddns.py",
+    "/usr/local/sbin/kea-ubnd-logwatch.py",
     # Scripts
-    "/usr/local/opnsense/scripts/keaunbound/start.py",
-    "/usr/local/opnsense/scripts/keaunbound/stop.py",
-    "/usr/local/opnsense/scripts/keaunbound/kea-sync.py",
-    "/usr/local/opnsense/scripts/keaunbound/local-data-audit.py",
-    "/usr/local/opnsense/scripts/keaunbound/local-data-clean.py",
-    "/usr/local/opnsense/scripts/keaunbound/uninstall.sh",
+    "/usr/local/opnsense/scripts/keaubnd/start.py",
+    "/usr/local/opnsense/scripts/keaubnd/stop.py",
+    "/usr/local/opnsense/scripts/keaubnd/kea-sync.py",
+    "/usr/local/opnsense/scripts/keaubnd/local-data-audit.py",
+    "/usr/local/opnsense/scripts/keaubnd/local-data-clean.py",
+    "/usr/local/opnsense/scripts/keaubnd/uninstall.sh",
     # Script library
-    "/usr/local/opnsense/scripts/keaunbound/lib/__init__.py",
-    "/usr/local/opnsense/scripts/keaunbound/lib/keaunbound_sync.py",
-    "/usr/local/opnsense/scripts/keaunbound/lib/kea_transport.py",
-    "/usr/local/opnsense/scripts/keaunbound/lib/consistency_sm.py",
-    "/usr/local/opnsense/scripts/keaunbound/lib/pid_watch.py",
-    "/usr/local/opnsense/scripts/keaunbound/lib/preconditions.py",
-    "/usr/local/opnsense/scripts/keaunbound/lib/logwatch.py",
+    "/usr/local/opnsense/scripts/keaubnd/lib/__init__.py",
+    "/usr/local/opnsense/scripts/keaubnd/lib/keaubnd_sync.py",
+    "/usr/local/opnsense/scripts/keaubnd/lib/kea_transport.py",
+    "/usr/local/opnsense/scripts/keaubnd/lib/consistency_sm.py",
+    "/usr/local/opnsense/scripts/keaubnd/lib/pid_watch.py",
+    "/usr/local/opnsense/scripts/keaubnd/lib/preconditions.py",
+    "/usr/local/opnsense/scripts/keaubnd/lib/logwatch.py",
     # OPNsense integration
-    "/usr/local/etc/inc/plugins.inc.d/keaunbound.inc",
-    "/usr/local/opnsense/service/conf/actions.d/actions_keaunbound.conf",
-    "/usr/local/opnsense/service/templates/OPNsense/Syslog/local/keaunbound.conf",
+    "/usr/local/etc/inc/plugins.inc.d/keaubnd.inc",
+    "/usr/local/opnsense/service/conf/actions.d/actions_keaubnd.conf",
+    "/usr/local/opnsense/service/templates/OPNsense/Syslog/local/keaubnd.conf",
     # MVC
-    "/usr/local/opnsense/mvc/app/models/OPNsense/KeaUnbound/General.xml",
-    "/usr/local/opnsense/mvc/app/models/OPNsense/KeaUnbound/General.php",
-    "/usr/local/opnsense/mvc/app/models/OPNsense/KeaUnbound/ACL/ACL.xml",
-    "/usr/local/opnsense/mvc/app/models/OPNsense/KeaUnbound/Menu/Menu.xml",
-    "/usr/local/opnsense/version/kea-unbound",
+    "/usr/local/opnsense/mvc/app/models/OPNsense/KeaUbnd/General.xml",
+    "/usr/local/opnsense/mvc/app/models/OPNsense/KeaUbnd/General.php",
+    "/usr/local/opnsense/mvc/app/models/OPNsense/KeaUbnd/ACL/ACL.xml",
+    "/usr/local/opnsense/mvc/app/models/OPNsense/KeaUbnd/Menu/Menu.xml",
+    "/usr/local/opnsense/version/kea-ubnd-ddns",
 ]
 
 # Patterns that must never appear in any package file path or on disk.
@@ -125,7 +125,7 @@ class TestSourceTree:
         Every .xml file in the models tree must have a plain filename (no leading ._).
         This is the specific failure mode: OPNsense's ConfigMaintenance::loadModels()
         scans for *.xml and derives PHP class names from filenames — ._General.xml
-        causes it to try to instantiate OPNsense\\KeaUnbound\\._General which doesn't
+        causes it to try to instantiate OPNsense\\KeaUbnd\\._General which doesn't
         exist and crashes the MVC framework.
         """
         xml_files = ssh(
@@ -151,7 +151,7 @@ class TestPackageManifest:
         assert PACKAGE_NAME in built_pkg
 
     def test_package_name_is_stable_not_devel(self, built_pkg, test_log):
-        """Package must be os-kea-unbound-VERSION.pkg, not os-kea-unbound-devel-*."""
+        """Package must be os-kea-ubnd-ddns-VERSION.pkg, not os-kea-ubnd-ddns-devel-*."""
         basename = built_pkg.rsplit("/", 1)[-1]
         test_log("observed", {"basename": basename})
         assert "-devel" not in basename, (
@@ -238,10 +238,10 @@ class TestInstalledFiles:
         OPNsense to try to instantiate a non-existent PHP class and crash.
         """
         paths_to_check = [
-            "/usr/local/opnsense/mvc/app/models/OPNsense/KeaUnbound",
-            "/usr/local/opnsense/mvc/app/controllers/OPNsense/KeaUnbound",
-            "/usr/local/opnsense/mvc/app/views/OPNsense/KeaUnbound",
-            "/usr/local/opnsense/scripts/keaunbound",
+            "/usr/local/opnsense/mvc/app/models/OPNsense/KeaUbnd",
+            "/usr/local/opnsense/mvc/app/controllers/OPNsense/KeaUbnd",
+            "/usr/local/opnsense/mvc/app/views/OPNsense/KeaUbnd",
+            "/usr/local/opnsense/scripts/keaubnd",
             "/usr/local/sbin",
             "/usr/local/etc/inc/plugins.inc.d",
             "/usr/local/opnsense/service/conf/actions.d",
@@ -261,7 +261,7 @@ class TestInstalledFiles:
 
     def test_no_pycache_installed(self, ssh, installed_pkg, test_log):
         found = ssh(
-            "find /usr/local/opnsense/scripts/keaunbound "
+            "find /usr/local/opnsense/scripts/keaubnd "
             "-name '__pycache__' -o -name '*.pyc' 2>/dev/null",
             check=False,
         ).strip()
@@ -277,18 +277,18 @@ class TestInstalledFiles:
     def test_configd_actions_registered(self, ssh, installed_pkg, test_log):
         """All 7 configd actions must be present after install."""
         actions = ssh(
-            "sudo /usr/local/sbin/configctl configd actions 2>/dev/null | grep keaunbound",
+            "sudo /usr/local/sbin/configctl configd actions 2>/dev/null | grep keaubnd",
             check=False,
         ).strip()
         test_log("observed", {"actions": actions})
         expected_actions = [
-            "keaunbound start",
-            "keaunbound stop",
-            "keaunbound restart",
-            "keaunbound status",
-            "keaunbound sync_static",
-            "keaunbound sync_dynamic",
-            "keaunbound clean",
+            "keaubnd start",
+            "keaubnd stop",
+            "keaubnd restart",
+            "keaubnd status",
+            "keaubnd sync_static",
+            "keaubnd sync_dynamic",
+            "keaubnd clean",
         ]
         missing = [a for a in expected_actions if a not in actions]
         assert not missing, f"configd actions not registered after install: {missing}"
@@ -297,17 +297,17 @@ class TestInstalledFiles:
         """Executable scripts must be 0755; data files 0644."""
         issues = []
         checks = [
-            ("/usr/local/sbin/kea-unbound-ddns.py", "755"),
-            ("/usr/local/sbin/kea-unbound-logwatch.py", "755"),
-            ("/usr/local/opnsense/scripts/keaunbound/start.py", "755"),
-            ("/usr/local/opnsense/scripts/keaunbound/kea-sync.py", "755"),
-            ("/usr/local/opnsense/scripts/keaunbound/local-data-audit.py", "755"),
-            ("/usr/local/opnsense/scripts/keaunbound/local-data-clean.py", "755"),
-            ("/usr/local/opnsense/scripts/keaunbound/uninstall.sh", "755"),
-            ("/usr/local/etc/inc/plugins.inc.d/keaunbound.inc", "644"),
-            ("/usr/local/opnsense/service/conf/actions.d/actions_keaunbound.conf", "644"),
-            ("/usr/local/opnsense/mvc/app/models/OPNsense/KeaUnbound/General.xml", "644"),
-            ("/usr/local/opnsense/scripts/keaunbound/lib/consistency_sm.py", "644"),
+            ("/usr/local/sbin/kea-ubnd-ddns.py", "755"),
+            ("/usr/local/sbin/kea-ubnd-logwatch.py", "755"),
+            ("/usr/local/opnsense/scripts/keaubnd/start.py", "755"),
+            ("/usr/local/opnsense/scripts/keaubnd/kea-sync.py", "755"),
+            ("/usr/local/opnsense/scripts/keaubnd/local-data-audit.py", "755"),
+            ("/usr/local/opnsense/scripts/keaubnd/local-data-clean.py", "755"),
+            ("/usr/local/opnsense/scripts/keaubnd/uninstall.sh", "755"),
+            ("/usr/local/etc/inc/plugins.inc.d/keaubnd.inc", "644"),
+            ("/usr/local/opnsense/service/conf/actions.d/actions_keaubnd.conf", "644"),
+            ("/usr/local/opnsense/mvc/app/models/OPNsense/KeaUbnd/General.xml", "644"),
+            ("/usr/local/opnsense/scripts/keaubnd/lib/consistency_sm.py", "644"),
         ]
         for path, expected_perm in checks:
             perm = ssh(f"stat -f '%Lp' {path} 2>/dev/null || echo missing", check=False).strip()
@@ -322,11 +322,11 @@ class TestInstalledFiles:
         orphans = []
         # Check a representative sample — not every OPNsense-framework path
         plugin_only_files = [
-            "/usr/local/sbin/kea-unbound-ddns.py",
-            "/usr/local/opnsense/scripts/keaunbound/start.py",
-            "/usr/local/etc/inc/plugins.inc.d/keaunbound.inc",
-            "/usr/local/opnsense/service/conf/actions.d/actions_keaunbound.conf",
-            "/usr/local/opnsense/version/kea-unbound",
+            "/usr/local/sbin/kea-ubnd-ddns.py",
+            "/usr/local/opnsense/scripts/keaubnd/start.py",
+            "/usr/local/etc/inc/plugins.inc.d/keaubnd.inc",
+            "/usr/local/opnsense/service/conf/actions.d/actions_keaubnd.conf",
+            "/usr/local/opnsense/version/kea-ubnd-ddns",
         ]
         for f in plugin_only_files:
             exists = ssh(f"test -f {f} && echo yes || echo no", check=False).strip()

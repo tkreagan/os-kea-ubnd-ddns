@@ -18,7 +18,7 @@ pytestmark = [pytest.mark.integration, pytest.mark.slow]
 
 
 def test_sync_static_runs_without_error(ssh, deploy, test_log):
-    out = ssh("/usr/local/sbin/configctl keaunbound sync_static")
+    out = ssh("/usr/local/sbin/configctl keaubnd sync_static")
     test_log("observed", {"output": out[:500]})
     # Must not contain "Error" from the Python script (configd output)
     assert "Traceback" not in out
@@ -26,7 +26,7 @@ def test_sync_static_runs_without_error(ssh, deploy, test_log):
 
 
 def test_sync_dynamic_runs_without_error(ssh, deploy, test_log):
-    out = ssh("/usr/local/sbin/configctl keaunbound sync_dynamic")
+    out = ssh("/usr/local/sbin/configctl keaubnd sync_dynamic")
     test_log("observed", {"output": out[:500]})
     assert "Traceback" not in out
     assert "Exception" not in out
@@ -47,7 +47,7 @@ def test_sync_static_registers_reservation(ssh, kea, dhcp4_subnet_id,
     })
     test_log("injected", {"type": "reservation", "hostname": hostname, "ip": ip})
 
-    ssh("/usr/local/sbin/configctl keaunbound sync_static")
+    ssh("/usr/local/sbin/configctl keaubnd sync_static")
     time.sleep(2)
 
     has_a = unbound.has_record(hostname, ip, "A")
@@ -70,7 +70,7 @@ def test_sync_static_registers_reservation(ssh, kea, dhcp4_subnet_id,
 def test_sync_does_not_touch_host_entries(ssh, unbound, test_log):
     """Records in host_entries.conf must survive a sync without change."""
     before = unbound.list_local_data().get("router.lan", [])
-    ssh("/usr/local/sbin/configctl keaunbound sync_static")
+    ssh("/usr/local/sbin/configctl keaubnd sync_static")
     time.sleep(2)
     after = unbound.list_local_data().get("router.lan", [])
     test_log("observed", {"before": before, "after": after})
@@ -93,7 +93,7 @@ def test_sync_dynamic_ttl_bounded(ssh, kea, dhcp4_subnet_id, test_host, unbound,
     })
     test_log("injected", {"hostname": hostname, "ip": ip, "target_ttl": target_ttl})
 
-    ssh("/usr/local/sbin/configctl keaunbound sync_dynamic")
+    ssh("/usr/local/sbin/configctl keaubnd sync_dynamic")
     time.sleep(2)
 
     data = unbound.list_local_data()

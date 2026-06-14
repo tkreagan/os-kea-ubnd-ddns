@@ -6,14 +6,14 @@ Integration tests — uninstall.sh and pkg pre/post-deinstall lifecycle hooks.
 Coverage:
   - uninstall.sh is installed, executable, and has --purge-logs
   - pkg manifest embeds pre-deinstall and post-deinstall scripts
-  - uninstall.sh stops the daemon, cleans config.xml, removes /var/run/keaunbound/
-  - --purge-logs removes /var/log/keaunbound/; logs are preserved by default
+  - uninstall.sh stops the daemon, cleans config.xml, removes /var/run/keaubnd/
+  - --purge-logs removes /var/log/keaubnd/; logs are preserved by default
   - uninstall.sh is idempotent (safe to run twice)
   - pkg delete triggers pre-deinstall (daemon stop + config.xml cleanup)
   - pkg delete triggers post-deinstall (runtime dir removed, configd restarted)
 
 These tests install and remove the plugin.  Each destructive test backs up and
-restores config.xml so a missing KeaUnbound section doesn't break subsequent
+restores config.xml so a missing KeaUbnd section doesn't break subsequent
 tests.  The module teardown reinstalls via make upgrade.
 
 Run selectively:  pytest -m uninstall
@@ -28,14 +28,14 @@ import pytest
 
 pytestmark = [pytest.mark.integration, pytest.mark.uninstall]
 
-PACKAGE_NAME   = "os-kea-unbound"
-PLUGIN_DIR     = "/usr/plugins/net/kea-unbound"
-UNINSTALL_SH   = "/usr/local/opnsense/scripts/keaunbound/uninstall.sh"
-RUNTIME_DIR    = "/var/run/keaunbound"
-LOG_DIR        = "/var/log/keaunbound"
+PACKAGE_NAME   = "os-kea-ubnd-ddns"
+PLUGIN_DIR     = "/usr/plugins/net/kea-ubnd-ddns"
+UNINSTALL_SH   = "/usr/local/opnsense/scripts/keaubnd/uninstall.sh"
+RUNTIME_DIR    = "/var/run/keaubnd"
+LOG_DIR        = "/var/log/keaubnd"
 CONFIG_XML     = "/conf/config.xml"
 CONFIG_BACKUP  = "/tmp/config.xml.uninstall-test-backup"
-SUPERVISOR_PID = "/var/run/kea-unbound-ddns.supervisor.pid"
+SUPERVISOR_PID = "/var/run/kea-ubnd-ddns.supervisor.pid"
 
 REPO = pathlib.Path(__file__).parents[2]
 
@@ -51,13 +51,13 @@ def _is_daemon_running(ssh) -> bool:
     return out == "yes"
 
 
-def _config_has_keaunbound(ssh) -> bool:
+def _config_has_keaubnd(ssh) -> bool:
     return ssh(
         "python3 -c \""
         "import xml.etree.ElementTree as ET; "
         f"t=ET.parse('{CONFIG_XML}'); "
         "r=t.getroot(); o=r.find('OPNsense'); "
-        "print('yes' if o is not None and o.find('KeaUnbound') is not None else 'no')"
+        "print('yes' if o is not None and o.find('KeaUbnd') is not None else 'no')"
         "\"",
         check=False,
     ).strip() == "yes"
@@ -67,7 +67,7 @@ def _fresh_install(ssh, txz_path: str) -> None:
     """Remove any existing install, pkg add the .txz, and start the daemon."""
     ssh(f"pkg delete -fy {PACKAGE_NAME} 2>/dev/null || true", check=False)
     ssh(f"pkg add {txz_path}")
-    ssh("configctl keaunbound start 2>/dev/null || true", check=False)
+    ssh("configctl keaubnd start 2>/dev/null || true", check=False)
 
 
 def _build_txz(ssh) -> str:
@@ -104,7 +104,7 @@ def _restore_after_module(ssh, txz_path):
     yield
     ssh(f"pkg delete -fy {PACKAGE_NAME} 2>/dev/null || true", check=False)
     ssh(f"cd {PLUGIN_DIR} && make upgrade", check=False, timeout=120)
-    ssh("configctl keaunbound start 2>/dev/null || true", check=False)
+    ssh("configctl keaubnd start 2>/dev/null || true", check=False)
 
 
 # ── Non-destructive: verify installation artifacts ───────────────────────────
@@ -159,7 +159,7 @@ class TestUninstallScriptFunctional:
     Run uninstall.sh and verify its effects.
 
     Each test: backup config.xml → fresh pkg-add install → run test → restore config.xml.
-    Without config restore, a missing KeaUnbound section would prevent the daemon
+    Without config restore, a missing KeaUbnd section would prevent the daemon
     from starting in the next test's _fresh_install.
     """
 
@@ -184,16 +184,16 @@ class TestUninstallScriptFunctional:
         assert not still_running, "Daemon still running after uninstall.sh"
 
     def test_removes_config_xml_section(self, ssh, test_log):
-        had_section = _config_has_keaunbound(ssh)
+        had_section = _config_has_keaubnd(ssh)
         test_log("setup", {"had_section": had_section})
         if not had_section:
-            pytest.skip("KeaUnbound section not present in config.xml before test")
+            pytest.skip("KeaUbnd section not present in config.xml before test")
 
         ssh(f"sh {UNINSTALL_SH}", check=True)
 
-        still_has = _config_has_keaunbound(ssh)
+        still_has = _config_has_keaubnd(ssh)
         test_log("observed", {"still_has_section": still_has})
-        assert not still_has, "KeaUnbound section still in config.xml after uninstall.sh"
+        assert not still_has, "KeaUbnd section still in config.xml after uninstall.sh"
 
     def test_removes_runtime_dir(self, ssh, test_log):
         ssh(f"mkdir -p {RUNTIME_DIR}", check=False)
@@ -271,16 +271,16 @@ class TestPkgDeleteHooks:
         assert not still_running, "Daemon still running after pkg delete"
 
     def test_pre_deinstall_removes_config_xml_section(self, ssh, test_log):
-        had_section = _config_has_keaunbound(ssh)
+        had_section = _config_has_keaubnd(ssh)
         test_log("setup", {"had_section": had_section})
         if not had_section:
-            pytest.skip("KeaUnbound section not in config.xml before test")
+            pytest.skip("KeaUbnd section not in config.xml before test")
 
         ssh(f"pkg delete -fy {PACKAGE_NAME}", check=True, timeout=60)
 
-        still_has = _config_has_keaunbound(ssh)
+        still_has = _config_has_keaubnd(ssh)
         test_log("observed", {"still_has_section": still_has})
-        assert not still_has, "KeaUnbound still in config.xml after pkg delete"
+        assert not still_has, "KeaUbnd still in config.xml after pkg delete"
 
     def test_post_deinstall_removes_runtime_dir(self, ssh, test_log):
         ssh(f"mkdir -p {RUNTIME_DIR}", check=False)
@@ -293,27 +293,27 @@ class TestPkgDeleteHooks:
         assert exists == "no", f"{RUNTIME_DIR} still present after pkg delete"
 
     def test_post_deinstall_drops_configd_actions(self, ssh, test_log):
-        """After pkg delete, configd must not advertise keaunbound actions."""
+        """After pkg delete, configd must not advertise keaubnd actions."""
         ssh(f"pkg delete -fy {PACKAGE_NAME}", check=True, timeout=60)
 
         actions = ssh(
-            "configctl configd actions 2>/dev/null | grep keaunbound || true",
+            "configctl configd actions 2>/dev/null | grep keaubnd || true",
             check=False,
         ).strip()
         test_log("observed", {"remaining_actions": actions})
         assert not actions, (
-            f"configd still advertises keaunbound actions after pkg delete: {actions}"
+            f"configd still advertises keaubnd actions after pkg delete: {actions}"
         )
 
     def test_pkg_delete_removes_installed_files(self, ssh, test_log):
         ssh(f"pkg delete -fy {PACKAGE_NAME}", check=True, timeout=60)
 
         sentinel_files = [
-            "/usr/local/sbin/kea-unbound-ddns.py",
-            "/usr/local/opnsense/scripts/keaunbound/start.py",
-            "/usr/local/opnsense/scripts/keaunbound/uninstall.sh",
-            "/usr/local/etc/inc/plugins.inc.d/keaunbound.inc",
-            "/usr/local/opnsense/service/conf/actions.d/actions_keaunbound.conf",
+            "/usr/local/sbin/kea-ubnd-ddns.py",
+            "/usr/local/opnsense/scripts/keaubnd/start.py",
+            "/usr/local/opnsense/scripts/keaubnd/uninstall.sh",
+            "/usr/local/etc/inc/plugins.inc.d/keaubnd.inc",
+            "/usr/local/opnsense/service/conf/actions.d/actions_keaubnd.conf",
         ]
         orphans = [
             f for f in sentinel_files

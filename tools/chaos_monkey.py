@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: BSD-2-Clause
 """
-Chaos monkey for os-kea-unbound.
+Chaos monkey for os-kea-ubnd-ddns.
 
 Runs adversarial scenarios against dev-opnsense + dev-dhcpclient to test
 resilience, recovery, and correctness of the DHCP → DNS pipeline.
@@ -124,7 +124,7 @@ def _deploy_plugin(ssh, repo_root: pathlib.Path) -> None:
     import subprocess
     import tempfile
 
-    plugin_dir = os.environ.get("PLUGIN_DIR", "/usr/plugins/net/kea-unbound")
+    plugin_dir = os.environ.get("PLUGIN_DIR", "/usr/plugins/net/kea-ubnd-ddns")
 
     # Pick strategy: if the Mk infrastructure is present, use make upgrade.
     # Otherwise fall back to direct file install (dev-box-safe, no pkg needed).
@@ -151,7 +151,7 @@ def _deploy_plugin(ssh, repo_root: pathlib.Path) -> None:
             env={**os.environ, "COPYFILE_DISABLE": "1"},
             check=True,
         )
-        ssh.sftp_put(src_tarball, "/tmp/keaunbound-src.tar.gz")
+        ssh.sftp_put(src_tarball, "/tmp/keaubnd-src.tar.gz")
     finally:
         src_tarball.unlink(missing_ok=True)
 
@@ -176,19 +176,19 @@ def _deploy_plugin(ssh, repo_root: pathlib.Path) -> None:
                     env={**os.environ, "COPYFILE_DISABLE": "1"},
                     check=True,
                 )
-                ssh.sftp_put(meta_tarball, "/tmp/keaunbound-meta.tar.gz")
+                ssh.sftp_put(meta_tarball, "/tmp/keaubnd-meta.tar.gz")
             finally:
                 meta_tarball.unlink(missing_ok=True)
             ssh.sudo(
                 f"tar --no-xattrs --no-acls --no-fflags "
-                f"-xzf /tmp/keaunbound-meta.tar.gz -C {plugin_dir}",
+                f"-xzf /tmp/keaubnd-meta.tar.gz -C {plugin_dir}",
                 timeout=30,
             )
 
         # Place src/ into build tree and run make upgrade
         ssh.sudo(
             f"tar --no-xattrs --no-acls --no-fflags "
-            f"-xzf /tmp/keaunbound-src.tar.gz -C {plugin_dir}/src",
+            f"-xzf /tmp/keaubnd-src.tar.gz -C {plugin_dir}/src",
             timeout=30,
         )
         print("  Running make upgrade...")
@@ -198,24 +198,24 @@ def _deploy_plugin(ssh, repo_root: pathlib.Path) -> None:
         # Direct install: copy src/ tree directly into /usr/local/
         print("  Direct file install (no Mk build infra found)")
         was_installed = ssh.sudo(
-            "test -f /usr/local/sbin/kea-unbound-ddns.py && echo yes || echo no",
+            "test -f /usr/local/sbin/kea-ubnd-ddns.py && echo yes || echo no",
             check=False, timeout=10,
         ).strip() == "yes"
         ssh.sudo(
             "tar --no-xattrs --no-acls --no-fflags "
-            "-xzf /tmp/keaunbound-src.tar.gz -C /usr/local/",
+            "-xzf /tmp/keaubnd-src.tar.gz -C /usr/local/",
             timeout=30,
         )
-        ssh.sudo("chmod 755 /usr/local/sbin/kea-unbound-ddns.py", timeout=10)
+        ssh.sudo("chmod 755 /usr/local/sbin/kea-ubnd-ddns.py", timeout=10)
         ssh.sudo(
-            "find /usr/local/opnsense/scripts/keaunbound -name '*.py' "
+            "find /usr/local/opnsense/scripts/keaubnd -name '*.py' "
             "-exec chmod 755 {} \\;",
             timeout=10,
         )
         if not was_installed:
             # First install: make scripts executable
             ssh.sudo(
-                "find /usr/local/opnsense/scripts/keaunbound -type f "
+                "find /usr/local/opnsense/scripts/keaubnd -type f "
                 "-exec chmod 755 {} \\;",
                 check=False, timeout=10,
             )
@@ -229,8 +229,8 @@ def _deploy_plugin(ssh, repo_root: pathlib.Path) -> None:
     time.sleep(5)
 
     # Start or restart the daemon
-    print("  Starting kea-unbound-ddns...")
-    ssh.sudo("/usr/local/sbin/configctl keaunbound restart", timeout=30,
+    print("  Starting kea-ubnd-ddns...")
+    ssh.sudo("/usr/local/sbin/configctl keaubnd restart", timeout=30,
              check=False)
     time.sleep(3)
 
@@ -265,7 +265,7 @@ def verify_baseline(ctx: ChaosContext) -> list[str]:
             print("running")
         else:
             print(f"NOT running ({status[:60]})")
-            failures.append("kea-unbound-ddns service is not running")
+            failures.append("kea-ubnd-ddns service is not running")
     except Exception as exc:
         print(f"FAIL ({exc})")
         failures.append(f"Cannot check daemon status: {exc}")
@@ -341,7 +341,7 @@ def _ensure_kea_services(ctx: ChaosContext) -> None:
 
 
 def _ensure_daemon_running(ctx: ChaosContext) -> None:
-    """Restart kea-unbound-ddns if it stopped during a scenario.
+    """Restart kea-ubnd-ddns if it stopped during a scenario.
 
     Best-effort: swallows all errors so it never breaks scenario accounting.
     """
@@ -349,7 +349,7 @@ def _ensure_daemon_running(ctx: ChaosContext) -> None:
         if ctx.daemon_is_running():
             return
         ctx.ssh.sudo(
-            "/usr/local/sbin/configctl keaunbound start || true",
+            "/usr/local/sbin/configctl keaubnd start || true",
             check=False, timeout=15,
         )
         time.sleep(3)
@@ -467,7 +467,7 @@ class _UnavailableSession:
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Chaos monkey for os-kea-unbound",
+        description="Chaos monkey for os-kea-ubnd-ddns",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument("--scenario", action="append", dest="scenarios",
@@ -503,7 +503,7 @@ def main() -> None:
     cfg = _load_config()
 
     print("=" * 60)
-    print("CHAOS MONKEY — os-kea-unbound")
+    print("CHAOS MONKEY — os-kea-ubnd-ddns")
     print(f"Target: {cfg.opnsense_host}")
     print(f"Client: {cfg.dhcpclient_host}")
     print("=" * 60)

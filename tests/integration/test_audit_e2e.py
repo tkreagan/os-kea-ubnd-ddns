@@ -18,7 +18,7 @@ pytestmark = [pytest.mark.integration, pytest.mark.slow]
 
 
 def _run_audit(ssh) -> dict:
-    raw = ssh("/usr/local/opnsense/scripts/keaunbound/local-data-audit.py --report-json")
+    raw = ssh("/usr/local/opnsense/scripts/keaubnd/local-data-audit.py --report-json")
     return json.loads(raw)
 
 
@@ -67,7 +67,7 @@ def test_audit_shows_reservation_as_ok(ssh, kea, dhcp4_subnet_id,
             "hostname": hostname.replace(".lan", ""),
         }
     })
-    ssh("/usr/local/sbin/configctl keaunbound sync_static")
+    ssh("/usr/local/sbin/configctl keaubnd sync_static")
     time.sleep(2)
     test_log("injected", {"type": "reservation", "hostname": hostname, "ip": ip})
 

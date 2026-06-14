@@ -4,7 +4,7 @@
 # Run this once after restoring either box to a clean snapshot.  Idempotent.
 #
 # What it does on dev-opnsense:
-#   1. Patches config.xml: enable dhcp6, ddns, keaunbound; set manual_config=1
+#   1. Patches config.xml: enable dhcp6, ddns, keaubnd; set manual_config=1
 #      for dhcp4/dhcp6/ddns so OPNsense never regenerates the Kea configs.
 #   2. Writes kea-dhcp4.conf, kea-dhcp6.conf, kea-dhcp-ddns.conf with test
 #      subnets, DDNS wiring, and both hook libraries.
@@ -220,7 +220,7 @@ set_val(ddns_gen, "enabled", "1")
 set_val(ddns_gen, "manual_config", "1")
 
 # Plugin: enable + sensible defaults
-ku = get_or_create(opn, "KeaUnbound")
+ku = get_or_create(opn, "KeaUbnd")
 gen = get_or_create(ku, "general")
 set_val(gen, "enabled", "1")
 set_val(gen, "sync_static_reservations", "1")
@@ -486,17 +486,17 @@ EOF
     fi
 
     # ── Step 6: Start plugin daemon ───────────────────────────────────────────
-    step "[6/6] Starting kea-unbound-ddns daemon"
-    opn_sudo "/usr/local/sbin/configctl keaunbound restart 2>&1" || true
+    step "[6/6] Starting kea-ubnd-ddns daemon"
+    opn_sudo "/usr/local/sbin/configctl keaubnd restart 2>&1" || true
     sleep 4
 
     local daemon_status
-    daemon_status=$(opn_sudo "/usr/local/sbin/pluginctl -s kea-unbound-ddns status 2>&1" || echo "unknown")
+    daemon_status=$(opn_sudo "/usr/local/sbin/pluginctl -s kea-ubnd-ddns status 2>&1" || echo "unknown")
     if echo "$daemon_status" | grep -q "is running"; then
-        info "kea-unbound-ddns: running  ✓"
+        info "kea-ubnd-ddns: running  ✓"
     else
         echo "  [WARN] daemon not running: ${daemon_status}"
-        info "Check preconditions: sudo /usr/local/opnsense/scripts/keaunbound/start.py"
+        info "Check preconditions: sudo /usr/local/opnsense/scripts/keaubnd/start.py"
     fi
 
     echo

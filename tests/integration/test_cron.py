@@ -16,7 +16,7 @@ import pytest
 
 pytestmark = [pytest.mark.integration, pytest.mark.slow]
 
-CRON_CMD = "/usr/local/sbin/configctl -d keaunbound clean"
+CRON_CMD = "/usr/local/sbin/configctl -d keaubnd clean"
 
 
 def _read_crontab(ssh) -> str:

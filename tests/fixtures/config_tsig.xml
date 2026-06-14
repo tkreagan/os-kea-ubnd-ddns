@@ -5,7 +5,7 @@
     <domain>lan</domain>
   </system>
   <OPNsense>
-    <KeaUnbound>
+    <KeaUbnd>
       <general>
         <enabled>1</enabled>
         <port>53535</port>
@@ -16,7 +16,7 @@
         <tsig_algorithm>HMAC-SHA256</tsig_algorithm>
         <aggressive_cleanup>0</aggressive_cleanup>
       </general>
-    </KeaUnbound>
+    </KeaUbnd>
     <Kea>
       <dhcp4>
         <general>

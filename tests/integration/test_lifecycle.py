@@ -3,7 +3,7 @@
 """
 Integration tests — service lifecycle (start / stop / restart).
 
-Verifies that configctl keaunbound start/stop/restart behave correctly:
+Verifies that configctl keaubnd start/stop/restart behave correctly:
 idempotency, PID file management, port binding, and service status.
 """
 
@@ -16,8 +16,8 @@ import pytest
 pytestmark = [pytest.mark.integration, pytest.mark.slow]
 
 PORT = 53535
-PIDFILE = "/var/run/kea-unbound-ddns.pid"
-SUP_PIDFILE = "/var/run/kea-unbound-ddns.supervisor.pid"
+PIDFILE = "/var/run/kea-ubnd-ddns.pid"
+SUP_PIDFILE = "/var/run/kea-ubnd-ddns.supervisor.pid"
 
 
 def _port_listening(ssh) -> bool:
@@ -31,7 +31,7 @@ def _pidfile_exists(ssh, path: str) -> bool:
 
 
 def _pgrep_count(ssh) -> int:
-    result = ssh("pgrep -c -f kea-unbound-ddns.py || echo 0", check=False)
+    result = ssh("pgrep -c -f kea-ubnd-ddns.py || echo 0", check=False)
     try:
         return int(result.strip())
     except ValueError:
@@ -41,15 +41,15 @@ def _pgrep_count(ssh) -> int:
 @pytest.fixture(autouse=True)
 def ensure_stopped(ssh, deploy):
     """Stop the daemon before and after each lifecycle test."""
-    ssh("/usr/local/sbin/configctl keaunbound stop", check=False)
+    ssh("/usr/local/sbin/configctl keaubnd stop", check=False)
     time.sleep(1)
     yield
-    ssh("/usr/local/sbin/configctl keaunbound stop", check=False)
+    ssh("/usr/local/sbin/configctl keaubnd stop", check=False)
     time.sleep(0.5)
 
 
 def test_start_creates_pidfiles_and_binds_port(ssh, test_log):
-    ssh("/usr/local/sbin/configctl keaunbound start")
+    ssh("/usr/local/sbin/configctl keaubnd start")
     time.sleep(2)
 
     test_log("observed", {
@@ -67,11 +67,11 @@ def test_start_creates_pidfiles_and_binds_port(ssh, test_log):
 
 def test_start_is_idempotent(ssh, test_log):
     """Second start must not spawn a second supervisor."""
-    ssh("/usr/local/sbin/configctl keaunbound start")
+    ssh("/usr/local/sbin/configctl keaubnd start")
     time.sleep(2)
     count_before = _pgrep_count(ssh)
 
-    ssh("/usr/local/sbin/configctl keaunbound start")
+    ssh("/usr/local/sbin/configctl keaubnd start")
     time.sleep(1)
     count_after = _pgrep_count(ssh)
 
@@ -82,9 +82,9 @@ def test_start_is_idempotent(ssh, test_log):
 
 
 def test_stop_removes_pidfiles_and_frees_port(ssh, test_log):
-    ssh("/usr/local/sbin/configctl keaunbound start")
+    ssh("/usr/local/sbin/configctl keaubnd start")
     time.sleep(2)
-    ssh("/usr/local/sbin/configctl keaunbound stop")
+    ssh("/usr/local/sbin/configctl keaubnd stop")
     time.sleep(2)
 
     test_log("observed", {
@@ -101,11 +101,11 @@ def test_stop_removes_pidfiles_and_frees_port(ssh, test_log):
 
 
 def test_restart_changes_pid(ssh, test_log):
-    ssh("/usr/local/sbin/configctl keaunbound start")
+    ssh("/usr/local/sbin/configctl keaubnd start")
     time.sleep(2)
     pid_before = ssh(f"cat {PIDFILE}", check=False).strip()
 
-    ssh("/usr/local/sbin/configctl keaunbound restart")
+    ssh("/usr/local/sbin/configctl keaubnd restart")
     time.sleep(3)
     pid_after = ssh(f"cat {PIDFILE}", check=False).strip()
 
@@ -115,9 +115,9 @@ def test_restart_changes_pid(ssh, test_log):
 
 
 def test_status_reflects_running_state(ssh):
-    ssh("/usr/local/sbin/configctl keaunbound start")
+    ssh("/usr/local/sbin/configctl keaubnd start")
     time.sleep(2)
-    status = ssh("/usr/local/sbin/pluginctl -s kea-unbound-ddns status",
+    status = ssh("/usr/local/sbin/pluginctl -s kea-ubnd-ddns status",
                  check=False)
     assert "running" in status.lower() or pid_after, \
         f"Unexpected status output: {status!r}"
@@ -125,6 +125,6 @@ def test_status_reflects_running_state(ssh):
 
 def test_stop_when_not_running_exits_cleanly(ssh):
     """Stop on an already-stopped daemon should succeed without error."""
-    ssh("/usr/local/sbin/configctl keaunbound stop")
+    ssh("/usr/local/sbin/configctl keaubnd stop")
     # Second stop should also be clean
-    ssh("/usr/local/sbin/configctl keaunbound stop")
+    ssh("/usr/local/sbin/configctl keaubnd stop")

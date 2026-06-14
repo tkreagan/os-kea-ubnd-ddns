@@ -18,8 +18,8 @@ import sys
 import types
 
 _ROOT = pathlib.Path(__file__).parents[1]
-_LIB = _ROOT / "src/opnsense/scripts/keaunbound/lib/keaunbound_sync.py"
-_SYNC = _ROOT / "src/opnsense/scripts/keaunbound/kea-sync.py"
+_LIB = _ROOT / "src/opnsense/scripts/keaubnd/lib/keaubnd_sync.py"
+_SYNC = _ROOT / "src/opnsense/scripts/keaubnd/kea-sync.py"
 
 # Stub the transport layer the lib imports relatively (from .kea_transport ...).
 _pkg = types.ModuleType("lib")
@@ -31,12 +31,12 @@ _kt.kea_query = lambda *a, **k: {}
 sys.modules["lib"] = _pkg
 sys.modules["lib.kea_transport"] = _kt
 
-_lib_spec = importlib.util.spec_from_file_location("lib.keaunbound_sync", _LIB)
+_lib_spec = importlib.util.spec_from_file_location("lib.keaubnd_sync", _LIB)
 _lib = importlib.util.module_from_spec(_lib_spec)
-sys.modules["lib.keaunbound_sync"] = _lib
+sys.modules["lib.keaubnd_sync"] = _lib
 _lib_spec.loader.exec_module(_lib)
 
-# kea-sync.py inserts the scripts dir on sys.path and does `from lib.keaunbound_sync
+# kea-sync.py inserts the scripts dir on sys.path and does `from lib.keaubnd_sync
 # import ...`. Our stub above already satisfies that, so load it by path.
 _sync_spec = importlib.util.spec_from_file_location("kea_sync", _SYNC)
 kea_sync = importlib.util.module_from_spec(_sync_spec)
@@ -169,7 +169,7 @@ def test_ptr_emitted_and_ip_guarded():
 
 
 # ── private helper aliases ────────────────────────────────────────────────────
-# These expose keaunbound_sync internals for direct unit testing without going
+# These expose keaubnd_sync internals for direct unit testing without going
 # through the full sync pipeline.
 import ipaddress as _ia
 

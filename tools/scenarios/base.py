@@ -143,17 +143,17 @@ class ChaosContext:
         """Run sync_static or sync_dynamic via configctl."""
         action = "sync_dynamic" if kind == "dynamic" else "sync_static"
         return self.ssh.sudo(
-            f"/usr/local/sbin/configctl keaunbound {action}", timeout=30
+            f"/usr/local/sbin/configctl keaubnd {action}", timeout=30
         )
 
     def run_clean(self) -> str:
         return self.ssh.sudo(
-            "/usr/local/sbin/configctl keaunbound clean", timeout=30
+            "/usr/local/sbin/configctl keaubnd clean", timeout=30
         )
 
     def run_audit(self) -> dict:
         raw = self.ssh.sudo(
-            "timeout 25 /usr/local/opnsense/scripts/keaunbound/local-data-audit.py --report-json",
+            "timeout 25 /usr/local/opnsense/scripts/keaubnd/local-data-audit.py --report-json",
             timeout=30,
         )
         import json
@@ -161,7 +161,7 @@ class ChaosContext:
 
     def daemon_status(self) -> str:
         return self.ssh.sudo(
-            "/usr/local/sbin/pluginctl -s kea-unbound-ddns status", timeout=10
+            "/usr/local/sbin/pluginctl -s kea-ubnd-ddns status", timeout=10
         )
 
     def daemon_is_running(self) -> bool:

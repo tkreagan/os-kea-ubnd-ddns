@@ -1,0 +1,10 @@
+<menu>
+    <Services>
+        <KeaUbnd VisibleName="Kea Unbound DDNS" cssClass="fa-solid fa-link">
+            <General order="10" VisibleName="Settings" url="/ui/keaubnd/index"/>
+            <KcaConfig order="20" VisibleName="Config Check" url="/ui/keaubnd/configcheck"/>
+            <Audit order="50" VisibleName="Lease Audit" url="/ui/keaubnd/status"/>
+            <LogFile order="100" VisibleName="Log File" url="/ui/diagnostics/log/core/keaubnd"/>
+        </KeaUbnd>
+    </Services>
+</menu>

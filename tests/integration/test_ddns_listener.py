@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: BSD-2-Clause
 # Copyright (c) 2026 Thomas Reagan
 """
-Integration tests — DDNS listener (kea-unbound-ddns.py).
+Integration tests — DDNS listener (kea-ubnd-ddns.py).
 
 Sends RFC 2136 DNS UPDATE packets to 127.0.0.1:53535 via the SSH tunnel
 and verifies that the daemon registers / removes records in Unbound.
@@ -83,12 +83,12 @@ def _make_delete(name_str: str, rdtype_str: str) -> bytes:
 
 @pytest.fixture(autouse=True)
 def daemon_running(ssh, deploy):
-    ssh("/usr/local/sbin/configctl keaunbound stop", check=False)
+    ssh("/usr/local/sbin/configctl keaubnd stop", check=False)
     time.sleep(0.5)
-    ssh("/usr/local/sbin/configctl keaunbound start")
+    ssh("/usr/local/sbin/configctl keaubnd start")
     time.sleep(2)
     yield
-    ssh("/usr/local/sbin/configctl keaunbound stop", check=False)
+    ssh("/usr/local/sbin/configctl keaubnd stop", check=False)
 
 
 def test_ddns_add_a_registers_in_unbound(box, ssh, unbound, test_host, test_log):
@@ -232,19 +232,19 @@ def test_ddns_fuzzing_daemon_survives(box, ssh, bad_data, test_log):
     _send_udp_via_ssh(box, bad_data)
     time.sleep(0.5)
     # Daemon is still running
-    count = int(ssh("pgrep -c -f kea-unbound-ddns.py || echo 0", check=False).strip())
+    count = int(ssh("pgrep -c -f kea-ubnd-ddns.py || echo 0", check=False).strip())
     test_log("observed", {"process_count_after_fuzz": count})
     assert count >= 1, "Daemon crashed after receiving malformed packet"
 
 
 def test_ddns_rapid_fire_survives(box, ssh, test_log):
     """1000 valid UPDATE packets must not crash or zombie the daemon."""
-    count_before = int(ssh("pgrep -c -f kea-unbound-ddns.py || echo 0", check=False).strip())
+    count_before = int(ssh("pgrep -c -f kea-ubnd-ddns.py || echo 0", check=False).strip())
     for i in range(20):  # reduced for speed; full 1000 would be slow over SSH
         wire = _make_update(f"fuzz{i:04d}.lan", "A", f"10.99.{i // 256}.{i % 256}")
         _send_udp_via_ssh(box, wire)
     time.sleep(2)
-    count_after = int(ssh("pgrep -c -f kea-unbound-ddns.py || echo 0", check=False).strip())
+    count_after = int(ssh("pgrep -c -f kea-ubnd-ddns.py || echo 0", check=False).strip())
     test_log("observed", {"before": count_before, "after": count_after})
     assert count_after >= 1, "Daemon not running after rapid fire"
     assert count_after <= count_before + 1, "Extra daemon processes spawned"

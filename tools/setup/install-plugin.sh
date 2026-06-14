@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# install-plugin.sh — Build os-kea-unbound from the local repo and install on
+# install-plugin.sh — Build os-kea-ubnd-ddns from the local repo and install on
 # dev-opnsense.  Run from the repo root on macOS after any source change.
 # Does NOT touch configuration — run configure-chaos-env.sh once for that.
 #
@@ -24,7 +24,7 @@ die()  { echo "ERROR: $*" >&2; exit 1; }
 
 # ── 1. Build source tarball locally ───────────────────────────────────────────
 step "Building source tarball"
-TMP_TAR="$(mktemp /tmp/keaunbound-src-XXXXXX.tar.gz)"
+TMP_TAR="$(mktemp /tmp/keaubnd-src-XXXXXX.tar.gz)"
 trap 'rm -f "$TMP_TAR"' EXIT
 COPYFILE_DISABLE=1 tar \
     --exclude='__pycache__' --exclude='.DS_Store' \
@@ -34,7 +34,7 @@ echo "  $(du -sh "$TMP_TAR" | cut -f1)  $TMP_TAR"
 
 # ── 2. Upload source tarball ───────────────────────────────────────────────────
 step "Uploading to $OPNSENSE_HOST"
-SSH_AUTH_SOCK="" scp $SSH_OPTS "$TMP_TAR" "$REMOTE:/tmp/keaunbound-src.tar.gz"
+SSH_AUTH_SOCK="" scp $SSH_OPTS "$TMP_TAR" "$REMOTE:/tmp/keaubnd-src.tar.gz"
 
 # ── 3. Detect install strategy and install ────────────────────────────────────
 step "Installing"
@@ -42,7 +42,7 @@ step "Installing"
 SSH_AUTH_SOCK="" ssh $SSH_OPTS "$REMOTE" sh -s << 'REMOTE_EOF'
 set -e
 sudo sh -c '
-    PLUGIN_DIR=/usr/plugins/net/kea-unbound
+    PLUGIN_DIR=/usr/plugins/net/kea-ubnd-ddns
     MK_FILE=/usr/plugins/Mk/plugins.mk
 
     if [ -f "$MK_FILE" ]; then
@@ -55,18 +55,18 @@ sudo sh -c '
         fi
 
         tar --no-xattrs --no-acls --no-fflags \
-            -xzf /tmp/keaunbound-src.tar.gz -C "$PLUGIN_DIR/src"
+            -xzf /tmp/keaubnd-src.tar.gz -C "$PLUGIN_DIR/src"
         cd "$PLUGIN_DIR"
         make upgrade
     else
         echo "  Strategy: direct file install (no Mk infrastructure)"
 
         tar --no-xattrs --no-acls --no-fflags \
-            -xzf /tmp/keaunbound-src.tar.gz -C /usr/local/
+            -xzf /tmp/keaubnd-src.tar.gz -C /usr/local/
 
         # Ensure scripts are executable
-        chmod 755 /usr/local/sbin/kea-unbound-ddns.py
-        find /usr/local/opnsense/scripts/keaunbound -name "*.py" -exec chmod 755 {} \;
+        chmod 755 /usr/local/sbin/kea-ubnd-ddns.py
+        find /usr/local/opnsense/scripts/keaubnd -name "*.py" -exec chmod 755 {} \;
 
         # Register configd actions (restart configd to pick them up)
         echo "  Restarting configd to register new actions..."
@@ -74,24 +74,24 @@ sudo sh -c '
         sleep 3
     fi
 
-    rm -f /tmp/keaunbound-src.tar.gz
+    rm -f /tmp/keaubnd-src.tar.gz
 '
 REMOTE_EOF
 
 # ── 4. Restart services ────────────────────────────────────────────────────────
-step "Restarting kea and keaunbound"
+step "Restarting kea and keaubnd"
 # shellcheck disable=SC2087
 SSH_AUTH_SOCK="" ssh $SSH_OPTS "$REMOTE" sh -s << 'REMOTE_EOF'
 sudo sh -c '
     /usr/local/sbin/configctl kea restart
     sleep 4
-    /usr/local/sbin/configctl keaunbound restart
+    /usr/local/sbin/configctl keaubnd restart
     sleep 3
     echo
     echo "  kea status:"
     /usr/local/sbin/configctl kea status 2>&1 | head -4 || true
     echo "  plugin status:"
-    /usr/local/sbin/pluginctl -s kea-unbound-ddns status 2>&1 || true
+    /usr/local/sbin/pluginctl -s kea-ubnd-ddns status 2>&1 || true
 '
 REMOTE_EOF
 

@@ -6,7 +6,7 @@ optional TSIG authentication) bound to 127.0.0.1, plus on-demand reservation and
 lease synchronization, a DNS registration audit view, and scheduled stale-record
 cleanup.
 
-WWW: https://github.com/tkreagan/os-kea-unbound
+WWW: https://github.com/tkreagan/os-kea-ubnd-ddns
 
 Plugin Changelog
 ================

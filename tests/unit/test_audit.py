@@ -15,7 +15,7 @@ from io import StringIO
 
 import pytest
 
-from lib.keaunbound_sync import KeaServiceUnavailableError, KeaUnavailableError
+from lib.keaubnd_sync import KeaServiceUnavailableError, KeaUnavailableError
 from .conftest import load_script
 
 pytestmark = pytest.mark.unit

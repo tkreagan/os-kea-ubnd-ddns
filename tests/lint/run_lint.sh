@@ -1,5 +1,5 @@
 #!/bin/sh
-# Lint checks for os-kea-unbound.
+# Lint checks for os-kea-ubnd-ddns.
 # Run from repo root: sh tests/lint/run_lint.sh
 # Requires: ruff (pip install ruff), php, xmllint
 set -e
@@ -51,7 +51,7 @@ fi
 # ── Python — PEP 8 / style ────────────────────────────────────────────────────
 if command -v ruff > /dev/null 2>&1; then
     echo "==> ruff"
-    ruff check "$REPO/src/opnsense/scripts/keaunbound/" \
+    ruff check "$REPO/src/opnsense/scripts/keaubnd/" \
                "$REPO/src/sbin/" && pass "ruff" || fail "ruff found issues"
 else
     echo "SKIP: ruff not installed (pip install ruff)"
@@ -60,7 +60,7 @@ fi
 # ── Python — no bare except ───────────────────────────────────────────────────
 echo "==> no bare except:"
 if grep -rn "^except:$" \
-        "$REPO/src/opnsense/scripts/keaunbound/" \
+        "$REPO/src/opnsense/scripts/keaubnd/" \
         "$REPO/src/sbin/" 2>/dev/null; then
     fail "bare except: found"
 else
@@ -70,7 +70,7 @@ fi
 # ── Python — no mwexec() ─────────────────────────────────────────────────────
 echo "==> no mwexec():"
 if grep -rn "mwexec(" \
-        "$REPO/src/opnsense/scripts/keaunbound/" \
+        "$REPO/src/opnsense/scripts/keaubnd/" \
         "$REPO/src/sbin/" \
         "$REPO/src/etc/inc/" 2>/dev/null; then
     fail "mwexec() found (use mwexecf() or exec())"
@@ -78,21 +78,21 @@ else
     pass "no mwexec()"
 fi
 
-# ── Python — syslog tag must be kea-ub ────────────────────────────────────────
-echo "==> syslog tag kea-ub:"
+# ── Python — syslog tag must be kea-ubnd ─────────────────────────────────────
+echo "==> syslog tag kea-ubnd:"
 BAD=$(grep -rn "openlog" \
-        "$REPO/src/opnsense/scripts/keaunbound/" \
-        "$REPO/src/sbin/" 2>/dev/null | grep -v "kea-ub" || true)
+        "$REPO/src/opnsense/scripts/keaubnd/" \
+        "$REPO/src/sbin/" 2>/dev/null | grep -v "kea-ubnd" || true)
 if [ -n "$BAD" ]; then
     echo "$BAD"
-    fail "openlog() call without kea-ub tag"
+    fail "openlog() call without kea-ubnd tag"
 else
-    pass "syslog tag kea-ub"
+    pass "syslog tag kea-ubnd"
 fi
 
 # ── Python — SPDX headers ────────────────────────────────────────────────────
 echo "==> SPDX headers:"
-MISSING=$(find "$REPO/src/opnsense/scripts/keaunbound/" "$REPO/src/sbin/" \
+MISSING=$(find "$REPO/src/opnsense/scripts/keaubnd/" "$REPO/src/sbin/" \
     -name "*.py" ! -name "__init__.py" \
     | xargs grep -L "SPDX-License-Identifier" 2>/dev/null || true)
 if [ -n "$MISSING" ]; then
@@ -123,7 +123,7 @@ fi
 
 # ── Configd actions format ────────────────────────────────────────────────────
 echo "==> configd actions type=script_output:"
-ACTIONS="$REPO/src/opnsense/service/conf/actions.d/actions_keaunbound.conf"
+ACTIONS="$REPO/src/opnsense/service/conf/actions.d/actions_keaubnd.conf"
 if [ -f "$ACTIONS" ]; then
     BAD=$(grep "^type:" "$ACTIONS" | grep -v "script_output" || true)
     if [ -n "$BAD" ]; then
@@ -133,7 +133,7 @@ if [ -f "$ACTIONS" ]; then
         pass "configd actions type=script_output"
     fi
 else
-    fail "actions_keaunbound.conf not found"
+    fail "actions_keaubnd.conf not found"
 fi
 
 # ── XML models well-formed ────────────────────────────────────────────────────

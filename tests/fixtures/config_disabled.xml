@@ -5,10 +5,10 @@
     <domain>lan</domain>
   </system>
   <OPNsense>
-    <KeaUnbound>
+    <KeaUbnd>
       <general>
         <enabled>0</enabled>
       </general>
-    </KeaUnbound>
+    </KeaUbnd>
   </OPNsense>
 </opnsense>
