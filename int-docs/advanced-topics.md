@@ -250,6 +250,27 @@ This has two consequences worth knowing:
   conflict resolution is effectively bypassed — the plugin's own collision policy
   (`first_wins` / `last_wins` / `allow`) is the sole conflict mechanism.
 
+### Collision Policy Default — Why `last_wins`
+
+The default collision policy is `last_wins` (set in `get_collision_policy()`;
+old installs that already have `allow` in `config.xml` keep their saved value).
+
+**`allow` was considered as the default.** The main concern with `allow` — that
+stale entries silently accumulate — is largely overstated: d2 sends an explicit
+DELETE before each ADD on lease events, and the periodic sync runs `--clean-stale`,
+so stale entries under `allow` are rare and short-lived in normal operation.
+
+**`last_wins` is still the right default** because of the collision case, not the
+stale-entry case. When two entries genuinely compete for the same FQDN (device
+changed IPs, hostname reused, reservation + lease conflict), `allow` silently
+produces round-robin DNS. Round-robin for DHCP clients is almost never intentional
+and is confusing to diagnose — a hostname resolves, but to the wrong IP half the
+time. `last_wins` picks the most-recently-active entry, which matches DHCP
+semantics and produces deterministic, accurate DNS.
+
+`allow` remains available for operators who deliberately want multi-IP round-robin
+(e.g., anycast-style setups) and understand the implications.
+
 ---
 
 ## DDNS Suffix Staleness — Old Records After a Suffix Change
