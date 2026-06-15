@@ -80,7 +80,7 @@ bash "$REPO_ROOT/build_package.sh"
 step "Verifying package"
 # Detect whichever format pkg(8) produced (.pkg on FreeBSD 14+, .txz on older)
 PKGFILE=$(ls "${REPO_ROOT}/os-kea-ubnd-ddns-${VERSION}".pkg \
-              "${REPO_ROOT}/os-kea-ubnd-ddns-${VERSION}".txz 2>/dev/null | head -1)
+              "${REPO_ROOT}/os-kea-ubnd-ddns-${VERSION}".txz 2>/dev/null | head -1 || true)
 [[ -n "$PKGFILE" && -f "$PKGFILE" ]] || die "Package not found after build (looked for .pkg and .txz)"
 SUM=$(shasum -a 256 "$PKGFILE" | awk '{print $1}')
 info "$(basename "$PKGFILE")"
