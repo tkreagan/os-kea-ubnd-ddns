@@ -8,11 +8,16 @@ Reads Kea reservations (static) and/or active leases (dynamic) and writes
 them to Unbound's local_data store, respecting the configured collision policy
 and the host_entries.conf static guard.
 
-Modes (only two in practice):
-  --mode=static   Sync Kea reservations only (IPv4 + IPv6). The cheap "re-assert
-                  the high-value records" path.
-  --mode=full     Static first, then dynamic leases. Every daemon reconcile and
-                  drain, and the general sync.
+Flags:
+  (default)       Full sync: static reservations then dynamic leases. Used by
+                  the daemon for every reconcile and drain.
+  --static-only   Sync static reservations only; skip active leases. Used by
+                  the configd sync_static action (manual button). Mutually
+                  exclusive with --clean-stale.
+  --clean-stale   After the full sync, sweep Unbound for records no longer
+                  backed by any Kea reservation or active lease and remove them.
+                  Passed by the daemon when clean_on_restart is enabled.
+                  Mutually exclusive with --static-only.
 
   There is deliberately NO dynamic-only mode: resolving lease conflicts correctly
   requires knowing the reservations (reservations beat leases), and reservations
@@ -56,6 +61,9 @@ sys.path.insert(0, "/usr/local/opnsense/scripts/keaubnd")
 from lib.keaubnd_sync import (
     KeaUnavailableError,
     KeaServiceUnavailableError,
+    clean_stale_records,
+    collect_kea_pairs,
+    find_stale_records,
     forward_ips_by_type,
     get_collision_policy,
     get_synthesize_ptr,
@@ -357,8 +365,12 @@ def sync_dynamic(
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--mode", choices=("static", "full"),
-                        default="full", help="Which records to sync (default: full)")
+    mode_group = parser.add_mutually_exclusive_group()
+    mode_group.add_argument("--static-only", action="store_true",
+                            help="Sync static reservations only; skip active leases")
+    mode_group.add_argument("--clean-stale", action="store_true",
+                            help="After the full sync, sweep and remove records no "
+                                 "longer backed by any Kea reservation or lease")
     parser.add_argument("--names",
                         help="Comma-separated hostnames for targeted dynamic drain "
                              "(filters the dynamic pass in full mode)")
@@ -373,9 +385,10 @@ def main() -> int:
         names_filter = frozenset(n.strip() for n in args.names.split(",") if n.strip())
 
     logger = setup_logging(args.verbose)
-    logger.info("kea-sync mode=%s names=%s dry_run=%s",
-                args.mode, "all" if names_filter is None else len(names_filter),
-                args.dry_run)
+    mode = "static" if args.static_only else "full"
+    logger.info("kea-sync mode=%s names=%s clean_stale=%s dry_run=%s",
+                mode, "all" if names_filter is None else len(names_filter),
+                args.clean_stale, args.dry_run)
 
     host_entries = read_host_entries()
     policy = get_collision_policy()
@@ -390,9 +403,12 @@ def main() -> int:
 
     try:
         with unbound_mutation_lock(blocking=True):
-            # Snapshot Unbound once before any writes (used for collision checks).
+            # Snapshot Unbound once before any writes (collision checks + stale sweep).
+            # Always fetch when --clean-stale is set even if policy is 'allow'
+            # (allow mode skips the snapshot for the sync pass, but the stale sweep
+            # needs the real local_data regardless of collision policy).
             unbound_snapshot = (unbound_list_local_data()
-                                if policy != "allow" else {})
+                                if policy != "allow" or args.clean_stale else {})
 
             total_errors = 0
 
@@ -404,11 +420,28 @@ def main() -> int:
             )
             total_errors += errs
 
-            if args.mode == "full":
+            if mode == "full":
                 _, _, errs = sync_dynamic(
                     host_entries, policy, synthesize_ptr,
                     unbound_snapshot, claims, names_filter,
                     args.dry_run, logger,
+                )
+                total_errors += errs
+
+            if args.clean_stale:
+                # Re-read Unbound after the sync so the restore-valid pass in
+                # clean_stale_records sees the actual current state, not the
+                # pre-sync snapshot (which predates collision-handling removes).
+                current_data = unbound_list_local_data() if not args.dry_run else unbound_snapshot
+                kea_pairs = collect_kea_pairs(logger)
+                stale_pairs, orphaned_ptrs = find_stale_records(
+                    current_data, kea_pairs, host_entries, synthesize_ptr,
+                )
+                if stale_pairs or orphaned_ptrs:
+                    logger.info("clean-stale: %d stale address(es), %d orphaned PTR(s)",
+                                len(stale_pairs), len(orphaned_ptrs))
+                errs = clean_stale_records(
+                    current_data, stale_pairs, orphaned_ptrs, args.dry_run, logger,
                 )
                 total_errors += errs
 

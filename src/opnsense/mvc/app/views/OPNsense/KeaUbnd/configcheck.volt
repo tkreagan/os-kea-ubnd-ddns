@@ -27,14 +27,18 @@
 
 <style>
     .kea-subnet  { font-family: monospace; font-size: 0.9em; }
-    .ku-topinfo .panel-body { padding: 8px 12px; }
+    /* Lightweight section divider used in place of panel headings for status rows. */
+    .ku-section-label {
+        font-size: 0.79em; font-weight: 700; text-transform: uppercase;
+        letter-spacing: 0.07em; color: #b0b0b0;
+        border-bottom: 1px solid #ebebeb;
+        padding-bottom: 4px; margin: 16px 0 8px;
+    }
+    .ku-row { margin: 3px 0; }
     .ku-srclabel { font-size: 0.78em; text-transform: uppercase; letter-spacing: 0.04em;
                    color: #888; margin-bottom: 4px; }
-    .ku-topinfo .ku-row { margin: 2px 0; }
-    .ku-topinfo code { font-size: 0.85em; }
-    /* Bootstrap renders <code> in crimson by default — use a muted slate and
-       drop the white box so paths and addresses read inline without visual noise. */
     code { color: #5a7a9a; background: none; padding: 0; border: none; box-shadow: none; }
+    .ku-timer-bar { height: 100%; background: rgba(0,0,0,0.22); width: 100%; transition: width 30s linear; }
 </style>
 
 <script>
@@ -43,7 +47,7 @@ $( document ).ready(function() {
     setInterval(function() {
         if ($("#autoRefreshCheck").is(":checked")) { loadKeaConfig(); }
     }, 30000);
-    $("#refreshBtn").click(function() { loadKeaConfig(); });
+    $(document).on("click", "#refreshBtn", function() { loadKeaConfig(); });
 });
 
 function loadKeaConfig() {
@@ -52,7 +56,7 @@ function loadKeaConfig() {
     $("#configError").hide();
 
     $.ajax({
-        url: '/api/keaubnd/configcheck/check',
+        url: '/api/keaubnd/config_check/check',
         type: 'GET',
         dataType: 'json',
         timeout: 10000,
@@ -90,6 +94,8 @@ function escapeHtml(text) {
 
 const BUCKET_LABELS = {
     'ok':            { label: 'OK',              cls: 'label-success' },
+    // 'tsig_mismatch' kept so any subnet the server tags with it still renders a readable badge,
+    // but TSIG is otherwise hidden from the UI (deferred feature — see listener row comment above).
     'tsig_mismatch': { label: 'TSIG Mismatch',   cls: 'label-warning'  },
     'wrong_target':  { label: 'Other Target',    cls: 'label-warning' },
     'no_ddns':       { label: 'No DDNS',         cls: 'label-default' },
@@ -101,18 +107,47 @@ function bucketBadge(status) {
     return '<span class="label ' + b.cls + '">' + b.label + '</span>';
 }
 
-function connLine(label, conn) {
+const KEA_LINKS = {
+    dhcp4: [
+        ['Subnets',      '/ui/kea/dhcpv4#subnets'],
+        ['Reservations', '/ui/kea/dhcpv4#reservations'],
+        ['Leases',       '/ui/kea/leases4'],
+        ['Settings',     '/ui/kea/dhcpv4#settings'],
+    ],
+    dhcp6: [
+        ['Subnets',      '/ui/kea/dhcpv6#subnets'],
+        ['Reservations', '/ui/kea/dhcpv6#reservations'],
+        ['Leases',       '/ui/kea/leases6'],
+        ['Settings',     '/ui/kea/dhcpv6#settings'],
+    ],
+    d2: [
+        ['Settings', '/ui/kea/ddns'],
+    ],
+};
+
+function keaLinks(key) {
+    const pairs = KEA_LINKS[key] || [];
+    if (!pairs.length) return '';
+    return '<span style="font-size:0.85em; font-weight:normal; text-transform:none; letter-spacing:0; color:#777;">' +
+        pairs.map(function(p) {
+            return '<a href="' + p[1] + '" target="_blank">' + p[0] + '</a>';
+        }).join(' &nbsp;&middot;&nbsp; ') + '</span>';
+}
+
+function connLine(label, conn, linksKey) {
     if (!conn) return '';
+    const links = keaLinks(linksKey);
+    const hdr = '<div style="display:flex; align-items:center; justify-content:space-between;">';
     if (!conn.enabled) {
         const dot = '<i class="fa-regular fa-circle" title="disabled" style="color:#ccc; font-size:0.7em;"></i>';
-        return '<div class="ku-row">' + dot + ' <strong>' + label + ':</strong> ' +
-               '<span class="text-muted">service not enabled in Kea</span></div>';
+        return hdr + '<div class="ku-row" style="margin:0;">' + dot + ' <strong>' + label + '</strong> &ensp;' +
+               '<span class="text-muted">service not enabled in Kea</span></div>' + links + '</div>';
     }
     let val;
     if (conn.method === 'unix') {
-        val = '<span class="text-muted">unix socket:</span> <code>' + escapeHtml(conn.detail) + '</code>';
+        val = '<span class="text-muted">unix socket</span> <code>' + escapeHtml(conn.detail) + '</code>';
     } else if (conn.method === 'http') {
-        val = '<span class="text-muted">HTTP:</span> <code>' + escapeHtml(conn.detail) + '</code>';
+        val = '<span class="text-muted">HTTP</span> <code>' + escapeHtml(conn.detail) + '</code>';
     } else if (conn.manual_config) {
         val = '<span class="text-muted">manual config mode &mdash; socket not resolved</span>';
     } else {
@@ -121,7 +156,8 @@ function connLine(label, conn) {
     const dot = conn.reachable
         ? '<i class="fa-solid fa-circle" title="reachable" style="color:#5cb85c; font-size:0.7em;"></i>'
         : '<i class="fa-regular fa-circle" title="not responding" style="color:#aaa; font-size:0.7em;"></i>';
-    return '<div class="ku-row">' + dot + ' <strong>' + label + ':</strong> ' + val + '</div>';
+    return hdr + '<div class="ku-row" style="margin:0;">' + dot + ' <strong>' + label + '</strong> &ensp;' + val + '</div>' +
+           links + '</div>';
 }
 
 function manualConfigBanner(data) {
@@ -140,36 +176,92 @@ function manualConfigBanner(data) {
            '</div>';
 }
 
-function statusSection(data) {
-    const kc = data.kea_control || {};
-    const l  = data.our_listener;
+function pluginStatusSection(data, autoRefreshOn) {
+    const l = data.our_listener;
+    if (!l) return '';
 
-    let html = '<div class="panel panel-default ku-topinfo" style="margin-bottom:12px;">' +
-               '<div class="panel-heading" style="padding:8px 12px;">' +
-               '<h4 class="panel-title" style="font-size:1em; font-weight:600;">Kea &amp; Listener Status</h4>' +
-               '</div><div class="panel-body">';
+    const dot = function(on) {
+        return on
+            ? '<i class="fa-solid fa-circle" style="color:#5cb85c; font-size:0.7em;"></i>'
+            : '<i class="fa-solid fa-circle" style="color:#d9534f; font-size:0.7em;"></i>';
+    };
 
-    html += '<div class="ku-srclabel">Kea DHCP Control Channel</div>';
-    html += connLine('DHCPv4', kc.dhcp4);
-    html += connLine('DHCPv6', kc.dhcp6);
+    const chk = (autoRefreshOn !== false) ? ' checked' : '';
+    const controls = '<span style="font-size:1em; font-weight:normal; text-transform:none; letter-spacing:0; color:#777; display:inline-flex; align-items:center; gap:10px;">' +
+        '<label style="margin:0; font-weight:normal; cursor:pointer; display:inline-flex; align-items:center; gap:4px;">' +
+        '<input type="checkbox" id="autoRefreshCheck"' + chk + ' style="margin:0;">' +
+        'Auto-refresh</label>' +
+        '<button id="refreshBtn" class="btn btn-default btn-xs">' +
+        '<i class="fa fa-refresh"></i> Refresh Now</button></span>';
 
-    html += '<div class="ku-srclabel" style="margin-top:10px;">Kea Unbound Plugin &mdash; DDNS Listener Status</div>';
-    if (l) {
-        const dot = l.running
-            ? '<i class="fa-solid fa-circle" title="running" style="color:#5cb85c; font-size:0.7em;"></i>'
-            : '<i class="fa-solid fa-circle" title="not running" style="color:#d9534f; font-size:0.7em;"></i>';
-        const tsig = l.tsig_enabled
-            ? '<span class="text-muted">TSIG on</span>'
-            : '<span class="text-muted">no TSIG</span>';
-        html += '<div class="ku-row">' + dot + ' <strong>Listening on:</strong> <code>' +
-                escapeHtml(l.address) + ':' + l.port + '</code> &middot; ' + tsig + '</div>';
+    let html = '<div class="ku-section-label" style="margin-top:0; display:flex; align-items:center; justify-content:space-between;">' +
+               '<span>Plugin Daemons</span>' + controls + '</div>';
+
+    // TSIG status removed from display (deferred feature — listener binds to 127.0.0.1 so
+    // unsigned updates are safe; TSIG only matters if listen address is exposed beyond localhost).
+    // To restore: l.tsig_enabled was shown as "TSIG on" / "no TSIG" after the address:port here.
+    html += '<div class="ku-row">' + dot(l.running) +
+            ' <strong>DDNS Listener</strong> &ensp;' +
+            '<code>' + escapeHtml(l.address) + ':' + l.port + '</code></div>';
+
+    if (l.logwatcher_enabled) {
+        const logging = l.logwatcher_logging || {};
+        let loggingNote = '';
+        if (logging.ok === true) {
+            loggingNote = ' &ensp;<span class="text-muted" style="font-size:0.88em;">' +
+                          escapeHtml(logging.detail) + '</span>';
+        } else if (logging.ok === false) {
+            loggingNote = ' &ensp;<span style="color:#e0a800; font-size:0.88em;">' +
+                          '<i class="fa fa-exclamation-triangle"></i> ' +
+                          escapeHtml(logging.detail) + '</span>';
+        }
+        if (l.logwatcher_running) {
+            html += '<div class="ku-row"><i class="fa-solid fa-circle" style="color:#5cb85c; font-size:0.7em;"></i>' +
+                    ' <strong>Log Watcher</strong>' + loggingNote + '</div>';
+        } else {
+            html += '<div class="ku-row"><i class="fa-solid fa-circle" style="color:#d9534f; font-size:0.7em;"></i>' +
+                    ' <strong>Log Watcher</strong> &ensp;<span class="text-muted">not running</span>' + loggingNote + '</div>';
+        }
+    } else {
+        // Hollow green: off by design, not a problem.
+        html += '<div class="ku-row"><i class="fa-regular fa-circle" style="color:#5cb85c; font-size:0.7em;"></i>' +
+                ' <strong>Log Watcher</strong> &ensp;<span class="text-muted">disabled</span></div>';
     }
 
-    html += '</div></div>';
+    (data.ha_advisories || []).forEach(function(a) {
+        html += '<div class="ku-row" style="margin-top:6px;">' +
+                '<i class="fa fa-exclamation-triangle" style="color:#e0a800;"></i> ' +
+                '<strong>' + escapeHtml(a.heading) + '</strong> &ensp;' +
+                '<span class="text-muted">' + escapeHtml(a.message) + '</span></div>';
+    });
+
     return html;
 }
 
-function ddnsConfigTable(ok, wrong, tsig, no_ddns) {
+function statusSection(data) {
+    const kc = data.kea_control || {};
+    let html = '<div class="ku-section-label">Kea DHCP</div>';
+    html += connLine('DHCPv4', kc.dhcp4, 'dhcp4');
+    html += connLine('DHCPv6', kc.dhcp6, 'dhcp6');
+
+    // D2 (kea-dhcp-ddns) status.
+    const d2Dot = data.d2_reachable
+        ? '<i class="fa-solid fa-circle" style="color:#5cb85c; font-size:0.7em;"></i>'
+        : '<i class="fa-regular fa-circle" style="color:#aaa; font-size:0.7em;"></i>';
+    const d2Text = data.d2_reachable
+        ? '<span class="text-muted">forward zones configured</span>'
+        : '<span class="text-muted">not running or no forward zones configured</span>';
+    html += '<div style="display:flex; align-items:center; justify-content:space-between;">' +
+            '<div class="ku-row" style="margin:0;">' + d2Dot + ' <strong>DDNS Agent (d2)</strong> &ensp;' + d2Text + '</div>' +
+            keaLinks('d2') + '</div>';
+
+    return html;
+}
+
+// TSIG mismatch row removed from this table (deferred feature).
+// To restore: add tsig param and row(tsig, 'Kea-Unbound Configured / TSIG Mismatch Subnets', '#f0ad4e')
+// after the ok row. Also restore tsig count in renderKeaConfig and hasTsig in fixGuide.
+function ddnsConfigTable(ok, wrong, no_ddns) {
     function row(count, label, color) {
         const dim = count === 0;
         return '<tr>' +
@@ -178,54 +270,50 @@ function ddnsConfigTable(ok, wrong, tsig, no_ddns) {
                '<td style="padding:3px 0 3px 14px;' + (dim ? ' color:#bbb;' : '') + '">' + label + '</td>' +
                '</tr>';
     }
-    return '<div class="panel panel-default" style="margin-bottom:12px;">' +
-           '<div class="panel-heading" style="padding:8px 12px;">' +
-           '<h4 class="panel-title" style="font-size:1em; font-weight:600;">Kea DDNS Forward Configuration Status</h4>' +
-           '</div><div class="panel-body" style="padding:10px 14px;">' +
+    return '<div style="margin-top:10px;">' +
            '<table style="border-collapse:collapse;">' +
-           row(ok,      'Kea-Unbound Configured Subnets',                  '#5cb85c') +
-           row(tsig,    'Kea-Unbound Configured / TSIG Mismatch Subnets', '#f0ad4e') +
-           row(wrong,   'Subnets configured for other zones',              '#f0ad4e') +
-           row(no_ddns, 'No DDNS configuration',                          '#aaa') +
-           '</table></div></div>';
+           row(ok,      'Configured for Kea Unbound DDNS',     '#5cb85c') +
+           row(wrong,   'Configured for other DDNS servers',  '#f0ad4e') +
+           row(no_ddns, 'No DDNS configured',                 '#aaa') +
+           '</table></div>';
 }
 
 // ── Unbound DNS Configuration section ────────────────────────────────────────
 function unboundSection(data) {
-    const checks = data.unbound_checks || [];
-    const warnings = checks.filter(c => c.level === 'warning');
-    const notices  = checks.filter(c => c.level === 'notice');
+    const checks   = data.unbound_checks || [];
+    const uRunning = data.unbound_running !== false;
+    const uDot = uRunning
+        ? '<i class="fa-solid fa-circle" style="color:#5cb85c; font-size:0.7em;"></i>'
+        : '<i class="fa-solid fa-circle" style="color:#d9534f; font-size:0.7em;"></i>';
+    const uStatus = uRunning
+        ? (checks.length === 0
+            ? '<span class="text-muted">running &middot; no issues</span>'
+            : '<span class="text-muted">running</span>')
+        : '<span class="text-muted">not running</span>';
 
-    let body = '';
+    let body = '<div class="ku-row">' + uDot + ' <strong>DNS Resolver</strong> &ensp;' + uStatus + '</div>';
 
-    if (checks.length === 0) {
-        body += '<div style="color:#3c763d;"><i class="fa fa-check-circle"></i> No Unbound configuration issues detected.</div>';
-    } else {
-        checks.forEach(function(c) {
-            const isWarn   = c.level === 'warning';
-            const alertCls = isWarn ? 'alert-warning' : 'alert-info';
-            const icon     = isWarn ? 'fa-exclamation-triangle' : 'fa-info-circle';
-            let fixBtn = '';
-            if (c.fixable && c.id === 'regdhcpstatic') {
-                fixBtn = ' <button class="btn btn-xs btn-default" id="btn_fix_regdhcpstatic" style="margin-left:8px;">' +
-                         '<i class="fa fa-wrench"></i> Disable &amp; Restart Unbound</button>';
-            }
-            body += '<div class="alert ' + alertCls + '" style="margin-bottom:8px; padding:8px 12px;">' +
-                    '<strong><i class="fa ' + icon + '"></i> ' + escapeHtml(c.heading) + ':</strong> ' +
-                    escapeHtml(c.message) + fixBtn + '</div>';
-        });
-    }
+    checks.forEach(function(c) {
+        const isWarn   = c.level === 'warning';
+        const alertCls = isWarn ? 'alert-warning' : 'alert-info';
+        const icon     = isWarn ? 'fa-exclamation-triangle' : 'fa-info-circle';
+        let fixBtn = '';
+        if (c.fixable && c.id === 'regdhcpstatic') {
+            fixBtn = ' <button class="btn btn-xs btn-default" id="btn_fix_regdhcpstatic" style="margin-left:8px;">' +
+                     '<i class="fa fa-wrench"></i> Disable &amp; Restart Unbound</button>';
+        }
+        body += '<div class="alert ' + alertCls + '" style="margin-bottom:8px; padding:8px 12px;">' +
+                '<strong><i class="fa ' + icon + '"></i> ' + escapeHtml(c.heading) + ':</strong> ' +
+                escapeHtml(c.message) + fixBtn + '</div>';
+    });
 
-    const settingsLink  = '<a href="/ui/unbound/general" target="_blank">General Settings</a>';
-    const overridesLink = '<a href="/ui/unbound/overrides" target="_blank">Overrides</a>';
-    body += '<div style="margin-top:8px; font-size:0.88em; color:#777;">' +
-            'Unbound DNS: ' + settingsLink + ' &nbsp;&middot;&nbsp; ' + overridesLink + '</div>';
+    const unboundLinks = '<span style="font-size:1em; font-weight:normal; text-transform:none; letter-spacing:0;">' +
+        '<a href="/ui/unbound/overrides" target="_blank">Overrides</a>' +
+        ' &nbsp;&middot;&nbsp; ' +
+        '<a href="/ui/unbound/general" target="_blank">Settings</a></span>';
 
-    return '<div class="panel panel-default" style="margin-bottom:12px;">' +
-           '<div class="panel-heading" style="padding:8px 12px;">' +
-           '<h4 class="panel-title" style="font-size:1em; font-weight:600;">Unbound DNS Configuration</h4>' +
-           '</div><div class="panel-body" style="padding:10px 14px;">' +
-           body + '</div></div>';
+    return '<div class="ku-section-label" style="display:flex; align-items:center; justify-content:space-between;">' +
+           '<span>Unbound DNS</span>' + unboundLinks + '</div>' + body;
 }
 
 function bindUnboundButtons() {
@@ -233,7 +321,7 @@ function bindUnboundButtons() {
         const $btn = $(this);
         $btn.prop('disabled', true).html('<i class="fa fa-spinner fa-spin"></i> Applying…');
         $.ajax({
-            url: '/api/keaubnd/configcheck/disable_regdhcpstatic',
+            url: '/api/keaubnd/config_check/disable_regdhcpstatic',
             type: 'POST',
             contentType: 'application/json',
             dataType: 'json',
@@ -262,65 +350,66 @@ function renderKeaConfig(data) {
     const all = v4.concat(v6);
 
     const ok       = all.filter(s => s.ddns_status === 'ok').length;
-    const tsig     = all.filter(s => s.ddns_status === 'tsig_mismatch').length;
     const wrong    = all.filter(s => s.ddns_status === 'wrong_target').length;
     const no_ddns  = all.filter(s => s.ddns_status === 'no_ddns').length;
     const d2_off   = all.filter(s => s.ddns_status === 'd2_offline').length;
+    // tsig count removed (TSIG deferred) — const tsig = all.filter(s => s.ddns_status === 'tsig_mismatch').length;
     const total    = all.length;
     const problems = total - ok;
 
+    // Preserve checkbox state across re-renders (element may not exist on first render).
+    const autoRefreshOn = !$("#autoRefreshCheck").length || $("#autoRefreshCheck").is(":checked");
+
     let html = '';
 
-    // ── Unbound DNS Configuration ─────────────────────────────────────────────
+    // ── Plugin Daemons (listener + logwatcher) ────────────────────────────────
+    html += pluginStatusSection(data, autoRefreshOn);
+
+    // ── Unbound DNS ───────────────────────────────────────────────────────────
     html += unboundSection(data);
 
-    // ── Manual config disclaimer (shown before subnet results if applicable) ──
-    html += manualConfigBanner(data);
-
-    // ── Kea & Listener Status ─────────────────────────────────────────────────
+    // ── Kea DHCP status (control channels + D2) ──────────────────────────────
     html += statusSection(data);
 
-    // ── Kea DDNS Forward Configuration Status ────────────────────────────────
-    html += ddnsConfigTable(ok, wrong, tsig, no_ddns);
-
-    // ── Summary advisories (global reservations, shared networks) ─────────────
-    html += summaryAdvisoriesHtml(data.summary_advisories);
-
-    // ── Apply-all action ──────────────────────────────────────────────────────
+    // ── Subnet Configuration ──────────────────────────────────────────────────
     if (total > 0) {
         const port = data.our_listener ? data.our_listener.port : 53535;
-        html += '<div style="margin:0 0 12px;">' +
-                '<button id="btn_push_all" class="btn btn-primary btn-sm">' +
-                '<i class="fa fa-upload"></i> Apply Recommended Settings to All Subnets</button> ' +
-                '<span class="text-muted" style="font-size:0.85em;">' +
-                'Points every subnet\'s DDNS at <code>127.0.0.1:' + port + '</code> and restarts Kea.' +
-                '</span></div>';
+        const applyAll = '<span style="font-size:1em; font-weight:normal; text-transform:none; letter-spacing:0;">' +
+            '<button id="btn_push_all" class="btn btn-primary btn-xs"' +
+            ' title="Sets DDNS server to 127.0.0.1:' + port + ', enables override flags, and restarts Kea">' +
+            '<i class="fa-solid fa-wand-magic-sparkles"></i> Configure All Subnets for Kea Unbound DDNS</button></span>';
+        html += '<div class="ku-section-label" style="display:flex; align-items:center; justify-content:space-between;">' +
+                '<span>Subnet Configuration</span>' + applyAll + '</div>';
+    } else {
+        html += '<div class="ku-section-label">Subnet Configuration</div>';
     }
+    html += '<div id="ku-push-result"></div>';
+    html += manualConfigBanner(data);
+    html += ddnsConfigTable(ok, wrong, no_ddns);
+    html += summaryAdvisoriesHtml(data.summary_advisories);
 
-    // ── Status alert ──────────────────────────────────────────────────────────
     if (total === 0) {
-        html += '<div class="alert alert-info">No subnets found in Kea DHCP.</div>';
-    } else if (ok !== total) {
-        let msgs = [];
-        if (d2_off  > 0) msgs.push(d2_off  + ' need the DDNS Agent running');
-        if (wrong   > 0) msgs.push(wrong   + ' sending to a different DNS server/port');
-        if (tsig    > 0) msgs.push(tsig    + ' with a TSIG configuration mismatch');
-        if (no_ddns > 0) msgs.push(no_ddns + ' with DDNS disabled');
-        html += '<div class="alert alert-warning"><strong>Action Needed:</strong> ' +
-                problems + ' subnet' + (problems !== 1 ? 's have' : ' has') + ' issues: ' +
-                msgs.join('; ') + '. See the detail column below.</div>';
+        html += '<div class="alert alert-info" style="margin-top:10px;">No subnets found in Kea DHCP.</div>';
     }
 
     // ── Subnet tables ─────────────────────────────────────────────────────────
+    html += '<div style="margin-top:14px;">';
     html += subnetPanel('IPv4 Subnets', v4);
     html += subnetPanel('IPv6 Subnets', v6);
+    html += '</div>';
 
     // ── Contextual fix instructions ───────────────────────────────────────────
     if (problems > 0) {
-        html += fixGuide(wrong > 0, tsig > 0, no_ddns > 0, d2_off > 0, data.our_listener);
+        html += fixGuide(wrong > 0, no_ddns > 0, d2_off > 0, data.our_listener);
     }
 
     $("#configContent").html(html);
+
+    // Restore any pending push-result banner (set before loadKeaConfig re-rendered us).
+    if (window._kuPendingBanner) {
+        showPushResultBanner(window._kuPendingBanner);
+        window._kuPendingBanner = null;
+    }
 
     // Wire actions (content is rebuilt each refresh, so bind every time).
     bindUnboundButtons();
@@ -328,6 +417,86 @@ function renderKeaConfig(data) {
     $(".ku-push-subnet").off('click').on('click', function() {
         openPushSubnetModal($(this));
     });
+}
+
+// ── Push: ephemeral result banner ─────────────────────────────────────────────
+// Banner lives at the top of the Subnet Configuration section.  It auto-
+// dismisses after 30 s with a draining timer bar so the user can see it's
+// transient.  Re-renders (auto-refresh) clear it naturally; _kuPendingBanner
+// carries state across the loadKeaConfig() that follows every successful push.
+
+function showPushResultBanner(state) {
+    const $el = $('#ku-push-result');
+    if (!$el.length) return;
+    clearTimeout(window._kuBannerTimer);
+    $el.stop(true, true).show().html(pushBannerHtml(state));
+    // Trigger the CSS drain transition one frame after paint so the initial
+    // width:100% is visible before we animate to 0%.
+    requestAnimationFrame(function() {
+        $el.find('.ku-timer-bar').css('width', '0%');
+    });
+    window._kuBannerTimer = setTimeout(function() {
+        $el.fadeOut(800, function() { $el.empty().show(); });
+    }, 30000);
+}
+
+function pushBannerHtml(state) {
+    const data   = state.data;
+    const changed = data.changed || [];
+    const skipped = data.skipped || [];
+    const mc      = data.manual_config_skipped || [];
+    const errors  = data.errors  || [];
+
+    // Determine alert colour.
+    let type = changed.length ? 'success' : 'info';
+    if (errors.length)                       type = 'danger';
+    else if (mc.length && !changed.length)   type = 'warning';
+    else if (mc.length || skipped.length)    type = changed.length ? 'success' : 'warning';
+
+    // Build headline.
+    let headline = '';
+    if (changed.length) {
+        const list = '<span class="kea-subnet">' + changed.map(escapeHtml).join(', ') + '</span>';
+        headline = 'Applied to ' + changed.length + ' subnet' + (changed.length !== 1 ? 's' : '') +
+                   ': ' + list + '. Kea restarted.';
+    }
+
+    // Build footnotes.
+    const notes = [];
+    if (mc.length) {
+        const names = mc.map(function(s) { return s === 'dhcp4' ? 'DHCPv4' : 'DHCPv6'; }).join(' and ');
+        notes.push(names + ': manual config — edit kea-dhcp-ddns.conf directly');
+    }
+    if (skipped.length) {
+        notes.push(skipped.length + ' subnet' + (skipped.length !== 1 ? 's' : '') + ' skipped (no resolvable domain)');
+    }
+    if (errors.length) {
+        notes.push(errors.map(function(e) { return escapeHtml(e.subnet) + ': ' + escapeHtml(e.message); }).join('; '));
+    }
+
+    if (!headline && !notes.length) {
+        headline = 'No changes — subnets already configured.';
+    } else if (!headline) {
+        headline = notes.shift();
+    }
+
+    let body = '<strong>' + headline + '</strong>';
+    if (notes.length) {
+        body += '<span style="display:block; margin-top:3px; font-size:0.88em; color:#555;">' +
+                notes.join('<br>') + '</span>';
+    }
+
+    const closeBtn =
+        '<button type="button" onclick="clearTimeout(window._kuBannerTimer);$(this).closest(\'[id=ku-push-result]\').empty();" ' +
+        'style="float:right; margin:-2px -4px 0 8px; background:none; border:none; font-size:1.3em; line-height:1; cursor:pointer; color:inherit; opacity:0.6;">' +
+        '&times;</button>';
+
+    return '<div class="alert alert-' + type + '" ' +
+           'style="margin:0 0 8px; padding:8px 12px 5px; position:relative; overflow:hidden;">' +
+           closeBtn + body +
+           '<div style="position:absolute; bottom:0; left:0; right:0; height:3px;">' +
+           '<div class="ku-timer-bar"></div></div>' +
+           '</div>';
 }
 
 // ── Push: shared change-list shown in both modals ─────────────────────────────
@@ -420,19 +589,23 @@ function doPush(payload, $btn, $result, modalSel) {
     $btn.prop('disabled', true).html('<i class="fa fa-spinner fa-spin"></i> Applying…');
     $result.empty();
     $.ajax({
-        url: '/api/keaubnd/configcheck/push_settings',
+        url: '/api/keaubnd/config_check/push_settings',
         type: 'POST',
         contentType: 'application/json',
         dataType: 'json',
         data: JSON.stringify(payload),
         timeout: 60000,
         success: function(data) {
-            $result.html(pushResultHtml(data));
-            $btn.prop('disabled', false).text('Done');
-            if (data.status === 'ok' && data.changed && data.changed.length) {
-                // Refresh the status view, then auto-close shortly after.
+            // Structured response (has a 'changed' array) → close modal, show
+            // ephemeral banner in the section.  Plain error messages stay in
+            // the modal so the user can read them before dismissing.
+            if (Array.isArray(data.changed)) {
+                $(modalSel).modal('hide');
+                window._kuPendingBanner = { data: data, scope: payload.scope };
                 loadKeaConfig();
-                setTimeout(function() { $(modalSel).modal('hide'); }, 2500);
+            } else {
+                $result.html(pushResultHtml(data));
+                $btn.prop('disabled', false).text('Retry');
             }
         },
         error: function(xhr, status) {
@@ -474,7 +647,20 @@ function pushResultHtml(data) {
     return h || '<div class="alert alert-info" style="margin:8px 0 0;">No changes.</div>';
 }
 
-function fixGuide(hasWrong, hasTsig, hasNoDdns, hasD2Off, listener) {
+// TSIG section removed from fixGuide (deferred feature). To restore: add hasTsig param and this block:
+//   if (hasTsig) {
+//     html += '<h5><span class="label label-warning">TSIG Mismatch</span> &nbsp;Fix TSIG authentication</h5>' +
+//             '<p>Both sides must agree on TSIG — either both enabled with matching key, or both disabled.</p>' +
+//             '<strong>To enable TSIG on this subnet:</strong><ol>' +
+//             '<li>Click <strong>Advanced</strong> in the Dynamic DNS section</li>' +
+//             '<li>Set <strong>TSIG key name</strong> to match the plugin\'s key name (Settings tab)</li>' +
+//             '<li>Set <strong>TSIG secret</strong> to the same base64-encoded secret</li>' +
+//             '<li>Set <strong>TSIG algorithm</strong> to match (e.g. HMAC-SHA256)</li>' +
+//             '<li>Save and Apply</li></ol>' +
+//             '<strong>To disable TSIG instead:</strong> go to the Kea Unbound Settings tab and uncheck ' +
+//             '<em>Enable TSIG authentication</em>, then Apply.';
+//   }
+function fixGuide(hasWrong, hasNoDdns, hasD2Off, listener) {
     const port = listener ? listener.port : 53535;
     let html = '<div class="panel panel-default" style="margin-top:8px;">' +
                '<div class="panel-heading" style="cursor:pointer;" onclick="$(\'#fixGuideBody\').toggle();">' +
@@ -497,7 +683,7 @@ function fixGuide(hasWrong, hasTsig, hasNoDdns, hasD2Off, listener) {
 
     html += '<p class="text-muted">Per-subnet settings are in <strong>Services → Kea DHCP → Kea DHCPv4 → Subnets</strong>. ' +
             'Edit the subnet, scroll to the <strong>Dynamic DNS</strong> section, and click <strong>Advanced</strong> ' +
-            'to reveal the port and TSIG fields. Apply after saving.</p>';
+            'to reveal the port field. Apply after saving.</p>';
 
     if (hasNoDdns) {
         html += '<h5><span class="label label-default">No DDNS</span> &nbsp;Enable DDNS for this subnet</h5>' +
@@ -535,21 +721,6 @@ function fixGuide(hasWrong, hasTsig, hasNoDdns, hasD2Off, listener) {
                 '</ol>' +
                 '<p class="text-muted">Note: if this subnet intentionally sends DDNS updates elsewhere, ' +
                 'no change is needed — the amber status is informational only.</p>';
-    }
-
-    if (hasTsig) {
-        html += '<h5><span class="label label-warning">TSIG Mismatch</span> &nbsp;Fix TSIG authentication</h5>' +
-                '<p>Both sides must agree on TSIG — either both enabled with matching key, or both disabled.</p>' +
-                '<strong>To enable TSIG on this subnet:</strong>' +
-                '<ol>' +
-                '<li>Click <strong>Advanced</strong> in the Dynamic DNS section</li>' +
-                '<li>Set <strong>TSIG key name</strong> to match the plugin\'s key name (Settings tab)</li>' +
-                '<li>Set <strong>TSIG secret</strong> to the same base64-encoded secret</li>' +
-                '<li>Set <strong>TSIG algorithm</strong> to match (e.g. HMAC-SHA256)</li>' +
-                '<li>Save and Apply</li>' +
-                '</ol>' +
-                '<strong>To disable TSIG instead:</strong> go to the Kea Unbound Settings tab and uncheck ' +
-                '<em>Enable TSIG authentication</em>, then Apply.';
     }
 
     html += '</div></div></div>';
@@ -626,7 +797,7 @@ function subnetPanel(title, subnets) {
 function pushButton(s) {
     if (!s.opnsense_uuid) {
         return '<button class="btn btn-xs btn-default" disabled ' +
-               'title="No matching OPNsense subnet found">Apply</button>';
+               'title="No matching OPNsense subnet found">Configure for Kea Unbound DDNS</button>';
     }
     const data =
         " data-uuid='"   + escapeHtml(s.opnsense_uuid) + "'" +
@@ -636,22 +807,10 @@ function pushButton(s) {
         " data-basis='"  + escapeHtml(s.domain_basis || '') + "'" +
         " data-source='" + escapeHtml(s.domain_source || '') + "'";
     return '<button class="btn btn-xs btn-primary ku-push-subnet"' + data + '>' +
-           '<i class="fa fa-upload"></i> Apply</button>';
+           '<i class="fa-solid fa-wand-magic-sparkles"></i> Configure for Kea Unbound DDNS</button>';
 }
 
 </script>
-
-<div class="content-box" style="padding:10px 15px 5px;">
-    <div style="display:flex; align-items:center;">
-        <label style="margin:0; font-weight:normal; color:#777; cursor:pointer;">
-            <input type="checkbox" id="autoRefreshCheck" checked style="margin-right:5px;">
-            Auto-refresh every 30 seconds
-        </label>
-        <button id="refreshBtn" class="btn btn-primary btn-sm" style="margin-left:20px;">
-            <i class="fa fa-refresh"></i> Refresh Now
-        </button>
-    </div>
-</div>
 
 <div id="configLoader" class="content-box" style="text-align:center; padding:20px; display:none;">
     <i class="fa fa-spinner fa-spin fa-2x"></i>

@@ -89,17 +89,6 @@ settings below. The Lease Audit tab shows a full preview of what each cleanup wo
         <type>checkbox</type>
         <help>Register Kea active leases in Unbound DNS with TTL matching lease expiration. Repopulates Unbound on startup and after each Kea or Unbound restart. Requires the Kea DHCP service (kea-dhcp4/kea-dhcp6) to be running.</help>
     </field>
-
-    <field>
-        <type>header</type>
-        <label>DNS Record Cleaning</label>
-    </field>
-    <field>
-        <id>general.general.enable_logwatch</id>
-        <label>Watch Kea log for lease releases</label>
-        <type>checkbox</type>
-        <help>Enable a secondary daemon that tails Kea's DHCP log and removes DNS records promptly when a lease is released (DHCP4_RELEASE / DHCP6_RELEASE). Belt-and-suspenders: the live DDNS path handles most releases, but this catches the rare case where kea-dhcp-ddns was down or the live update was missed. Runs as a separate daemon alongside the main listener, using the same shared cleanup scripts and lock.</help>
-    </field>
     <field>
         <id>general.general.synthesize_ptr</id>
         <label>Synthesize PTR records from DDNS updates</label>
@@ -125,6 +114,23 @@ settings below. The Lease Audit tab shows a full preview of what each cleanup wo
         a run, not across restarts).<br><br>
         Note: this plugin does not store or validate DHCID records. Collision detection
         is based on name-to-IP conflicts in Unbound, not client identity.]]></help>
+    </field>
+
+    <field>
+        <type>header</type>
+        <label>DNS Record Cleaning</label>
+    </field>
+    <field>
+        <id>general.general.clean_on_restart</id>
+        <label>Clean stale records after restart</label>
+        <type>checkbox</type>
+        <help>After each full reconcile triggered by a Kea or Unbound restart, sweep Unbound for records no longer backed by any Kea reservation or active lease and remove them immediately. Useful when static reservations are removed — the stale DNS records disappear on the next restart rather than waiting for the scheduled auto-clean.</help>
+    </field>
+    <field>
+        <id>general.general.enable_logwatch</id>
+        <label>Watch logs for DHCP lease releases and missed updates</label>
+        <type>checkbox</type>
+        <help>Enable a secondary daemon that tails both Kea's DHCP log and the listener log to catch DNS updates the live path missed. On a lease release (DHCP4_RELEASE / DHCP6_RELEASE) it immediately purges the DNS records for that IP. On a listener SERVFAIL (Unbound was briefly unavailable or locked) it triggers a targeted resync for the affected names. Runs as a separate daemon alongside the main listener, using the same shared cleanup scripts and lock. Requires Kea's kea-dhcp4 / kea-dhcp6 loggers to be at INFO severity or lower and writing to /var/log/kea/ — the OPNsense default.</help>
     </field>
     <field>
         <id>general.general.enable_auto_clean</id>

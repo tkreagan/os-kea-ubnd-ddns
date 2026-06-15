@@ -60,6 +60,7 @@ from lib.keaubnd_sync import (
     setup_logging,
     get_synthesize_ptr,
     read_d2_reverse_zones,
+    get_collision_policy,
 )
 
 
@@ -213,6 +214,8 @@ def audit_local_data(report_json: bool = False, verbose: bool = False) -> int:
             synthesize_ptr=synthesize_ptr, d2_reverse_zones=d2_reverse_zones,
         )
 
+    collision_policy = get_collision_policy()
+
     all_hostnames = (set(res_ips_by_host) | set(lease_ips_by_host)
                      | set(unbound_ips_by_host) | set(host_ips_by_host))
 
@@ -258,8 +261,19 @@ def audit_local_data(report_json: bool = False, verbose: bool = False) -> int:
             else:
                 ptr_state = "wrong"
 
-            if status == "ok" and not ptr_registered:
-                status = "missing-PTR"
+            if status == "ok":
+                if in_unbound and not ptr_registered:
+                    # A/AAAA record present but no matching PTR.
+                    status = "missing-PTR"
+                elif not in_unbound:
+                    # Lease/reservation not in Unbound at all.
+                    # Under first_wins/last_wins a competing registration for the
+                    # same hostname intentionally displaces this entry; under allow
+                    # every device should be registered so absence means a gap.
+                    if collision_policy != "allow" and ub_ips:
+                        status = "collision"
+                    else:
+                        status = "unregistered"
 
             try:
                 record_type = "A" if ipaddress.ip_address(ip).version == 4 else "AAAA"

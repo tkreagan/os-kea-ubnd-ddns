@@ -43,6 +43,80 @@ fi
 pkill -f kea-ubnd-ddns.py 2>/dev/null || true
 echo "    done"
 
+# ── Remove d2 DDNS pointers from OPNsense Kea subnet config ──────────────────
+# Clears ddns_dns_server / ddns_dns_port on any GUI-managed subnet that was
+# pointing at our listener.  Manual-config services are left alone (conf file
+# is hand-edited; we emit a warning instead).  Must run before the KeaUbnd
+# section is removed so we can read our configured port.
+echo "==> Removing d2 DDNS configuration targeting our listener..."
+python3 - << 'PYEOF'
+import xml.etree.ElementTree as ET, shutil, sys, os
+
+CONFIG  = '/conf/config.xml'
+BACKUP  = CONFIG + '.keaubnd-d2clean'
+OUR_ADDR = '127.0.0.1'
+
+try:
+    shutil.copy2(CONFIG, BACKUP)
+    tree = ET.parse(CONFIG)
+    root = tree.getroot()
+
+    our_port = '53535'
+    ku = root.find('OPNsense/KeaUbnd/general')
+    if ku is not None:
+        p = (ku.findtext('port') or '').strip()
+        if p:
+            our_port = p
+
+    changed      = 0
+    manual_noted = []
+
+    for service, tag in [('dhcp4', 'subnet4'), ('dhcp6', 'subnet6')]:
+        mc = (root.findtext(f'OPNsense/Kea/{service}/general/manual_config') or '').strip()
+        if mc == '1':
+            manual_noted.append((service, our_port))
+            continue
+        subnets = root.find(f'OPNsense/Kea/{service}/subnets')
+        if subnets is None:
+            continue
+        for subnet in subnets.findall(tag):
+            addr_el = subnet.find('ddns_dns_server')
+            port_el = subnet.find('ddns_dns_port')
+            if addr_el is None or port_el is None:
+                continue
+            if (addr_el.text or '').strip() == OUR_ADDR and \
+               (port_el.text or '').strip() == our_port:
+                addr_el.text = ''
+                port_el.text = ''
+                changed += 1
+
+    if changed:
+        tree.write(CONFIG, xml_declaration=True, encoding='UTF-8')
+        print(f'    Cleared DDNS server pointer from {changed} subnet(s)')
+    else:
+        print('    No matching subnet pointers found (already clean or no GUI-managed subnets)')
+
+    for svc, port in manual_noted:
+        print(f'    NOTE: {svc} uses manual config — remove the {OUR_ADDR}:{port}')
+        print(f'          dns-server entry from forward zones in kea-dhcp-ddns.conf manually')
+
+    os.remove(BACKUP)
+except Exception as e:
+    print(f'ERROR: {e}', file=sys.stderr)
+    if os.path.exists(BACKUP):
+        shutil.copy2(BACKUP, CONFIG)
+        print('    config.xml restored from backup', file=sys.stderr)
+    sys.exit(1)
+PYEOF
+
+# Regenerate kea-dhcp-ddns.conf from the updated model and restart d2.
+# This causes a brief DHCP service interruption; acceptable during uninstall.
+echo "==> Reloading Kea configuration (brief DHCP interruption)..."
+/usr/local/sbin/configctl template reload OPNsense/Kea >/dev/null 2>&1 || true
+/usr/local/sbin/configctl kea restart >/dev/null 2>&1 \
+    && echo "    done" \
+    || echo "    WARNING: Kea restart failed — restart Kea manually after removing the plugin"
+
 # ── Remove KeaUbnd from config.xml ─────────────────────────────────────────
 echo "==> Cleaning config.xml..."
 python3 - << 'PYEOF'

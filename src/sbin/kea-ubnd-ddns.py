@@ -108,7 +108,7 @@ except ImportError:
 sys.path.insert(0, "/usr/local/opnsense/scripts/keaubnd")
 from lib.keaubnd_sync import (  # noqa: E402
     _arpa_to_ip, is_sane_name, reverse_ptr,
-    setup_logging, get_collision_policy, get_sm_config,
+    setup_logging, get_clean_on_restart, get_collision_policy, get_sm_config,
     read_host_entries, unbound_mutation_lock, MUTATION_LOCK_PATH,
 )
 from lib import consistency_sm as csm  # noqa: E402
@@ -592,10 +592,12 @@ class Daemon:
             # on a flap, but guard anyway.
             self.log.warning("reconcile already running; ignoring spawn")
             return
-        cmd = [sys.executable, KEA_SYNC, "--mode=full"]
+        cmd = [sys.executable, KEA_SYNC]
         if d.names:
             cmd.append("--names=" + ",".join(sorted(d.names)))
-        self.log.info("Spawn reconcile: %s", " ".join(cmd[2:]))
+        elif get_clean_on_restart():
+            cmd.append("--clean-stale")
+        self.log.info("Spawn reconcile: %s", " ".join(cmd[2:]) or "(full)")
         try:
             self.child = subprocess.Popen(cmd, stdout=subprocess.PIPE,
                                           stderr=subprocess.PIPE, text=True)
@@ -799,6 +801,7 @@ class Daemon:
                 self.log.info("NORMAL — live applies resumed")
             elif self.sm.state is csm.State.BLOCKED and prev_state is not csm.State.BLOCKED:
                 write_status("blocked")
+                self.log.info("BLOCKED — live applies deferred pending reconcile")
             prev_state = self.sm.state
 
         self.shutdown()

@@ -53,10 +53,18 @@
 </style>
 
 <script>
+// True until the first successful render; controls whether we show the full-page
+// spinner or do a silent in-place update.
+var auditInitialLoad = true;
+
 $( document ).ready(function() {
     loadAuditData();
     setInterval(function() {
-        if ($("#autoRefreshCheck").is(":checked")) { loadAuditData(); }
+        if (!$("#autoRefreshCheck").is(":checked")) return;
+        // Don't stomp on the user while they're typing into a filter box.
+        var active = document.activeElement;
+        if (active && (active.id === 'fwdSearchInput' || active.id === 'revSearchInput')) return;
+        loadAuditData();
     }, 30000);
 
     // Only show a manual sync button if that sync is enabled in settings.
@@ -137,8 +145,14 @@ $( document ).ready(function() {
 });
 
 function loadAuditData() {
-    $("#statusLoader").show();
-    $("#statusContent").hide();
+    if (auditInitialLoad) {
+        // First load: show the spinner and hide content until data arrives.
+        $("#statusLoader").show();
+        $("#statusContent").hide();
+    } else {
+        // Subsequent refreshes: update in-place so the page doesn't jump.
+        $("#refreshIndicator").show();
+    }
     $("#statusError").hide();
 
     $.ajax({
@@ -151,9 +165,12 @@ function loadAuditData() {
             if (!data.audit)             { showError('Invalid response from audit endpoint'); return; }
             renderAuditData(data.audit);
             $("#statusLoader").hide();
+            $("#refreshIndicator").hide();
             $("#statusContent").show();
+            auditInitialLoad = false;
         },
         error: function(xhr, status) {
+            $("#refreshIndicator").hide();
             showError(status === 'timeout' ? 'Request timed out' : 'Failed to load audit data');
         }
     });
@@ -161,7 +178,8 @@ function loadAuditData() {
 
 function showError(message) {
     $("#statusLoader").hide();
-    $("#cleanBtn").prop("disabled", true);
+    $("#cleanBtn, #syncStaticBtn, #syncDynamicBtn").prop("disabled", true)
+        .filter("#syncStaticBtn, #syncDynamicBtn").attr("title", "Kea is unavailable — sync cannot run");
     $("#statusError").html(
         '<div class="alert alert-danger alert-dismissible" role="alert">' +
         '<button type="button" class="close" data-dismiss="alert"><span>&times;</span></button>' +
@@ -253,6 +271,12 @@ function renderAuditData(audit) {
     const records = audit.records || [];
     const orphans  = audit.orphaned_ptrs || [];
 
+    // Sync buttons need Kea — disable them when the audit couldn't reach it.
+    const syncOk = !!audit.complete;
+    $("#syncStaticBtn, #syncDynamicBtn")
+        .prop("disabled", !syncOk)
+        .attr("title", syncOk ? "" : "Kea is unavailable — sync cannot run");
+
     // Authoritative counts for cleanup (status-based).
     const stale     = records.filter(r => r.status === 'stale').length;
     const orphanN   = orphans.length;
@@ -260,14 +284,18 @@ function renderAuditData(audit) {
 
     // Summary counts. These intentionally OVERLAP (e.g. a missing-PTR record is
     // also an active lease), so there is no meaningful grand total.
-    const sActiveLease = records.filter(r => r.leased).length;
-    const sConfigured  = records.filter(r => (r.reserved || r.override) && !r.leased).length;
-    // Missing PTR among the backed rows above (lease / reservation / override) —
-    // pure-stale records are reported only under "Possibly Stale / Orphaned".
-    const sMissingPtr  = records.filter(r => !r.ptr_registered &&
-                                            (r.reserved || r.leased || r.override)).length;
-    const sStaleOrphan = stale + orphanN;
-    const sUnknown     = records.filter(r => r.status === 'unknown').length;
+    const sActiveLease   = records.filter(r => r.leased).length;
+    const sLeaseOk       = records.filter(r => r.leased && (r.status === 'ok' || r.status === 'static')).length;
+    const sConfigured    = records.filter(r => (r.reserved || r.override) && !r.leased).length;
+    // missing-PTR: A/AAAA in Unbound but no PTR. Does not include unregistered or
+    // collision entries — those have no forward record at all.
+    const sMissingPtr    = records.filter(r => r.status === 'missing-PTR').length;
+    // collision: lease displaced by another device's registration under first/last_wins.
+    const sCollision     = records.filter(r => r.status === 'collision').length;
+    // unregistered: active lease/reservation with no DNS record at all.
+    const sUnregistered  = records.filter(r => r.status === 'unregistered').length;
+    const sStaleOrphan   = stale + orphanN;
+    const sUnknown       = records.filter(r => r.status === 'unknown').length;
 
     let html = '';
 
@@ -283,10 +311,16 @@ function renderAuditData(audit) {
     const summaryRows = [
         ['Active Leases', 'text-success', sActiveLease,
          'A client currently holds this address — a dynamic lease, or a static reservation whose host is online. Registered in DNS with a lease-tracking TTL.'],
+        ['↳ Registered in DNS', 'text-success', sLeaseOk,
+         'Active leases with both a forward (A/AAAA) and reverse (PTR) record present in Unbound. Subset of Active Leases above.'],
         ['Static Reservations & Config Overrides', 'kea-blue', sConfigured,
          'Configured but not currently leased: a Kea reservation with no active lease yet, or an Unbound host override. Resolves whether or not a client is online.'],
-        ['Missing Pointers', 'kea-amber', sMissingPtr,
-         'Has a forward (A/AAAA) record but no matching reverse (PTR) record. Counts across the rows above.'],
+        ['Missing PTR', 'kea-amber', sMissingPtr,
+         'A/AAAA record is in Unbound but has no matching reverse (PTR) record. Counts across the rows above.'],
+        ['Hostname Collision', 'kea-amber', sCollision,
+         'Active lease not registered in DNS because another device won the same hostname under the current collision policy (first_wins / last_wins). Switch the collision policy to <strong>allow</strong> to register all devices.'],
+        ['Unregistered Lease', 'kea-amber', sUnregistered,
+         'Active lease or reservation with no DNS record at all — no A/AAAA and no PTR. The DDNS update may not have been processed yet, or the daemon was not running when the lease was issued.'],
         ['Possibly Stale / Orphaned', 'text-danger', sStaleOrphan,
          'A live override record in Unbound not backed by any active lease, Kea reservation, or configured host override — or a reverse (PTR) with no forward record. May be removable.' +
          '<br><br>These are not necessarily wrong: they are simply not backed by a Kea lease, reservation, or Unbound host override (for example, left over from an expired lease, or a record added by another tool). Cleaning removes them; anything still in use re-registers on the next lease renewal or sync.'],
@@ -373,7 +407,7 @@ function renderAuditData(audit) {
         html += '<div class="panel panel-default">' +
                 '<div class="panel-heading" style="display:flex;align-items:center;justify-content:space-between;">' +
                 '<h4 class="panel-title" style="margin:0;">DNS Records (' + records.length + ')</h4>' +
-                '<input type="text" id="fwdSearchInput" placeholder="Search records…" class="form-control input-sm" style="width:220px;" value="' + escapeHtml(fwdSearch) + '">' +
+                '<input type="text" id="fwdSearchInput" placeholder="Filter…" class="form-control input-sm" style="width:160px;" value="' + escapeHtml(fwdSearch) + '">' +
                 '</div>' +
                 '<div class="panel-body" style="padding:0;">' +
                 '<div class="table-responsive">' +
@@ -430,7 +464,7 @@ function renderAuditData(audit) {
         html += '<div class="panel panel-default">' +
                 '<div class="panel-heading" style="display:flex;align-items:center;justify-content:space-between;">' +
                 '<h4 class="panel-title" style="margin:0;">Reverse (PTR) Records (' + ptrs.length + ')</h4>' +
-                '<input type="text" id="revSearchInput" placeholder="Search PTR records…" class="form-control input-sm" style="width:220px;" value="' + escapeHtml(revSearch) + '">' +
+                '<input type="text" id="revSearchInput" placeholder="Filter…" class="form-control input-sm" style="width:160px;" value="' + escapeHtml(revSearch) + '">' +
                 '</div>' +
                 '<div class="panel-body" style="padding:0;">' +
                 '<div class="table-responsive">' +
@@ -479,13 +513,10 @@ function updateCleanButton(complete, removable) {
     const info = $("#cleanInfo");
     if (!complete) {
         btn.prop("disabled", true).html('<i class="fa fa-trash-o"></i> Clean Stale Records');
-        if (info.length) info.text("Unavailable — Kea data required.");
     } else if (removable === 0) {
         btn.prop("disabled", true).html('<i class="fa fa-trash-o"></i> Clean Stale Records');
-        if (info.length) info.text("");
     } else {
         btn.prop("disabled", false).html('<i class="fa fa-trash-o"></i> Clean ' + removable + ' Record' + (removable !== 1 ? 's' : '') + ' Now');
-        if (info.length) info.text("");
     }
 }
 </script>
@@ -511,33 +542,34 @@ function updateCleanButton(complete, removable) {
     </div>
 </div>
 
-<div class="content-box" style="padding:10px 15px;">
-    <p class="text-muted small" style="margin:0 0 8px;">
-        Compares Unbound's runtime DNS records against Kea leases, reservations, and
-        Unbound Host Overrides. Records backed by an active source show as live; records
-        with no backing can be removed with the Clean button. Use the Sync buttons to
-        force a re-sync from Kea without restarting any service.
-    </p>
-    <div style="display:flex; align-items:center;">
-        <label style="margin:0; font-weight:normal; color:#777; cursor:pointer;">
-            <input type="checkbox" id="autoRefreshCheck" checked style="margin-right:5px;">
-            Auto-refresh every 30 seconds
-        </label>
-        <button id="refreshBtn" class="btn btn-primary btn-sm" style="margin-left:20px;">
-            <i class="fa fa-refresh"></i> Refresh Now
+<p class="small" style="padding:8px 15px 0; margin:0 0 8px; color:#777;">
+    Compares Unbound's runtime DNS records against Kea leases, reservations, and
+    Unbound Host Overrides. Records backed by an active source show as live; records
+    with no backing can be removed with the Clean button. Use the Sync buttons to
+    force a re-sync from Kea without restarting any service.
+</p>
+<div style="padding:4px 15px 8px; display:flex; align-items:center; justify-content:space-between;">
+    <div>
+        <button id="syncDynamicBtn" class="btn btn-default btn-xs" style="display:none;">
+            <i class="fa fa-download"></i> Sync All Kea Records
         </button>
-    </div>
-    <div style="margin-top:8px;">
-        <button id="cleanBtn" class="btn btn-warning btn-sm" disabled>
+        <button id="syncStaticBtn" class="btn btn-default btn-xs" style="display:none; margin-left:4px;">
+            <i class="fa fa-download"></i> Sync Static Only
+        </button>
+        <button id="cleanBtn" class="btn btn-default btn-xs" disabled style="margin-left:4px;">
             <i class="fa fa-trash-o"></i> Clean Stale Records
         </button>
-        <button id="syncStaticBtn" class="btn btn-default btn-sm" style="display:none; margin-left:8px;">
-            <i class="fa fa-download"></i> Sync Static Records
-        </button>
-        <button id="syncDynamicBtn" class="btn btn-default btn-sm" style="display:none; margin-left:8px;">
-            <i class="fa fa-download"></i> Sync Active DHCP Leases
-        </button>
     </div>
+    <span style="color:#777; display:inline-flex; align-items:center; gap:8px;">
+        <i id="refreshIndicator" class="fa fa-refresh fa-spin" style="display:none; color:#aaa;"></i>
+        <label style="margin:0; font-weight:normal; cursor:pointer; display:inline-flex; align-items:center; gap:4px;">
+            <input type="checkbox" id="autoRefreshCheck" checked style="margin:0;">
+            Auto-refresh
+        </label>
+        <button id="refreshBtn" class="btn btn-default btn-xs">
+            <i class="fa fa-refresh"></i> Refresh Now
+        </button>
+    </span>
 </div>
 
 <div id="statusLoader" class="content-box" style="text-align:center; padding:20px; display:none;">

@@ -132,6 +132,19 @@ post_deinstall = json.dumps(
     "To purge: rm -rf /var/log/keaubnd\\n'\n"
 )
 
+post_install = json.dumps(
+    "#!/bin/sh\n"
+    "# Canonical OPNsense post-install sequence (mirrors what plugins.mk generates):\n"
+    "#  1. configd restart  — picks up new actions_keaubnd.conf\n"
+    "#  2. run_migrations   — handles any future model version migrations\n"
+    "#  3. rc.configure_plugins — flushes ACL cache, menu cache, model caches; reloads syslog\n"
+    "if [ -f /usr/local/etc/rc.d/configd ]; then /usr/local/etc/rc.d/configd restart; fi\n"
+    "if [ -f /usr/local/opnsense/mvc/script/run_migrations.php ]; then"
+    " /usr/local/opnsense/mvc/script/run_migrations.php OPNsense/KeaUbnd; fi\n"
+    "if [ -f /usr/local/etc/rc.configure_plugins ]; then"
+    " /usr/local/etc/rc.configure_plugins POST_INSTALL; fi\n"
+)
+
 manifest = f"""name: {pkgname}
 version: "{version}"
 origin: opnsense-plugins/{pkgname}
@@ -150,6 +163,7 @@ deps: {{
 scripts: {{
   pre-deinstall: {pre_deinstall};
   post-deinstall: {post_deinstall};
+  post-install: {post_install};
 }}
 {files_section}
 """

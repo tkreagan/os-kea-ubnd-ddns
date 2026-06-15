@@ -46,7 +46,7 @@ use OPNsense\Unbound\Unbound as UnboundModel;
  *   tsig_mismatch - Right IP:port, but TSIG presence/key-name differs
  *   ok            - Correctly points at our listener with consistent TSIG
  *
- * GET /api/keaubnd/configcheck/check
+ * GET /api/keaubnd/config_check/check
  */
 class ConfigCheckController extends ApiControllerBase
 {
@@ -283,6 +283,8 @@ class ConfigCheckController extends ApiControllerBase
             'tsig_key'       => '',
             'tsig_secret'    => '',
             'tsig_algorithm' => '',
+            'enable_logwatch' => true,
+            'synthesize_ptr'  => true,
         ];
         if (!file_exists($this->config_file)) {
             return $settings;
@@ -307,6 +309,8 @@ class ConfigCheckController extends ApiControllerBase
         }
         // synthesize_ptr defaults to true (1) when missing.
         $settings['synthesize_ptr'] = (string)($g->synthesize_ptr ?? '1') !== '0';
+        // enable_logwatch defaults to true (1) when missing.
+        $settings['enable_logwatch'] = (string)($g->enable_logwatch ?? '1') === '1';
         return $settings;
     }
 
@@ -623,9 +627,7 @@ class ConfigCheckController extends ApiControllerBase
 
         return [
             'ddns_status' => 'ok',
-            'detail'      => $our_tsig
-                ? "Correctly configured (TSIG key \"{$our_key}\")"
-                : 'Correctly configured (no TSIG)',
+            'detail'      => 'Correctly configured',
             'target'      => "{$our_addr}:{$our_port}",
         ];
     }
@@ -792,6 +794,22 @@ class ConfigCheckController extends ApiControllerBase
             ];
         }
 
+        // Conflict resolution mode: the Kea default (check-with-dhcid) uses DHCID
+        // records to prevent different clients overwriting each other's DNS entries,
+        // but also blocks dual-stack clients (same device, different DHCPv4/DHCPv6
+        // identifiers) from registering both A and AAAA records. Since this plugin
+        // writes to Unbound (a resolver, not an authoritative server) and is the sole
+        // writer, DHCID protection provides no benefit. no-check-without-dhcid avoids
+        // the dual-stack blocking problem. (See OPNsense issue #10212.)
+        $crm = $subnet['ddns-conflict-resolution-mode'] ?? 'check-with-dhcid';
+        if ($crm !== 'no-check-without-dhcid') {
+            $out[] = [
+                'level'   => 'info',
+                'message' => 'Recommend setting conflict resolution mode to no-check-without-dhcid'
+                           . ' (currently: ' . $crm . ').',
+            ];
+        }
+
         // If option 15 (domain-name) differs from the qualifying suffix, clients that
         // construct their FQDN by combining their hostname with the option 15 domain
         // will send FQDNs that D2 cannot route. Only option 12 (bare hostname) clients
@@ -837,10 +855,96 @@ class ConfigCheckController extends ApiControllerBase
         return $out;
     }
 
+    /**
+     * Check whether Kea DHCP logging is configured so the log watcher can
+     * function. The watcher tails /var/log/kea/kea_YYYYMMDD.log, which is
+     * populated from syslog (OPNsense default: output=syslog → syslog-ng routes
+     * to /var/log/kea/) or from a direct /var/log/kea/ path. Severity must be
+     * INFO or DEBUG so DHCP4_RELEASE / DHCP6_RELEASE events (logged at INFO)
+     * are captured.
+     *
+     * Returns ['ok' => true|false|null, 'detail' => string]
+     *   null  = Kea not reachable, cannot determine
+     */
+    private function checkKeaLogging($dhcp4_args, $dhcp6_args)
+    {
+        $acceptable = ['debug', 'info'];
+        $configs = [];
+        if (is_array($dhcp4_args) && isset($dhcp4_args['Dhcp4'])) {
+            $configs[] = $dhcp4_args['Dhcp4'];
+        }
+        if (is_array($dhcp6_args) && isset($dhcp6_args['Dhcp6'])) {
+            $configs[] = $dhcp6_args['Dhcp6'];
+        }
+        if (empty($configs)) {
+            return ['ok' => null, 'detail' => 'Kea not reachable'];
+        }
+
+        $issues = [];
+        $found  = false;
+        foreach ($configs as $cfg) {
+            foreach ($cfg['loggers'] ?? [] as $logger) {
+                $name = $logger['name'] ?? '';
+                // Only check DHCP service loggers; skip ctrl-agent etc.
+                if ($name !== '*' && strpos($name, 'kea-dhcp') === false) {
+                    continue;
+                }
+                $found    = true;
+                $severity = strtolower($logger['severity'] ?? 'info');
+                if (!in_array($severity, $acceptable, true)) {
+                    $issues[] = $name . ' severity is ' . strtoupper($severity) . ' — need INFO or DEBUG';
+                }
+                // Output must be 'syslog' (OPNsense default, routed via syslog-ng)
+                // or a direct path under /var/log/kea/.
+                $output_ok = false;
+                $raw_outputs = [];
+                foreach ($logger['output-options'] ?? $logger['output_options'] ?? [] as $opt) {
+                    $out = $opt['output'] ?? '';
+                    $raw_outputs[] = $out;
+                    if ($out === 'syslog' || str_starts_with($out, '/var/log/kea/')) {
+                        $output_ok = true;
+                    }
+                }
+                if (!$output_ok) {
+                    $issues[] = $name . ' output is ' . (implode(', ', $raw_outputs) ?: 'none')
+                              . ' — need syslog or /var/log/kea/';
+                }
+            }
+        }
+
+        if (!$found) {
+            return ['ok' => null, 'detail' => 'no explicit DHCP logger configured'];
+        }
+        if (empty($issues)) {
+            return ['ok' => true, 'detail' => 'severity INFO · syslog → /var/log/kea/'];
+        }
+        return ['ok' => false, 'detail' => implode('; ', $issues)];
+    }
+
     private function isListenerRunning()
     {
         $response = trim((new Backend())->configdRun('keaubnd status'));
         return strpos($response, 'is running') !== false;
+    }
+
+    private function isLogwatcherRunning()
+    {
+        $response = trim((new Backend())->configdRun('keaubnd logwatcher_status'));
+        return strpos($response, 'is running') !== false;
+    }
+
+    private function isUnboundRunning()
+    {
+        $pidfile = '/var/run/unbound.pid';
+        if (!file_exists($pidfile)) {
+            return false;
+        }
+        $pid = intval(trim(@file_get_contents($pidfile)));
+        if ($pid <= 0) {
+            return false;
+        }
+        exec('ps -p ' . $pid . ' -o pid= 2>/dev/null', $ignored, $rc);
+        return $rc === 0;
     }
 
     // Whether Kea HA is enabled for a service (//OPNsense/Kea/<svc>/ha/enabled).
@@ -976,7 +1080,7 @@ class ConfigCheckController extends ApiControllerBase
     }
 
     /**
-     * POST /api/keaubnd/configcheck/push_settings
+     * POST /api/keaubnd/config_check/push_settings
      *
      * Write the recommended DDNS settings into config.xml (via the core Kea
      * models) for one subnet (scope=subnet) or every subnet (scope=all), then
@@ -1004,9 +1108,10 @@ class ConfigCheckController extends ApiControllerBase
         $plugin        = $this->getPluginSettings();
         $system_domain = $this->getSystemDomain();
 
-        $changed = [];
-        $skipped = [];
-        $errors  = [];
+        $changed               = [];
+        $skipped               = [];
+        $errors                = [];
+        $manual_config_skipped = [];
 
         // (service => model) for the services we will touch this call.
         $models = [];
@@ -1036,7 +1141,7 @@ class ConfigCheckController extends ApiControllerBase
         } elseif ($scope === 'all') {
             foreach (['dhcp4' => 'subnet4', 'dhcp6' => 'subnet6'] as $service => $subnet_key) {
                 if ($this->isManualConfig($service)) {
-                    // Manual-config service: leave it entirely alone.
+                    $manual_config_skipped[] = $service;
                     continue;
                 }
                 $mdl = $service === 'dhcp4' ? new KeaDhcpv4() : new KeaDhcpv6();
@@ -1056,14 +1161,14 @@ class ConfigCheckController extends ApiControllerBase
         }
 
         if (empty($changed)) {
-            // Nothing written — report skips/errors without touching config or restarting.
+            // Nothing written — report skips without touching config or restarting.
+            $has_result = !empty($skipped) || !empty($manual_config_skipped);
             return [
-                'status'  => empty($skipped) ? 'error' : 'ok',
-                'changed' => [],
-                'skipped' => $skipped,
-                'errors'  => empty($skipped)
-                    ? [['subnet' => '*', 'message' => 'no subnets matched']]
-                    : [],
+                'status'                => $has_result ? 'ok' : 'error',
+                'changed'               => [],
+                'skipped'               => $skipped,
+                'manual_config_skipped' => $manual_config_skipped,
+                'errors'                => $has_result ? [] : [['subnet' => '*', 'message' => 'no subnets matched']],
             ];
         }
 
@@ -1075,7 +1180,8 @@ class ConfigCheckController extends ApiControllerBase
             }
         }
         if (!empty($errors)) {
-            return ['status' => 'error', 'changed' => [], 'skipped' => $skipped, 'errors' => $errors];
+            return ['status' => 'error', 'changed' => [], 'skipped' => $skipped,
+                    'manual_config_skipped' => $manual_config_skipped, 'errors' => $errors];
         }
 
         // Persist all touched subnet models.
@@ -1093,10 +1199,11 @@ class ConfigCheckController extends ApiControllerBase
         (new Backend())->configdRun('kea restart');
 
         return [
-            'status'  => 'ok',
-            'changed' => $changed,
-            'skipped' => $skipped,
-            'errors'  => [],
+            'status'                => 'ok',
+            'changed'               => $changed,
+            'skipped'               => $skipped,
+            'manual_config_skipped' => $manual_config_skipped,
+            'errors'                => [],
         ];
     }
 
@@ -1168,12 +1275,7 @@ class ConfigCheckController extends ApiControllerBase
         return [[
             'level'   => 'warning',
             'heading' => 'Kea High Availability enabled',
-            'message' => "Kea HA is enabled for {$label}. "
-                       . 'This plugin reads lease and reservation data from the local Kea instance only. '
-                       . 'In an HA pair, the peer node handles some DHCP exchanges independently — '
-                       . 'those leases never trigger DDNS updates through this plugin, so DNS records '
-                       . 'for peer-issued leases will be missing or stale after a failover. '
-                       . 'Behavior with Kea HA is untested and unsupported.',
+            'message' => "Enabled for {$label}. Behavior with Kea HA is not tested or supported.",
         ]];
     }
 
@@ -1248,7 +1350,7 @@ class ConfigCheckController extends ApiControllerBase
     }
 
     /**
-     * POST /api/keaubnd/configcheck/disable_regdhcpstatic
+     * POST /api/keaubnd/config_check/disable_regdhcpstatic
      *
      * Turn off Unbound's "Register DHCP Static Mappings" and restart Unbound.
      */
@@ -1295,21 +1397,25 @@ class ConfigCheckController extends ApiControllerBase
         $result = [
             'status'            => 'ok',
             'kea_error'         => null,
-            'our_listener'      => [
-                'address'      => $plugin['address'],
-                'port'         => $plugin['port'],
-                'tsig_enabled' => $plugin['tsig_enabled'],
-                'running'      => $this->isListenerRunning(),
+            'our_listener'       => [
+                'address'            => $plugin['address'],
+                'port'               => $plugin['port'],
+                'tsig_enabled'       => $plugin['tsig_enabled'],
+                'running'            => $this->isListenerRunning(),
+                'logwatcher_enabled' => $plugin['enable_logwatch'],
+                'logwatcher_running' => $this->isLogwatcherRunning(),
             ],
             'd2_reachable'      => $d2_ok,
             'ipv4_subnets'      => [],
             'ipv6_subnets'      => [],
             'summary_advisories' => [],
             'unbound_checks'    => $this->getUnboundChecks(),
+            'unbound_running'   => $this->isUnboundRunning(),
         ];
 
-        // HA advisory: config.xml-based, emitted once regardless of daemon reachability.
-        $result['summary_advisories'] = $this->haAdvisories();
+        // HA advisory: config.xml-based, displayed in the Plugin Daemons section.
+        $result['ha_advisories'] = $this->haAdvisories();
+        $result['summary_advisories'] = [];
 
         // IPv4
         $dhcp4 = $this->keaQuery('dhcp4');
@@ -1345,6 +1451,9 @@ class ConfigCheckController extends ApiControllerBase
             'dhcp4' => $this->describeConnection('dhcp4', $dhcp4 !== null),
             'dhcp6' => $this->describeConnection('dhcp6', $dhcp6 !== null),
         ];
+
+        // Logging check: needs both DHCP query results, so runs after both queries.
+        $result['our_listener']['logwatcher_logging'] = $this->checkKeaLogging($dhcp4, $dhcp6);
 
         return $result;
     }

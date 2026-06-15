@@ -197,6 +197,19 @@ def get_collision_policy() -> str:
     return "last_wins"
 
 
+def get_clean_on_restart() -> bool:
+    """Return True when clean_on_restart is enabled in config.xml."""
+    try:
+        node = ET.parse(CONFIG_XML).getroot().find(
+            "OPNsense/KeaUbnd/general/clean_on_restart"
+        )
+        if node is not None and node.text:
+            return node.text.strip() == "1"
+    except Exception:
+        pass
+    return False
+
+
 def get_sm_config():
     """Read advanced SM tunables from config.xml and return a populated SMConfig.
     Falls back to SMConfig defaults on any read/parse error."""
@@ -889,3 +902,63 @@ def collect_kea_pairs(logger: Optional[logging.Logger] = None) -> Set[Tuple[str,
     if not any_ok:
         raise KeaUnavailableError("No Kea service (dhcp4/dhcp6) responded")
     return kea_pairs
+
+
+def clean_stale_records(
+    unbound_data: Dict[str, List[str]],
+    stale_pairs: Set[Tuple[str, str]],
+    orphaned_ptrs: Set[str],
+    dry_run: bool,
+    logger: logging.Logger,
+) -> int:
+    """Remove stale (name, ip) pairs and orphaned PTRs from Unbound's local_data.
+
+    unbound_control local_data_remove wipes ALL record types for a name, so
+    partial-stale names (e.g. valid A, stale AAAA) require a remove-all then
+    restore-valid dance.  unbound_data must reflect the current Unbound state
+    so the surviving records can be re-added correctly.
+
+    Returns the number of unbound-control errors encountered.
+    """
+    errors = 0
+
+    stale_ips_by_name: Dict[str, Set[str]] = {}
+    for name, ip in stale_pairs:
+        stale_ips_by_name.setdefault(name, set()).add(ip)
+
+    for name in sorted(stale_ips_by_name):
+        stale_ips = stale_ips_by_name[name]
+        valid_records = []
+        for line in unbound_data.get(name, []):
+            parts = line.split()
+            if len(parts) >= 5 and parts[3] in ("A", "AAAA") and parts[4] not in stale_ips:
+                valid_records.append((parts[4], parts[1], parts[3]))  # ip, ttl, rtype
+
+        if dry_run:
+            logger.info("[dry-run] local_data_remove %s (stale: %s)", name, sorted(stale_ips))
+            continue
+
+        if not unbound_control(["local_data_remove", name]):
+            logger.error("clean-stale: failed to remove %s", name)
+            errors += 1
+            continue
+
+        if valid_records:
+            rrs = [f"{name} {ttl} IN {rtype} {ip}" for ip, ttl, rtype in valid_records]
+            if not unbound_local_datas_batch(rrs):
+                logger.error("clean-stale: failed to restore valid records for %s", name)
+                errors += 1
+
+        logger.info("clean-stale: removed stale address(es) for %s [%s]",
+                    name, ", ".join(sorted(stale_ips)))
+
+    for ptr in sorted(orphaned_ptrs):
+        if dry_run:
+            logger.info("[dry-run] local_data_remove %s (orphaned PTR)", ptr)
+        elif not unbound_control(["local_data_remove", ptr]):
+            logger.error("clean-stale: failed to remove PTR %s", ptr)
+            errors += 1
+        else:
+            logger.info("clean-stale: removed orphaned PTR %s", ptr)
+
+    return errors
