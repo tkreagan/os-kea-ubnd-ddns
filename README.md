@@ -62,13 +62,13 @@ never touched by either path.
 
 ### Option A — pre-built package (recommended)
 
-Download `os-kea-ubnd-ddns-0.9.pkg` from the
+Download the `.pkg` file from the
 [latest release](https://github.com/tkreagan/os-kea-ubnd-ddns/releases/latest),
 copy it to your OPNsense box, and install it with `pkg`:
 
 ```sh
 # On OPNsense (as root or via sudo):
-pkg add os-kea-ubnd-ddns-0.9.pkg
+pkg add os-kea-ubnd-ddns-0.96.pkg
 ```
 
 No package repository is required — OPNsense's `pkg` accepts a local `.pkg` file
@@ -91,10 +91,10 @@ git clone https://github.com/tkreagan/os-kea-ubnd-ddns /usr/plugins/net/kea-ubnd
 # 3. Build the package
 cd /usr/plugins/net/kea-ubnd-ddns
 make package
-# → work/pkg/os-kea-ubnd-ddns-0.9.pkg
+# → work/pkg/os-kea-ubnd-ddns-0.96.pkg
 
 # 4. Install
-pkg add work/pkg/os-kea-ubnd-ddns-0.9.pkg
+pkg add work/pkg/os-kea-ubnd-ddns-0.96.pkg
 ```
 
 > **macOS / Linux cross-build note:** The `make package` target must run on a
@@ -132,15 +132,15 @@ that should register DNS entries, and switch to **Advanced** mode. Under the
 | Field | Value | Notes |
 |---|---|---|
 | DNS forward zone | `home.lan.` | **Trailing dot required** — see note below |
-| DNS reverse zone | e.g. `1.168.192.in-addr.arpa.` | Set (with trailing dot) to register PTR records — required for reverse DNS. Verified working in v0.9 testing. |
+| DNS reverse zone | e.g. `1.168.192.in-addr.arpa.` | Set (with trailing dot) to register PTR records — required for reverse DNS. |
 | DNS qualifying suffix | `home.lan` | No trailing dot — appended to bare hostnames (e.g. `myhost` → `myhost.home.lan`) |
 | DNS server address | `127.0.0.1` | |
 | DNS server port | `53535` | Must match the plugin's listen port (configurable in **Settings**) |
-| TSIG key name / secret / algorithm | *(leave blank)* | Not tested in v0.9 |
+| TSIG key name / secret / algorithm | *(leave blank)* | TSIG support is deferred — leave blank |
 | Override no update | **On** (recommended) | Server registers DNS even if the client requests no updates. **Implies "Override client update"** — see below. |
 | Override client update | **On** (recommended) | Server owns the forward (A) record. Recommended: there is no external DDNS server for clients to self-register against. |
 | Update on renew | **On** (recommended) | Re-asserts DNS on lease renewal — self-heals if Unbound's runtime data is lost. Subject to the lease-cache caveat below. |
-| Conflict resolution mode | `no-check-without-dhcid` (recommended) | All four modes tested in v0.9 — the plugin silently ignores DHCID and prerequisites regardless of which mode is set, so the mode only affects what D2 includes in the packet. `no-check-without-dhcid` is cleanest: no DHCID records sent. Collision protection is handled by the plugin's own **Hostname collision policy** setting (below), not by this Kea field. |
+| Conflict resolution mode | `no-check-without-dhcid` (recommended) | The plugin silently ignores DHCID and prerequisites regardless of which mode is set, so the mode only affects what D2 includes in the packet. `no-check-without-dhcid` is cleanest: no DHCID records sent. Collision protection is handled by the plugin's own **Hostname collision policy** setting (below), not by this Kea field. |
 
 Save and apply after editing each subnet.
 
@@ -149,7 +149,7 @@ Save and apply after editing each subnet.
 > silently drops every DNS UPDATE and nothing is registered. This is the most
 > common configuration mistake.
 
-> **Recommended DDNS settings (verified in v0.9 testing):** For this plugin's
+> **Recommended DDNS settings:** For this plugin's
 > architecture — Unbound is updated via the bridge and there is no external DDNS
 > server — enable **all three** override options together:
 >
@@ -315,10 +315,9 @@ in that topology.
 | **Lease Audit** | Full view of all DNS records across Kea reservations, active leases, Unbound local_data, and Host Overrides; previews what cleanup would remove; manual sync/clean buttons |
 | **Log File** | Unified log for the daemon, sync, audit, and cleanup scripts |
 
-## Current status — v0.9
+## Feature status
 
-This is the initial public release. The following are working and tested on
-OPNsense 26.1 with Kea DHCP4:
+Tested on OPNsense 26.1 with Kea DHCP4 and DHCP6:
 
 - RFC 2136 stub listener with A, AAAA, and PTR record handling
 - Static reservation sync (IPv4 and IPv6)
@@ -335,7 +334,7 @@ OPNsense 26.1 with Kea DHCP4:
 - **Reverse zones verified** — the DNS reverse zone field is tested and working;
   PTR records register correctly when it is set (with a trailing dot).
 - **Override options verified** — `override-no-update`, `override-client-update`,
-  and `update-on-renew` were validated end-to-end in v0.9 testing and behave per the
+  and `update-on-renew` were validated end-to-end and behave per the
   recommended-settings note above.
 - **All four conflict-resolution modes tested** — the plugin silently ignores DHCID
   records and RFC 2136 prerequisites in all modes; all four produce identical A + PTR
