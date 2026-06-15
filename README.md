@@ -68,7 +68,7 @@ copy it to your OPNsense box, and install it with `pkg`:
 
 ```sh
 # On OPNsense (as root or via sudo):
-pkg add os-kea-ubnd-ddns-0.96.pkg
+pkg install os-kea-ubnd-ddns-0.96.pkg
 ```
 
 No package repository is required — OPNsense's `pkg` accepts a local `.pkg` file
