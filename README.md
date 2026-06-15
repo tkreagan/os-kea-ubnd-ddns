@@ -123,7 +123,18 @@ back to check **Enabled** and apply.
 
 ### Kea setup
 
-#### Configure each subnet for DDNS
+#### Option A — configure via the plugin (recommended)
+
+Open the **Kea Config Check** tab (**Services → Kea Unbound DDNS → Kea Config
+Check**) and click **Configure All Subnets for Kea Unbound DDNS**. The plugin
+reads your live Kea configuration, fills in the correct DDNS settings for every
+subnet (server address, port, forward zone, qualifying suffix, and recommended
+override flags), and saves the changes. Individual subnets can also be configured
+one at a time using the per-subnet buttons on the same page.
+
+Once that completes, skip to [Enable kea-dhcp-ddns](#enable-kea-dhcp-ddns) below.
+
+#### Option B — configure manually
 
 Go to **Services → Kea DHCP → DHCPv4 (or DHCPv6) → Subnets**, edit each subnet
 that should register DNS entries, and switch to **Advanced** mode. Under the
