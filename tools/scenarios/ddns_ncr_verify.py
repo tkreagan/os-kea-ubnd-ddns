@@ -510,7 +510,11 @@ class DdnsIpChangeLastWins(Scenario):
             raise RuntimeError("Daemon not running")
         # Confirm policy is last_wins (the default)
         policy_out = ctx.ssh.sudo(
-            "grep -o 'last_wins\\|first_wins\\|allow' /conf/config.xml | head -1",
+            "python3 -c \""
+            "import xml.etree.ElementTree as ET; "
+            "t=ET.parse('/conf/config.xml'); "
+            "n=t.getroot().find('OPNsense/KeaUbnd/general/collision_policy'); "
+            "print(n.text.strip() if n is not None and n.text else 'last_wins')\"",
             check=False, timeout=5,
         ).strip()
         if policy_out and policy_out not in ("last_wins", ""):

@@ -788,7 +788,11 @@ class NcrIPChangeUpdatesPtr(Scenario):
         if not ctx.daemon_is_running():
             raise RuntimeError("Daemon not running")
         policy = ctx.ssh.sudo(
-            "grep -o 'last_wins\\|first_wins\\|allow' /conf/config.xml | head -1",
+            "python3 -c \""
+            "import xml.etree.ElementTree as ET; "
+            "t=ET.parse('/conf/config.xml'); "
+            "n=t.getroot().find('OPNsense/KeaUbnd/general/collision_policy'); "
+            "print(n.text.strip() if n is not None and n.text else 'last_wins')\"",
             check=False, timeout=5,
         ).strip()
         if policy and policy not in ("last_wins", ""):

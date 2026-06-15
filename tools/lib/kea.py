@@ -201,24 +201,93 @@ class KeaClient:
     # Reservation operations
     # ------------------------------------------------------------------
 
-    def reservation_add(self, subnet_id: int, ip: str,
-                        hw_addr: str, hostname: str) -> dict:
-        return self.query("subnet4-reservation-add", arguments={
-            "reservation": {
-                "subnet-id": subnet_id,
-                "ip-address": ip,
-                "hw-address": hw_addr,
-                "hostname": hostname,
-            }
-        })
+    def has_host_database(self, service: str = "dhcp4") -> bool:
+        """Return True if Kea has a hosts database backend available."""
+        try:
+            self.query("reservation-add", service=service, arguments={
+                "reservation": {
+                    "subnet-id": 0,
+                    "ip-address": "0.0.0.1",
+                    "hw-address": "00:00:00:00:00:01",
+                    "hostname": "_probe_",
+                }
+            })
+            # If it somehow succeeded, clean it up best-effort
+            try:
+                self.query("reservation-del", service=service, arguments={
+                    "subnet-id": 0, "ip-address": "0.0.0.1",
+                    "identifier-type": "address", "identifier": "0.0.0.1",
+                })
+            except KeaError:
+                pass
+            return True
+        except KeaError as e:
+            return "Host database not available" not in str(e)
 
-    def reservation_del(self, subnet_id: int, ip: str) -> dict:
-        return self.query("subnet4-reservation-del", arguments={
-            "subnet-id": subnet_id,
-            "ip-address": ip,
-            "identifier-type": "address",
-            "identifier": ip,
-        })
+    def reservation_add(self, subnet_id: int, ip: str,
+                        hw_addr: str, hostname: str,
+                        service: str = "dhcp4") -> None:
+        """Add a host reservation via config-set (works without a hosts DB backend)."""
+        svc_key = "Dhcp4" if service == "dhcp4" else "Dhcp6"
+        subnet_key = "subnet4" if service == "dhcp4" else "subnet6"
+        cfg = self.config_get(service)[svc_key]
+        for subnet in cfg.get(subnet_key, []):
+            if subnet.get("id") == subnet_id:
+                reservations = subnet.setdefault("reservations", [])
+                reservations[:] = [r for r in reservations
+                                   if r.get("ip-address") != ip]
+                entry: dict = {"ip-address": ip, "hostname": hostname}
+                if service == "dhcp4":
+                    entry["hw-address"] = hw_addr
+                else:
+                    entry["duid"] = hw_addr
+                reservations.append(entry)
+                break
+        self.query("config-set", service=service, arguments={svc_key: cfg})
+
+    def reservation_del(self, subnet_id: int, ip: str,
+                        service: str = "dhcp4") -> None:
+        """Remove a host reservation via config-set."""
+        svc_key = "Dhcp4" if service == "dhcp4" else "Dhcp6"
+        subnet_key = "subnet4" if service == "dhcp4" else "subnet6"
+        cfg = self.config_get(service)[svc_key]
+        for subnet in cfg.get(subnet_key, []):
+            if subnet.get("id") == subnet_id:
+                subnet["reservations"] = [
+                    r for r in subnet.get("reservations", [])
+                    if r.get("ip-address") != ip
+                ]
+                break
+        self.query("config-set", service=service, arguments={svc_key: cfg})
+
+    def reservation_add_v6_multi(self, subnet_id: int, duid: str,
+                                hostname: str, ips: list[str]) -> None:
+        """Add a DHCPv6 reservation with multiple addresses via config-set."""
+        cfg = self.config_get("dhcp6")["Dhcp6"]
+        for subnet in cfg.get("subnet6", []):
+            if subnet.get("id") == subnet_id:
+                reservations = subnet.setdefault("reservations", [])
+                reservations[:] = [r for r in reservations
+                                   if r.get("duid") != duid]
+                reservations.append({
+                    "duid": duid,
+                    "hostname": hostname,
+                    "ip-addresses": ips,
+                })
+                break
+        self.query("config-set", service="dhcp6", arguments={"Dhcp6": cfg})
+
+    def reservation_del_v6_by_duid(self, subnet_id: int, duid: str) -> None:
+        """Remove a DHCPv6 reservation by DUID via config-set."""
+        cfg = self.config_get("dhcp6")["Dhcp6"]
+        for subnet in cfg.get("subnet6", []):
+            if subnet.get("id") == subnet_id:
+                subnet["reservations"] = [
+                    r for r in subnet.get("reservations", [])
+                    if r.get("duid") != duid
+                ]
+                break
+        self.query("config-set", service="dhcp6", arguments={"Dhcp6": cfg})
 
     def reservation_get_all(self, subnet_id: int) -> list[dict]:
         try:

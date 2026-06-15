@@ -122,16 +122,6 @@ class CollisionPolicyCycle(Scenario):
 
     def setup(self, ctx: ChaosContext) -> None:
         self._original = _get_config(ctx, COLLISION_PATH)
-        # Requires host_cmds hook for reservation-add; skip if not loaded.
-        from tools.lib.kea import KeaError
-        try:
-            ctx.kea.query("subnet4-reservation-get",
-                          arguments={"subnet-id": 99999, "ip-address": "0.0.0.0"})
-        except KeaError as exc:
-            if "not supported" in str(exc):
-                raise RuntimeError(
-                    "host_cmds hook not loaded — enable it in kea-dhcp4.conf to run this scenario"
-                )
 
     def run(self, ctx: ChaosContext) -> None:
         self._results: dict[str, dict] = {}
@@ -145,8 +135,8 @@ class CollisionPolicyCycle(Scenario):
             host_a = f"cp-{policy[:2]}-first"
             host_b = f"cp-{policy[:2]}-second"
 
-            ctx.kea.reservation_add(subnet_id, ip, f"aa:cc:pp:{policy[:1]}:01:01", host_a)
-            ctx.kea.lease4_add(ip, f"aa:cc:pp:{policy[:1]}:02:02", host_b,
+            ctx.kea.reservation_add(subnet_id, ip, f"aa:cc:0a:{ord(policy[0]):02x}:01:01", host_a)
+            ctx.kea.lease4_add(ip, f"aa:cc:0a:{ord(policy[0]):02x}:02:02", host_b,
                                valid_lft=600, subnet_id=subnet_id)
 
             ctx.run_sync("static")

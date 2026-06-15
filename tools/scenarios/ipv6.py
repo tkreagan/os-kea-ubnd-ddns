@@ -243,15 +243,6 @@ class DualStackFamilyIsolation(Scenario):
 
     def setup(self, ctx: ChaosContext) -> None:
         ctx.require_dhcp6()
-        from tools.lib.kea import KeaError
-        try:
-            ctx.kea.query("subnet4-reservation-get",
-                          arguments={"subnet-id": 99999, "ip-address": "0.0.0.0"})
-        except KeaError as exc:
-            if "not supported" in str(exc):
-                raise RuntimeError(
-                    "host_cmds hook not loaded — enable it in kea-dhcp4.conf to run this scenario"
-                )
 
     def run(self, ctx: ChaosContext) -> None:
         hostname, ipv4 = ctx.alloc_host("-fiso")
@@ -311,30 +302,14 @@ class Ipv6MultipleAddresses(Scenario):
 
     def setup(self, ctx: ChaosContext) -> None:
         ctx.require_dhcp6()
-        from tools.lib.kea import KeaError
-        try:
-            ctx.kea.query("subnet6-reservation-get", service="dhcp6",
-                          arguments={"subnet-id": 99999, "ip-address": "::"})
-        except KeaError as exc:
-            if "not supported" in str(exc):
-                raise RuntimeError(
-                    "host_cmds hook not loaded — enable it in kea-dhcp6.conf to run this scenario"
-                )
 
     def run(self, ctx: ChaosContext) -> None:
         hostname, ipv6a = ctx.alloc_v6_host("-multi", prefix=ctx.v6_prefix)
         _, ipv6b = ctx.alloc_v6_host("-multi2", prefix=ctx.v6_prefix)
 
         subnet6 = ctx.subnet6_id()
-        # Add a reservation with two addresses via the host_cmds API.
-        ctx.kea.query("subnet6-reservation-add", service="dhcp6", arguments={
-            "reservation": {
-                "subnet-id": subnet6,
-                "duid": _TEST_DUID,
-                "hostname": hostname,
-                "ip-addresses": [ipv6a, ipv6b],
-            }
-        })
+        ctx.kea.reservation_add_v6_multi(subnet6, _TEST_DUID, hostname,
+                                         [ipv6a, ipv6b])
         self._hostname = hostname
         self._ipv6a = ipv6a
         self._ipv6b = ipv6b
@@ -357,11 +332,7 @@ class Ipv6MultipleAddresses(Scenario):
 
     def cleanup(self, ctx: ChaosContext) -> None:
         try:
-            ctx.kea.query("subnet6-reservation-del", service="dhcp6", arguments={
-                "subnet-id": ctx.subnet6_id(),
-                "identifier-type": "duid",
-                "identifier": _TEST_DUID,
-            })
+            ctx.kea.reservation_del_v6_by_duid(ctx.subnet6_id(), _TEST_DUID)
         except Exception:
             pass
         ctx.reset_state(v6=True)

@@ -98,6 +98,7 @@ def _collect_writes(
     unbound_fwd: Dict[str, Set[str]],
     prior_claim_keys: Set[str],
     logger,
+    allow_multi_ip: bool = False,
 ) -> Tuple[List[str], List[str], Set[str], int, int]:
     """Compute the unbound-control adds + removes for ONE pass (one rtype).
 
@@ -109,7 +110,8 @@ def _collect_writes(
     race within the same batch):
 
       Phase 1 -- filter (sanity / host_entries / prior_claim_keys) then resolve a
-                 SINGLE winner per FQDN under the policy.
+                 SINGLE winner per FQDN under the policy (or ALL IPs when
+                 allow_multi_ip=True, for multi-address static reservations).
       Phase 2 -- emit one A/AAAA (+PTR) per winner; emit a remove first only when
                  Unbound currently holds something other than exactly the winner.
 
@@ -122,6 +124,10 @@ def _collect_writes(
                         block a v6 lease.
       unbound_fwd       {key -> {ip}} snapshot for THIS family only, so collision
                         checks never cross A/AAAA.
+      allow_multi_ip    When True, multiple IPs for the same hostname are all
+                        emitted rather than resolved to one winner. Used for the
+                        static reservation pass where a single DHCPv6 reservation
+                        can legitimately carry multiple addresses.
 
     `allow` policy is purely additive (no dedup, no removes, no snapshot) and
     returns an empty won_keys -- leases are never blocked by reservations under
@@ -155,7 +161,10 @@ def _collect_writes(
             _emit_add(hostname, ip, ttl)
         return to_add, to_remove, won_keys, n_added, n_skipped
 
-    # first_wins / last_wins: Phase 1 -- resolve one winner per FQDN.
+    # first_wins / last_wins: Phase 1 -- resolve winner(s) per FQDN.
+    # allow_multi_ip: collect all IPs per key (multi-address static reservation).
+    # otherwise: resolve a single winner under the collision policy.
+    winners_multi: Dict[str, List[Tuple[str, str, Optional[int]]]] = {}
     winners: Dict[str, Tuple[str, str, Optional[int]]] = {}
     order: List[str] = []  # first-seen key order, for deterministic emit
     for hostname, ip, _rt, ttl in records:
@@ -171,35 +180,57 @@ def _collect_writes(
             logger.debug("Reservation beats lease for %s", hostname)
             n_skipped += 1
             continue
-        if key not in winners:
-            winners[key] = (hostname, ip, ttl)
-            order.append(key)
-        elif policy == "last_wins":
-            # records are pre-sorted by cltt ascending, so a later entry has the
-            # higher cltt and wins.
-            logger.info("Collision last_wins: %s -> %s (was %s)",
-                        hostname, ip, winners[key][1])
-            winners[key] = (hostname, ip, ttl)
-            n_skipped += 1
-        else:  # first_wins: keep the earliest-seen (lowest cltt)
-            logger.info("Collision first_wins: %s keeps %s, skips %s",
-                        hostname, winners[key][1], ip)
-            n_skipped += 1
+        if allow_multi_ip:
+            if key not in winners_multi:
+                winners_multi[key] = []
+                order.append(key)
+            winners_multi[key].append((hostname, ip, ttl))
+        else:
+            if key not in winners:
+                winners[key] = (hostname, ip, ttl)
+                order.append(key)
+            elif policy == "last_wins":
+                # records are pre-sorted by cltt ascending, so a later entry has
+                # the higher cltt and wins.
+                logger.info("Collision last_wins: %s -> %s (was %s)",
+                            hostname, ip, winners[key][1])
+                winners[key] = (hostname, ip, ttl)
+                n_skipped += 1
+            else:  # first_wins: keep the earliest-seen (lowest cltt)
+                logger.info("Collision first_wins: %s keeps %s, skips %s",
+                            hostname, winners[key][1], ip)
+                n_skipped += 1
 
     # Phase 2 -- emit. Replace only when Unbound's current set for this name
-    # differs from exactly {winner}; otherwise the add alone is idempotent.
-    for key in order:
-        hostname, ip, ttl = winners[key]
-        existing = unbound_fwd.get(key, set())
-        if existing and existing != {ip}:
-            to_remove.append(hostname)
-            if synthesize_ptr:
-                for old_ip in existing - {ip}:
-                    ptr = reverse_ptr(old_ip)
-                    if ptr:
-                        to_remove.append(ptr)
-        _emit_add(hostname, ip, ttl)
-        won_keys.add(key)
+    # differs from exactly the winner set; otherwise the add alone is idempotent.
+    if allow_multi_ip:
+        for key in order:
+            entries = winners_multi[key]
+            new_ips = {e[1] for e in entries}
+            existing = unbound_fwd.get(key, set())
+            if existing and existing != new_ips:
+                to_remove.append(entries[0][0])
+                if synthesize_ptr:
+                    for old_ip in existing - new_ips:
+                        ptr = reverse_ptr(old_ip)
+                        if ptr:
+                            to_remove.append(ptr)
+            for hostname, ip, ttl in entries:
+                _emit_add(hostname, ip, ttl)
+            won_keys.add(key)
+    else:
+        for key in order:
+            hostname, ip, ttl = winners[key]
+            existing = unbound_fwd.get(key, set())
+            if existing and existing != {ip}:
+                to_remove.append(hostname)
+                if synthesize_ptr:
+                    for old_ip in existing - {ip}:
+                        ptr = reverse_ptr(old_ip)
+                        if ptr:
+                            to_remove.append(ptr)
+            _emit_add(hostname, ip, ttl)
+            won_keys.add(key)
 
     return to_add, to_remove, won_keys, n_added, n_skipped
 
@@ -276,7 +307,7 @@ def sync_static(
 
         to_add, to_remove, won, n_added, n_skipped = _collect_writes(
             records, rtype, host_entries, policy, synthesize_ptr,
-            unbound_fwd, set(), logger,
+            unbound_fwd, set(), logger, allow_multi_ip=True,
         )
         all_to_add.extend(to_add)
         all_to_remove.extend(to_remove)

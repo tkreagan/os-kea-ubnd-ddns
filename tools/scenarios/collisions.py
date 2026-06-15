@@ -22,17 +22,7 @@ class ReservationLeaseCollision(Scenario):
     tags = ["collision"]
 
     def setup(self, ctx: ChaosContext) -> None:
-        # Probe whether host_cmds hook is loaded; skip gracefully if not.
-        from tools.lib.kea import KeaError
-        try:
-            # Use a no-op query that will fail with result=1 (unknown command)
-            # if host_cmds isn't loaded, or result=2 (missing args) if it is.
-            ctx.kea.query("subnet4-reservation-get", arguments={"subnet-id": 99999, "ip-address": "0.0.0.0"})
-        except KeaError as exc:
-            if "not supported" in str(exc):
-                raise RuntimeError(
-                    "host_cmds hook not loaded — enable it in kea-dhcp4.conf to run this scenario"
-                )
+        pass
 
     def run(self, ctx: ChaosContext) -> None:
         _, ip = ctx.alloc_host("-col")
@@ -42,9 +32,9 @@ class ReservationLeaseCollision(Scenario):
         self._host_b = "collision-leased"
 
         # Add reservation
-        ctx.kea.reservation_add(subnet_id, ip, "aa:bb:cc:co:ll:01", self._host_a)
+        ctx.kea.reservation_add(subnet_id, ip, "aa:bb:cc:c0:1a:01", self._host_a)
         # Add lease for same IP with different name
-        ctx.kea.lease4_add(ip, "aa:bb:cc:co:ll:02", self._host_b,
+        ctx.kea.lease4_add(ip, "aa:bb:cc:c0:1a:02", self._host_b,
                            valid_lft=3600, subnet_id=subnet_id)
         ctx.event("collision_injected", ip=ip, reserved=self._host_a, leased=self._host_b)
 
