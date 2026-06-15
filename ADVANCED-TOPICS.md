@@ -1,9 +1,10 @@
 # Advanced Topics
 
 Operator and developer reference for edge cases, known limitations, and
-non-obvious behavior in the kea-unbound plugin. Covers IPv6/DHCPv6 specifics,
-dual-stack coexistence, DNS suffix lifecycle, and Kea DDNS configuration options
-with subtle effects on the live and sync paths.
+non-obvious behavior in the kea-ubnd-ddns plugin. Covers shared networks,
+clients without hostnames, IPv6/DHCPv6 specifics, dual-stack coexistence,
+DNS suffix lifecycle, and Kea DDNS configuration options with subtle effects
+on the live and sync paths.
 
 ---
 
@@ -18,7 +19,7 @@ field returned by `lease6-get-all` and stored in `kea-leases6.csv`:
 | 1 | IA_TA (Temporary Address) | **Blocked.** Temporary addresses are not intended for stable DNS entries. |
 | 2 | IA_PD (Prefix Delegation) | **Blocked.** The "address" field is a network prefix, not a host address. |
 
-The filter is in `_normalize_raw_lease()` in `lib/keaunbound_sync.py`. Any lease
+The filter is in `_normalize_raw_lease()` in `lib/keaubnd_sync.py`. Any lease
 with `type != 0` returns `None` immediately, before hostname or IP validation.
 
 **Why IA_TA?** IA_TA is essentially unused in production — SLAAC privacy
@@ -69,7 +70,7 @@ fd00::1ab
 **In code:** `ipaddress.ip_address(addr).reverse_pointer` generates this
 correctly for any valid IPv6 address. Do not hand-roll this calculation.
 
-**Decoding arpa → IP:** `_arpa_to_ip(ptr_name)` in `lib/keaunbound_sync.py`
+**Decoding arpa → IP:** `_arpa_to_ip(ptr_name)` in `lib/keaubnd_sync.py`
 reverses this and normalizes via `ipaddress.ip_address()`. The result is always
 Python's compressed canonical form (e.g., `fd00::1ab`), which matches the form
 Kea uses in its lease and reservation data.
@@ -79,7 +80,7 @@ rdata in compressed form and PTR owner names in full 32-nibble form. The
 plugin's `unbound_list_local_data()` parser reads both correctly.
 
 **`_arpa_to_ip` is the single canonical implementation.** It lives in
-`lib/keaunbound_sync.py` and is imported by both `kea-unbound-ddns.py` and
+`lib/keaubnd_sync.py` and is imported by both `kea-ubnd-ddns.py` and
 `local-data-audit.py`. Do not add local copies.
 
 ---
@@ -242,7 +243,7 @@ would violate that invariant.
 **Manual remediation:** after changing `ddns-qualifying-suffix`:
 
 ```sh
-configctl keaunbound sync_dynamic   # repopulate new-suffix records
+configctl keaubnd sync_dynamic   # repopulate new-suffix records
 unbound-control local_data_remove host.old.example.com
 unbound-control local_data_remove <PTR for old name>
 ```
@@ -255,6 +256,107 @@ cleaning up automatically within one lease period. Then disable
 
 ---
 
+## Shared Networks (Manual Config)
+
+OPNsense does not expose shared-network configuration in its Kea DHCP GUI
+([opnsense/core#9427](https://github.com/opnsense/core/issues/9427)). If you
+configure shared networks by hand with `manual_config` enabled, here is what the
+plugin supports and what it does not.
+
+**What works:**
+
+- **Subnet-level `ddns-qualifying-suffix` inside shared networks** — the plugin
+  reads each subnet's suffix from Kea's `config-get` response, including subnets
+  that live inside a shared-network object. Suffix inheritance follows the standard
+  waterfall: subnet → shared-network → global → OPNsense system domain. A subnet
+  with no explicit suffix inherits from the shared-network; a subnet with an
+  explicit suffix uses that, ignoring the shared-network's value.
+
+- **Subnet-level `ddns-send-updates` inside shared networks** — the same
+  inheritance applies. A shared-network with `"ddns-send-updates": false` disables
+  DDNS registration for all child subnets unless a subnet explicitly overrides it
+  back to `true`. Both the sync path and the clean path honour this.
+
+- **Subnet-level reservations inside shared networks** — reservations placed inside
+  a subnet that is itself inside a shared-network (`shared-networks[].subnet4[].reservations[]`)
+  are picked up correctly. The sync path walks the nested structure.
+
+**What does not work:**
+
+- **Shared-network-level reservations** — reservations placed *directly on the
+  shared-network object* (`shared-networks[].reservations[]`, not inside a child
+  subnet) are not supported and will be silently ignored. Kea allows this placement
+  but ISC recommends against it for IP-address reservations. OPNsense does not
+  generate this structure. If you have such reservations, move them to the
+  appropriate child subnet.
+
+- **DDNS for subnets inside shared networks is not end-to-end tested** — Kea's D2
+  routes NCRs by matching the FQDN against configured forward domains; as long as
+  the qualifying suffix for a shared-network subnet matches a D2 forward domain, NCRs
+  should route correctly. However, this path has only been verified via the sync
+  path, not via a live DHCP exchange from a client in a shared-network subnet.
+
+The **Config Check** tab flags shared-network subnets with an advisory notice.
+
+---
+
+## Clients Without Hostnames and Generated Names
+
+**The problem:** every DNS record the plugin creates is derived from a hostname.
+A client that sends no hostname in its DHCP request — common on phones and devices
+with MAC address randomization — gets no DNS record, regardless of the override
+settings (`ddns-override-no-update`, `ddns-override-client-update`). Those flags
+only act when the client supplies a name; they cannot manufacture one from nothing.
+
+**Kea's solution:** two options work together to generate names for nameless
+clients. Both are available only in manual config mode (OPNsense does not expose
+them in the GUI as of 26.1).
+
+`ddns-replace-client-name` controls when Kea generates a synthetic name:
+
+| Mode | When Kea generates a name |
+|------|--------------------------|
+| `never` *(default)* | Never — use the client-supplied name as-is |
+| `when-not-present` | When the client sends no name |
+| `always` | Always — discard whatever the client sends |
+| `when-present` | Only when the client sends a name (replace it) |
+
+`ddns-generated-prefix` sets the prefix for generated names (default `"myhost"`).
+Generated FQDNs follow the format `<prefix>-<dashed-IP>.<qualifying-suffix>` — for
+example, `myhost-192-168-1-100.home.lan` for a client at `192.168.1.100`. For IPv6,
+the dashed form uses `--` where `::` appears: `kea6host-fd00--102.home.lan`.
+
+**Sync path gap:** when Kea generates a name, it places the generated FQDN in the
+NCR packet (so the live path — `kea-dhcp-ddns` → listener — registers it
+correctly). However, Kea stores the *original client name* (or empty string) in
+the lease database. The sync path reads the lease database; it sees an empty
+hostname and skips the lease. This means:
+
+- While Kea and D2 are running: the generated name is in Unbound, registered via
+  the live path.
+- After an Unbound restart (which flushes all runtime `local_data`): the sync path
+  cannot restore the record. It stays gone until the client's next lease renewal
+  triggers a new NCR.
+
+**Mitigation:** enable `ddns-update-on-renew: true` on subnets that use generated
+names. This causes Kea to re-assert DNS on every genuine renewal, which limits the
+window after an Unbound restart where records are missing to at most one lease T1
+interval.
+
+> **Cache-threshold caveat:** Kea's lease caching (`cache-threshold`, default
+> `0.25`) reuses a lease renewed within `0.25 × valid-lifetime` and performs *no*
+> DDNS, so DNS is only refreshed on renewals outside that window (~1000s with a
+> 4000s lease). A normal renewal at half the lease lifetime is outside the window
+> and works.
+
+**Recommendation:** if every device must be resolvable, configure
+`ddns-replace-client-name: when-not-present` and `ddns-generated-prefix:
+<something>` in manual config mode, combined with `ddns-update-on-renew: true`.
+Devices that supply a real hostname continue to use it; nameless devices get a
+deterministic generated name that the live path keeps fresh.
+
+---
+
 ## Known Limitations Summary
 
 | Limitation | Notes |
@@ -262,6 +364,8 @@ cleaning up automatically within one lease period. Then disable
 | **SLAAC addresses** | Not supported by design — Kea never sees SLAAC clients |
 | **DDNS suffix staleness** | Changing `ddns-qualifying-suffix` leaves old-suffix records until leases expire. Not auto-detectable; see section above |
 | **Shared-network-level reservations** | `shared-networks[].reservations[]` (not inside a child subnet) are silently ignored. Subnet-level reservations inside shared networks work correctly |
+| **DDNS for shared-network subnets** | Not end-to-end tested via a live DHCP exchange; verified via the sync path only |
+| **Clients without hostnames** | No DNS record is created — override flags only act when the client supplies a name. Use `ddns-replace-client-name` + `ddns-generated-prefix` in manual config mode; see section above |
 | **`ddns-override-no-update` N-bit** | The sync path does not respect a client's explicit opt-out. If the lease has a hostname, it is synced |
 | **IA_TA and IA_PD leases** | Explicitly blocked. Only IA_NA (type 0) produces DNS records |
 | **Generated names after restart** | Kea stores the original client name in the lease, not the generated one. The sync path cannot restore generated-name records after an Unbound restart |

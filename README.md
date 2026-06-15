@@ -125,7 +125,7 @@ back to check **Enabled** and apply.
 
 #### Option A — configure via the plugin (recommended)
 
-Open the **Kea Config Check** tab (**Services → Kea Unbound DDNS → Kea Config
+Open the **Config Check** tab (**Services → Kea Unbound DDNS → Kea Config
 Check**) and click **Configure All Subnets for Kea Unbound DDNS**. The plugin
 reads your live Kea configuration, fills in the correct DDNS settings for every
 subnet (server address, port, forward zone, qualifying suffix, and recommended
@@ -191,7 +191,7 @@ send updates.
 
 #### Validate your Kea configuration
 
-Open the **Kea Config Check** tab (**Services → Kea Unbound DDNS → Kea Config
+Open the **Config Check** tab (**Services → Kea Unbound DDNS → Kea Config
 Check**). It reads the live Kea configuration and flags common problems — missing
 trailing dots on zone names, subnets with DDNS disabled, kea-dhcp-ddns listener
 state. Resolve any errors shown before proceeding.
@@ -232,7 +232,7 @@ jobs — write to the same log facility.
 
 | Symptom | Likely cause | Where to check |
 |---|---|---|
-| No records appear after a new lease | kea-dhcp-ddns not running, or forward zone missing trailing dot | **Kea Config Check** tab — look for errors |
+| No records appear after a new lease | kea-dhcp-ddns not running, or forward zone missing trailing dot | **Config Check** tab — look for errors |
 | Daemon shows stopped / not running | Startup preconditions not met (no DDNS-enabled subnet found, or Unbound not reachable) | **Log File** tab for the specific precondition failure |
 | PTR records missing | Reverse zone not set on the subnet, or **Synthesize PTR records** disabled | Subnet DDNS settings → DNS reverse zone; **Settings** tab |
 | Records disappear after Unbound restart | Expected — Unbound flushes runtime `local_data` on restart; the daemon detects the restart and reconciles within seconds | **Lease Audit** tab should repopulate automatically |
@@ -322,7 +322,7 @@ in that topology.
 | Tab | Purpose |
 |---|---|
 | **Settings** | Enable/disable the plugin; configure sync, cleanup, and listen port |
-| **Kea Config Check** | Verify DDNS is configured in each Kea subnet; shows the kea-dhcp-ddns listener state and flags common mistakes (missing trailing dots, missing forward zones) |
+| **Config Check** | Verify DDNS is configured in each Kea subnet; shows the kea-dhcp-ddns listener state and flags common mistakes (missing trailing dots, missing forward zones) |
 | **Lease Audit** | Full view of all DNS records across Kea reservations, active leases, Unbound local_data, and Host Overrides; previews what cleanup would remove; manual sync/clean buttons |
 | **Log File** | Unified log for the daemon, sync, audit, and cleanup scripts |
 
@@ -334,7 +334,7 @@ Tested on OPNsense 26.1 with Kea DHCP4 and DHCP6:
 - Static reservation sync (IPv4 and IPv6)
 - Active lease sync with TTL matching remaining lease lifetime
 - Lease Audit tab with per-record PTR state tracking
-- Kea Config Check tab (forward zones, TSIG key detection, trailing-dot validation)
+- Config Check tab (forward zones, TSIG key detection, trailing-dot validation)
 - Scheduled stale-record cleanup
 - OPNsense Host Override guard (never removes managed entries)
 - Resident daemon with self-healing: detects Kea/Unbound restarts and automatically reconciles DNS records
@@ -360,7 +360,7 @@ Tested on OPNsense 26.1 with Kea DHCP4 and DHCP6:
   supported`). UDP is the only supported protocol. kea-dhcp4 continues to serve leases
   with no log warning when D2 is down; monitor D2 separately.
 - **Kea connection auto-discovery** — the plugin reads each Kea daemon's active config file to find its control socket (unix or HTTP) and falls back to the standard OPNsense socket paths. Manual connection override is not exposed in the UI and is deferred; it may not be necessary given reliable auto-discovery. HTTP socket support is deferred until OPNsense enables HTTP control sockets or deprecates unix sockets.
-- **kea-dhcp-ddns connection** — the Kea Config Check tab reads `kea-dhcp-ddns.conf` directly rather than querying a control socket, because OPNsense does not provision a control socket or HTTP listener for `kea-dhcp-ddns` (it is not exposed in the web GUI and requires a manual config edit to enable).
+- **kea-dhcp-ddns connection** — the Config Check tab reads `kea-dhcp-ddns.conf` directly rather than querying a control socket, because OPNsense does not provision a control socket or HTTP listener for `kea-dhcp-ddns` (it is not exposed in the web GUI and requires a manual config edit to enable).
 - **Global reservations not tested** — ISC recommends against assigning IP addresses in Kea's
   global reservation scope (`Dhcp4.reservations`); that scope is designed for options and
   hostname assignment only, not IP binding. The plugin's static sync reads `ip-address` from
@@ -374,106 +374,11 @@ Tested on OPNsense 26.1 with Kea DHCP4 and DHCP6:
 - **Not yet in OPNsense community plugins** — installation is manual for now (see
   [Installation](#installation)).
 
-## Advanced configuration notes
+## Advanced topics
 
-### Shared networks (manual config)
-
-OPNsense does not expose shared-network configuration in its Kea DHCP GUI
-([opnsense/core#9427](https://github.com/opnsense/core/issues/9427)). If you
-configure shared networks by hand with `manual_config` enabled, here is what the
-plugin supports and what it does not.
-
-**What works:**
-
-- **Subnet-level `ddns-qualifying-suffix` inside shared networks** — the plugin
-  reads each subnet's suffix from Kea's `config-get` response, including subnets
-  that live inside a shared-network object. Suffix inheritance follows the standard
-  waterfall: subnet → shared-network → global → OPNsense system domain. A subnet
-  with no explicit suffix inherits from the shared-network; a subnet with an
-  explicit suffix uses that, ignoring the shared-network's value. Verified on real
-  Kea API responses in testing.
-
-- **Subnet-level `ddns-send-updates` inside shared networks** — the same
-  inheritance applies. A shared-network with `"ddns-send-updates": false` disables
-  DDNS registration for all child subnets unless a subnet explicitly overrides it
-  back to `true`. Both the sync path and the clean path honour this.
-
-- **Subnet-level reservations inside shared networks** — reservations placed inside
-  a subnet that is itself inside a shared-network (`shared-networks[].subnet4[].reservations[]`)
-  are picked up correctly. The sync path walks the nested structure.
-
-**What does not work:**
-
-- **Shared-network-level reservations** — reservations placed *directly on the
-  shared-network object* (`shared-networks[].reservations[]`, not inside a child
-  subnet) are not supported and will be silently ignored. Kea allows this placement
-  but ISC recommends against it for IP-address reservations. OPNsense does not
-  generate this structure. If you have such reservations, move them to the
-  appropriate child subnet.
-
-- **DDNS for subnets inside shared networks is not end-to-end tested** — Kea's D2
-  routes NCRs by matching the FQDN against configured forward domains; as long as
-  the qualifying suffix for a shared-network subnet matches a D2 forward domain, NCRs
-  should route correctly. However, this path has only been verified via the sync
-  path, not via a live DHCPv6/DHCPv4 exchange from a client in a shared-network subnet.
-
-The Kea Config Check tab flags shared-network subnets with an advisory notice.
-
----
-
-### Clients without hostnames and generated names
-
-**The problem:** every DNS record the plugin creates is derived from a hostname.
-A client that sends no hostname in its DHCP request — common on phones and devices
-with MAC address randomization — gets no DNS record, regardless of the override
-settings (`ddns-override-no-update`, `ddns-override-client-update`). Those flags
-only act when the client supplies a name; they cannot manufacture one from nothing.
-This was confirmed in testing (test G1: all three override flags ON, client sent no
-name, result: lease allocated, no DNS record).
-
-**Kea's solution:** two options work together to generate names for nameless clients.
-Both are available only in manual config mode (OPNsense does not expose them in the
-GUI as of 26.1).
-
-`ddns-replace-client-name` controls when Kea generates a synthetic name:
-
-| Mode | When Kea generates a name |
-|------|--------------------------|
-| `never` *(default)* | Never — use the client-supplied name as-is |
-| `when-not-present` | When the client sends no name |
-| `always` | Always — discard whatever the client sends |
-| `when-present` | Only when the client sends a name (replace it) |
-
-`ddns-generated-prefix` sets the prefix for generated names (default `"myhost"`).
-Generated FQDNs follow the format `<prefix>-<dashed-IP>.<qualifying-suffix>` — for
-example, `myhost-192-168-1-100.home.lan` for a client at `192.168.1.100`. For IPv6,
-the dashed form uses `--` where `::` appears: `kea6host-fd00--102.home.lan`.
-
-**Important limitation — sync path divergence:** when Kea generates a name, it
-places the generated FQDN in the NCR packet (so the live path — `kea-dhcp-ddns` →
-listener — registers it correctly). However, Kea stores the *original client name*
-(or empty string) in the lease database. The sync path (`kea-sync.py`) reads the
-lease database; it sees an empty hostname and skips the lease. This means:
-
-- While Kea and D2 are running: the generated name is in Unbound, registered via the live path.
-- After an Unbound restart (which flushes all runtime `local_data`): the sync path
-  cannot restore the record. It stays gone until the client's next lease renewal
-  triggers a new NCR — or until `ddns-update-on-renew` fires a renewal-triggered NCR.
-
-**Mitigation:** enable `ddns-update-on-renew: true` on subnets that use generated
-names. This causes Kea to re-assert DNS on every genuine renewal (subject to the
-`cache-threshold` caveat noted in the configuration guide above), which limits the
-window after an Unbound restart where records are missing. The window is at most
-one lease T1 interval.
-
-**Recommendation for this deployment:** if every device must be resolvable, the
-most reliable approach is to configure `ddns-replace-client-name: when-not-present`
-and `ddns-generated-prefix: <something>` in manual config mode, combined with
-`ddns-update-on-renew: true`. Devices that supply a real hostname continue to use
-it; nameless devices get a deterministic generated name that the live path keeps
-fresh.
-
----
+Shared networks, clients without hostnames, DHCPv6 behavior, IPv6 PTR encoding,
+DNS suffix staleness, and a known-limitations summary are covered in
+[ADVANCED-TOPICS.md](ADVANCED-TOPICS.md).
 
 ## Development and testing
 
