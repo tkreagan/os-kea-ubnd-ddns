@@ -14,7 +14,7 @@ A clear description of what is happening and what you expected to happen.
 |---|---|
 | OPNsense | e.g. 26.1 |
 | Kea DHCP | e.g. 2.6.1 |
-| os-kea-unbound | e.g. 0.9 |
+| os-kea-ubnd-ddns | e.g. 0.96 |
 
 ## Configuration
 
@@ -41,14 +41,14 @@ Paste relevant output from **Services → Kea Unbound DDNS → Log File**, or fr
 the shell:
 
 ```
-sudo tail -n 50 /var/log/keaunbound/keaunbound_$(date +%Y%m%d).log
+sudo tail -n 50 /var/log/keaubnd/keaubnd_$(date +%Y%m%d).log
 ```
 
 If the issue relates to DNS registration state, paste the output of the Lease
 Audit tab or:
 
 ```
-sudo /usr/local/opnsense/scripts/keaunbound/local-data-audit.py --report-json | python3 -m json.tool
+sudo /usr/local/opnsense/scripts/keaubnd/local-data-audit.py --report-json | python3 -m json.tool
 ```
 
 ## Additional context

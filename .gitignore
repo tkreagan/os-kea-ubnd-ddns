@@ -8,15 +8,21 @@ tests/results/
 *.txz
 *.pkg
 
-# Private agent/dev working notes — not for the repo.
+# Private dev/agent files — not for the public repo.
 CLAUDE.md
 THIS_SESSION_SUMMARY.md
 COMPLETE_PLUGIN_OVERVIEW.md
 KEA_CONFIG_CHECK_SUMMARY.md
 STATUS_VIEW_SUMMARY.md
 PLUGIN_BRIEF.md
-tools/.env
 
-tools/results/
-tools/__pycache__/
-tools/**/__pycache__/
+# Dev tooling and internal docs — private infrastructure references.
+tools/
+int-docs/
+
+# Claude Code session state.
+.claude/
+
+# Python virtualenv and test caches.
+.venv/
+.pytest_cache/
