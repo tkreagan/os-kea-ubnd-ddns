@@ -78,6 +78,15 @@ _build_on_box() {
         install -m 644 "$f" "$dest"
     done
 
+    # Version metadata: required by register.php so OPNsense tracks this as a
+    # "configured" plugin in config.xml (<system><firmware><plugins>). Without
+    # this file, register.php install can't verify the package and the Firmware >
+    # Plugins page shows the plugin as "(misconfigured)" instead of "(installed)".
+    mkdir -p "$STAGE/usr/local/opnsense/version"
+    printf '{\n    "product_id": "%s",\n    "product_name": "kea-ubnd-ddns",\n    "product_tier": "3",\n    "product_version": "%s",\n    "product_website": "https://github.com/tkreagan/os-kea-ubnd-ddns"\n}\n' \
+        "$PKGNAME" "$VERSION" \
+        > "$STAGE/usr/local/opnsense/version/kea-ubnd-ddns"
+
     # ── Verify no macOS artifacts in staging area ─────────────────────────────
     BAD=$(find "$STAGE" \( -name ".DS_Store" -o -name "._*" -o -name "*.pyc" \
                -o -name "__pycache__" \) 2>/dev/null || true)
@@ -125,6 +134,10 @@ pre_deinstall = json.dumps(
 post_deinstall = json.dumps(
     "#!/bin/sh\n"
     "# Remove runtime state left after pkg deletes installed files.\n"
+    "# Unregister from config.xml <system><firmware><plugins> so the Firmware\n"
+    "# Plugins page no longer lists this as a configured (missing) plugin.\n"
+    "/usr/local/opnsense/scripts/firmware/register.php remove os-kea-ubnd-ddns"
+    " >/dev/null 2>&1 || true\n"
     "rm -rf /var/run/keaubnd\n"
     "service configd restart >/dev/null 2>&1 || true\n"
     "printf 'kea-ubnd-ddns removed.\\n"
@@ -135,9 +148,13 @@ post_deinstall = json.dumps(
 post_install = json.dumps(
     "#!/bin/sh\n"
     "# Canonical OPNsense post-install sequence (mirrors what plugins.mk generates):\n"
-    "#  1. configd restart  — picks up new actions_keaubnd.conf\n"
-    "#  2. run_migrations   — handles any future model version migrations\n"
-    "#  3. rc.configure_plugins — flushes ACL cache, menu cache, model caches; reloads syslog\n"
+    "#  1. register.php install — adds to config.xml <system><firmware><plugins> so\n"
+    "#     the Firmware > Plugins page shows (installed) instead of (misconfigured)\n"
+    "#  2. configd restart  — picks up new actions_keaubnd.conf\n"
+    "#  3. run_migrations   — handles any future model version migrations\n"
+    "#  4. rc.configure_plugins — flushes ACL cache, menu cache, model caches; reloads syslog\n"
+    "/usr/local/opnsense/scripts/firmware/register.php install os-kea-ubnd-ddns"
+    " >/dev/null 2>&1 || true\n"
     "if [ -f /usr/local/etc/rc.d/configd ]; then /usr/local/etc/rc.d/configd restart; fi\n"
     "if [ -f /usr/local/opnsense/mvc/script/run_migrations.php ]; then"
     " /usr/local/opnsense/mvc/script/run_migrations.php OPNsense/KeaUbnd; fi\n"
