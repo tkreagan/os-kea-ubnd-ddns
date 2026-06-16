@@ -63,16 +63,18 @@ never touched by either path.
 ### Option A — pre-built package (recommended)
 
 Download the `.pkg` file from the
-[latest release](https://github.com/tkreagan/os-kea-ubnd-ddns/releases/latest),
-copy it to your OPNsense box, and install it with `pkg`:
+[latest release](https://github.com/tkreagan/os-kea-ubnd-ddns/releases/latest)
+and copy it to your OPNsense box (e.g. via `scp`). Then install it from the
+directory where you saved it:
 
 ```sh
-# On OPNsense (as root or via sudo):
-pkg install os-kea-ubnd-ddns-0.96.pkg
+# On OPNsense, in the directory where you copied the file (as root or via sudo):
+pkg install ./os-kea-ubnd-ddns-0.96.pkg
 ```
 
 No package repository is required — OPNsense's `pkg` accepts a local `.pkg` file
-directly. The plugin appears under **Services → Kea Unbound DDNS** after
+directly. The `./` prefix tells `pkg` to use the local file rather than searching
+a repository. The plugin appears under **Services → Kea Unbound DDNS** after
 installation.
 
 ### Option B — build from source
