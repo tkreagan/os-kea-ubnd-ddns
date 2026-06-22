@@ -14,6 +14,8 @@ Shutdown sequence (applied to each daemon independently):
   5. Remove pidfiles.
 """
 
+from __future__ import annotations
+
 import os
 import signal
 import subprocess
