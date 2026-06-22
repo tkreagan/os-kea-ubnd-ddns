@@ -46,9 +46,12 @@ pytestmark = pytest.mark.unit
     ("a.b.c.d",                 True),
     ("x1.example.com",          True),
     ("a" * 63 + ".lan",         True),   # 63-char label is ok
+    # underscores are accepted — DHCP clients (IoT/Android/Windows) send names
+    # like "aircon_wifi"; Unbound stores/serves them fine.
+    ("aircon_wifi.home.lan",    True),
+    ("valid._svc.lan",          True),   # underscore in a non-first label
     # all-label validation: invalid chars in non-first labels
     ("valid.evil!label.lan",    False),
-    ("valid._svc.lan",          False),
     ("valid.bad-.lan",          False),
     ("valid.-bad.lan",          False),
     ("a" * 64 + ".lan",         False),  # 64-char label exceeds RFC 1035 max
@@ -60,9 +63,9 @@ pytestmark = pytest.mark.unit
     # all-numeric
     ("192.168.1.1",             False),
     ("10.0.0.1",                False),
+    ("_svc.lan",                True),   # leading underscore is allowed
     # invalid first label
     ("-bad.lan",                False),
-    ("_svc.lan",                False),
 ])
 def test_is_sane_name(name, expect):
     assert is_sane_name(name) is expect
