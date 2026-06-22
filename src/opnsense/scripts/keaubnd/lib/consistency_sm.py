@@ -49,7 +49,8 @@ Key invariants:
     for d in ds: execute(d)
 
 Directives the daemon must execute:
-  Spawn(mode, names)  -- Popen kea-sync.py --mode=<mode> [--names=...]; register
+  Spawn(mode, names)  -- Popen kea-sync.py [--names=...] (or --clean-stale on a
+                         full reconcile when clean_on_restart is set); register
                          NOTE_EXIT; feed the exit back via on_sync_exit().
                          names=None => full reconcile; a frozenset => targeted.
   KillPending()       -- SIGTERM the running reconcile child and waitpid it.

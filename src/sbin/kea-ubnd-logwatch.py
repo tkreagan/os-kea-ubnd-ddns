@@ -10,7 +10,7 @@ dispatches existing cleanup scripts via subprocess so all Unbound mutations go
 through the shared advisory lock.
 
 PRIMARY:  DHCP4/6_RELEASE → local-data-clean.py --purge-ip <ip>
-SECONDARY: listener errors>0 → kea-sync.py --mode=full [--names=...]
+SECONDARY: listener errors>0 → kea-sync.py [--names=...]
 
 Design principles:
   - Never touches unbound-control directly; always dispatches local-data-clean
@@ -241,14 +241,19 @@ def _dispatch_purge_ip(ip: str, logger) -> None:
 
 
 def _dispatch_sync_names(names: List[str], logger) -> None:
-    """Run kea-sync.py --mode=full [--names=...] for SERVFAIL recovery."""
+    """Run kea-sync.py [--names=...] for SERVFAIL recovery.
+
+    kea-sync.py defaults to a full reconcile (static + dynamic); there is no
+    --mode flag (an earlier name from before lease-sync/reservation-sync were
+    merged into kea-sync.py). Passing one made argparse exit 2, so every
+    SERVFAIL dispatch failed. --names filters the dynamic pass to the affected
+    hosts; absent, it is a full reconcile."""
     if names:
         unique = sorted(set(names))
-        args = [sys.executable, SYNC_SCRIPT, "--mode=full",
-                "--names=" + ",".join(unique)]
+        args = [sys.executable, SYNC_SCRIPT, "--names=" + ",".join(unique)]
         label = f"names={unique}"
     else:
-        args = [sys.executable, SYNC_SCRIPT, "--mode=full"]
+        args = [sys.executable, SYNC_SCRIPT]
         label = "full"
     logger.info("logwatch: dispatch sync %s", label)
     try:
