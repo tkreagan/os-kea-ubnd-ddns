@@ -173,7 +173,7 @@ def test_find_stale_records_identifies_stale_forward():
     kea_pairs = set()  # nothing in Kea
     host_entries = {}
     stale, orphans = find_stale_records(unbound, kea_pairs, host_entries)
-    assert "ghost.lan" in stale
+    assert ("ghost.lan", "192.168.1.99") in stale
 
 
 def test_find_stale_records_keeps_kea_backed():
@@ -199,7 +199,7 @@ def test_find_stale_records_per_pair_not_per_ip():
     kea_pairs = {("host-b.lan", "10.0.0.1")}
     host_entries = {}
     stale, orphans = find_stale_records(unbound, kea_pairs, host_entries)
-    assert "host-a.lan" in stale
+    assert ("host-a.lan", "10.0.0.1") in stale
 
 
 def test_find_stale_records_orphaned_ptr():
@@ -232,7 +232,7 @@ def test_find_stale_records_ptr_becomes_orphan_when_forward_stale():
     kea_pairs = set()
     host_entries = {}
     stale, orphans = find_stale_records(unbound, kea_pairs, host_entries)
-    assert "ghost.lan" in stale
+    assert ("ghost.lan", "192.168.1.99") in stale
     assert "99.1.168.192.in-addr.arpa" in orphans
 
 

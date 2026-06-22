@@ -84,11 +84,12 @@ def test_bulk_no_stale_records_returns_zero(mock_rhe, mock_ld, mock_ckp, mock_uc
 
 # ── clean_host (targeted) ─────────────────────────────────────────────────────
 
+@mock.patch.object(clean, "unbound_local_datas_batch", return_value=True)
 @mock.patch.object(clean, "unbound_control", return_value=True)
 @mock.patch.object(clean, "unbound_list_local_data")
 @mock.patch.object(clean, "read_host_entries", return_value={})
 @mock.patch.object(clean, "_kea_ips_for_hostname")
-def test_clean_host_removes_stale_ip(mock_kea, mock_rhe, mock_ld, mock_uc):
+def test_clean_host_removes_stale_ip(mock_kea, mock_rhe, mock_ld, mock_uc, mock_batch):
     mock_ld.return_value = {
         "myhost.lan": [
             "myhost.lan. 300 IN A 192.168.1.5",
@@ -98,9 +99,12 @@ def test_clean_host_removes_stale_ip(mock_kea, mock_rhe, mock_ld, mock_uc):
     mock_kea.return_value = {"192.168.1.6"}
     rc = clean.clean_host("myhost.lan", keep_ip="192.168.1.6")
     assert rc == 0
+    # The stale IP is dropped via a name-level remove on unbound_control...
     calls = [str(c) for c in mock_uc.call_args_list]
     assert any("local_data_remove" in c and "myhost.lan" in c for c in calls)
-    assert any("local_data" in c and "192.168.1.6" in c for c in calls)
+    # ...and the surviving IP is re-added via the batch helper (not per-record).
+    batched = [r for call in mock_batch.call_args_list for r in call.args[0]]
+    assert any("192.168.1.6" in r for r in batched)
 
 
 @mock.patch.object(clean, "unbound_control", return_value=True)
