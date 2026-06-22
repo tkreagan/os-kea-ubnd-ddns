@@ -62,8 +62,12 @@ MUTATION_LOCK_PATH = f"{MUTATION_LOCK_DIR}/unbound-mutation.lock"
 # 1 = declined, 2 = expired-reclaimed.
 LEASE_STATE_DEFAULT = 0
 
-# Valid hostname label characters per RFC 1123 (first label / hostname part)
-_LABEL_RE = re.compile(r'^[a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?$')
+# Valid hostname label characters. RFC 1123 allows alphanumerics + hyphen;
+# we also permit underscore because DHCP clients (IoT devices, Android, Windows-
+# derived names) very commonly send hostnames like "aircon_wifi". Unbound stores
+# and serves such names fine, and rejecting them just denies those devices a DNS
+# record. Underscore is allowed in any position (incl. leading, e.g. "_host").
+_LABEL_RE = re.compile(r'^[a-zA-Z0-9_]([a-zA-Z0-9_\-]{0,61}[a-zA-Z0-9_])?$')
 
 # Names that are technically valid DNS but meaningless/dangerous for our use.
 _NONSENSE_NAMES = {"", ".", "localhost", "localdomain"}
@@ -619,9 +623,10 @@ def is_sane_name(name: str, logger: Optional[logging.Logger] = None) -> bool:
     Layer 2 — structural validity (via dnspython + _LABEL_RE)
         dns.name.from_text() enforces label length ≤ 63 bytes and total wire
         length ≤ 255 bytes (RFC 1035 §2.3.4) without us reimplementing it.
-        _LABEL_RE then checks RFC 1123 §2.1 character-set constraints
-        (alphanumeric + hyphen, not starting or ending with a hyphen) because
-        dnspython's parser accepts a wider character set than we want.  Every
+        _LABEL_RE then checks character-set constraints (RFC 1123 §2.1
+        alphanumeric + hyphen, plus underscore for the many DHCP clients that
+        send names like "aircon_wifi"; not starting or ending with a hyphen)
+        because dnspython's parser accepts a wider character set than we want. Every
         label is validated — not just the first — because unbound-control
         silently accepts records with invalid middle labels and this is the only
         gate that stops garbage entering the local zone.
