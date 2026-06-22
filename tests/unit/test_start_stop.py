@@ -42,7 +42,7 @@ def test_get_config_uses_defaults_for_missing_keys(tmp_path, monkeypatch):
     cfg = start.get_config()
     assert cfg["port"] == "53535"
     assert cfg["tsig_algorithm"] == "HMAC-SHA256"
-    assert cfg["aggressive_cleanup"] == "0"
+    assert cfg["enable_logwatch"] == "1"
 
 
 def test_get_config_exits_on_unparseable_xml(tmp_path, monkeypatch):
@@ -132,6 +132,7 @@ def test_start_main_exits_one_tsig_missing_secret(config_tsig_path, monkeypatch)
     # supervisor pidfile absent → won't bail early on idempotency check
     monkeypatch.setattr(start, "SUPERVISOR_PIDFILE", "/nonexistent_sup.pid")
     monkeypatch.setattr(start, "_port_in_use", lambda p: False)
+    monkeypatch.setattr(start, "check_preconditions", lambda port: (True, "ready"))
     with pytest.raises(SystemExit) as exc:
         start.main()
     assert exc.value.code == 1
@@ -168,10 +169,13 @@ def test_start_builds_correct_daemon_command(mock_run, config_full_path,
     monkeypatch.setattr(start, "SUPERVISOR_PIDFILE", str(tmp_path / "nonexistent.pid"))
     monkeypatch.setattr(start, "PIDFILE", str(tmp_path / "child.pid"))
     monkeypatch.setattr(start, "_port_in_use", lambda p: False)
+    monkeypatch.setattr(start, "check_preconditions", lambda port: (True, "ready"))
 
     start.main()  # succeeds — subprocess.run returns rc=0
 
-    cmd = mock_run.call_args[0][0]
+    # First subprocess.run is the daemon launch; start.py may also spawn the
+    # logwatch daemon as a second call, so pin to the first.
+    cmd = mock_run.call_args_list[0][0][0]
     assert "/usr/sbin/daemon" in cmd
     assert "-r" in cmd
     assert "-R" in cmd
@@ -195,10 +199,13 @@ def test_start_includes_tsig_args(mock_run, tmp_path, monkeypatch):
     monkeypatch.setattr(start, "SUPERVISOR_PIDFILE", str(tmp_path / "nonexistent.pid"))
     monkeypatch.setattr(start, "PIDFILE", str(tmp_path / "child.pid"))
     monkeypatch.setattr(start, "_port_in_use", lambda p: False)
+    monkeypatch.setattr(start, "check_preconditions", lambda port: (True, "ready"))
 
     start.main()
 
-    cmd = mock_run.call_args[0][0]
+    # First subprocess.run is the daemon launch; start.py may also spawn the
+    # logwatch daemon as a second call, so pin to the first.
+    cmd = mock_run.call_args_list[0][0][0]
     assert "--tsig-key" in cmd
     assert "mykey:dGVzdA==" in cmd
     assert "--tsig-algorithm" in cmd
@@ -237,8 +244,11 @@ def test_start_no_synthesize_ptr_arg_when_disabled(mock_run, tmp_path, monkeypat
     monkeypatch.setattr(start, "SUPERVISOR_PIDFILE", str(tmp_path / "nonexistent.pid"))
     monkeypatch.setattr(start, "PIDFILE", str(tmp_path / "child.pid"))
     monkeypatch.setattr(start, "_port_in_use", lambda p: False)
+    monkeypatch.setattr(start, "check_preconditions", lambda port: (True, "ready"))
     start.main()
-    cmd = mock_run.call_args[0][0]
+    # First subprocess.run is the daemon launch; start.py may also spawn the
+    # logwatch daemon as a second call, so pin to the first.
+    cmd = mock_run.call_args_list[0][0][0]
     assert "--no-synthesize-ptr" in cmd
 
 
@@ -251,8 +261,11 @@ def test_start_no_synthesize_ptr_arg_absent_when_enabled(mock_run, tmp_path, mon
     monkeypatch.setattr(start, "SUPERVISOR_PIDFILE", str(tmp_path / "nonexistent.pid"))
     monkeypatch.setattr(start, "PIDFILE", str(tmp_path / "child.pid"))
     monkeypatch.setattr(start, "_port_in_use", lambda p: False)
+    monkeypatch.setattr(start, "check_preconditions", lambda port: (True, "ready"))
     start.main()
-    cmd = mock_run.call_args[0][0]
+    # First subprocess.run is the daemon launch; start.py may also spawn the
+    # logwatch daemon as a second call, so pin to the first.
+    cmd = mock_run.call_args_list[0][0][0]
     assert "--no-synthesize-ptr" not in cmd
 
 
@@ -265,8 +278,11 @@ def test_start_no_synthesize_ptr_arg_absent_by_default(mock_run, tmp_path, monke
     monkeypatch.setattr(start, "SUPERVISOR_PIDFILE", str(tmp_path / "nonexistent.pid"))
     monkeypatch.setattr(start, "PIDFILE", str(tmp_path / "child.pid"))
     monkeypatch.setattr(start, "_port_in_use", lambda p: False)
+    monkeypatch.setattr(start, "check_preconditions", lambda port: (True, "ready"))
     start.main()
-    cmd = mock_run.call_args[0][0]
+    # First subprocess.run is the daemon launch; start.py may also spawn the
+    # logwatch daemon as a second call, so pin to the first.
+    cmd = mock_run.call_args_list[0][0][0]
     assert "--no-synthesize-ptr" not in cmd
 
 
@@ -304,48 +320,54 @@ def test_alive_false_for_dead_pid():
     assert isinstance(result, bool)
 
 
-# ── stop.py — _find_matching_pids ────────────────────────────────────────────
+# ── stop.py — _collect_pids ──────────────────────────────────────────────────
+# _collect_pids(script_path, supervisor_pidfile, child_pidfile) merges the
+# supervisor/child pidfile reads with a `pgrep -f script_path` scan, excluding
+# our own PID. Here the pidfiles are absent, so only the pgrep scan contributes.
 
 @mock.patch("subprocess.run")
-def test_find_matching_pids_excludes_self(mock_run):
+def test_collect_pids_excludes_self(mock_run, tmp_path):
     self_pid = os.getpid()
     mock_run.return_value = mock.Mock(
         returncode=0,
         stdout=f"{self_pid}\n1234\n5678\n"
     )
-    pids = stop._find_matching_pids()
+    pids = stop._collect_pids(
+        "/usr/local/sbin/kea-ubnd-ddns.py",
+        str(tmp_path / "no_sup.pid"), str(tmp_path / "no_child.pid"))
     assert self_pid not in pids
     assert 1234 in pids
     assert 5678 in pids
 
 
 @mock.patch("subprocess.run", side_effect=Exception("pgrep failed"))
-def test_find_matching_pids_returns_empty_on_error(mock_run):
-    assert stop._find_matching_pids() == []
+def test_collect_pids_returns_empty_on_error(mock_run, tmp_path):
+    pids = stop._collect_pids(
+        "/usr/local/sbin/kea-ubnd-ddns.py",
+        str(tmp_path / "no_sup.pid"), str(tmp_path / "no_child.pid"))
+    assert pids == set()
 
 
 # ── stop.py — main() graceful shutdown ───────────────────────────────────────
 
-@mock.patch.object(stop, "_find_matching_pids", return_value=[])
-@mock.patch.object(stop, "_read_pid", return_value=None)
-def test_stop_main_no_processes(mock_rpid, mock_pgrep, tmp_path, monkeypatch):
-    monkeypatch.setattr(stop, "SUPERVISOR_PIDFILE", str(tmp_path / "s.pid"))
-    monkeypatch.setattr(stop, "PIDFILE", str(tmp_path / "c.pid"))
+@mock.patch.object(stop, "_collect_pids", return_value=set())
+def test_stop_main_no_processes(mock_collect, tmp_path, monkeypatch):
+    for attr in ("SUPERVISOR_PIDFILE", "PIDFILE",
+                 "LOGWATCH_SUPERVISOR_PIDFILE", "LOGWATCH_PIDFILE"):
+        monkeypatch.setattr(stop, attr, str(tmp_path / f"{attr}.pid"))
     rc = stop.main()
     assert rc == 0
 
 
-@mock.patch("time.sleep")
-@mock.patch.object(stop, "_find_matching_pids", return_value=[])
+@mock.patch.object(stop, "_collect_pids", return_value={1234})
 @mock.patch.object(stop, "_send")
-@mock.patch.object(stop, "_read_pid", return_value=1234)
-def test_stop_main_sigterm_then_dead(mock_rpid, mock_send,
-                                     mock_pgrep, mock_sleep, tmp_path, monkeypatch):
-    # Make _alive return False immediately so the poll loop exits on the first
-    # check (process "died" before we even got to poll).
+def test_stop_main_sigterm_then_dead(mock_send, mock_collect, tmp_path, monkeypatch):
+    # _alive returns False immediately so the poll loop exits on the first check
+    # (process "died" before we even got to poll) — SIGTERM only, no SIGKILL.
     monkeypatch.setattr(stop, "_alive", lambda pid: False)
-    monkeypatch.setattr(stop, "SUPERVISOR_PIDFILE", str(tmp_path / "s.pid"))
-    monkeypatch.setattr(stop, "PIDFILE", str(tmp_path / "c.pid"))
+    for attr in ("SUPERVISOR_PIDFILE", "PIDFILE",
+                 "LOGWATCH_SUPERVISOR_PIDFILE", "LOGWATCH_PIDFILE"):
+        monkeypatch.setattr(stop, attr, str(tmp_path / f"{attr}.pid"))
     rc = stop.main()
     assert rc == 0
     assert any(args[0][1] == signal.SIGTERM for args in mock_send.call_args_list)
