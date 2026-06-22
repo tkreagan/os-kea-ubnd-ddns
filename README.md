@@ -245,8 +245,8 @@ jobs — write to the same log facility.
 | Setting | Default | Notes |
 |---|---|---|
 | Enabled | **off** | Master switch for the daemon and all sync jobs |
-| Sync Kea static reservations | **on** | Registers reservations in Unbound during each reconcile and on demand |
-| Sync Kea active leases | **on** | Registers active leases; TTL = remaining lease time |
+| Show "Sync static reservations" button | **on** | UI only — shows the manual Sync button on the Status page. The daemon's automatic reconcile always includes reservations regardless of this setting |
+| Show "Sync active leases" button | **on** | UI only — shows the manual Sync button. Automatic reconcile always includes active leases (TTL = remaining lease time) regardless |
 | Synthesize PTR records | **on** | Automatically create the `in-addr.arpa`/`ip6.arpa` PTR for every A/AAAA update. Works without a reverse zone in kea-dhcp-ddns. Disable only if you manage reverse DNS separately — explicit PTR updates from kea-dhcp-ddns are always applied regardless |
 | Hostname collision policy | **Last wins** | Action when a hostname is already registered to a different IP — see [Hostname collision policy](#hostname-collision-policy) below |
 | Automatically clean stale DNS records | **on** | Scheduled bulk removal of entries not backed by Kea — see warning below |

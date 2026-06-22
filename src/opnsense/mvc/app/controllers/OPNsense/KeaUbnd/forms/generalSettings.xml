@@ -78,16 +78,16 @@ settings below. The Lease Audit tab shows a full preview of what each cleanup wo
     </field>
     <field>
         <id>general.general.sync_static_reservations</id>
-        <label>Sync Kea static reservations to Unbound</label>
+        <label>Show manual "Sync static reservations" button</label>
         <type>checkbox</type>
-        <help>Register Kea static reservations in Unbound DNS so they resolve immediately (before any client connects). Names already managed by OPNsense in Unbound (Host Overrides, or "Register DHCP Static Mappings") are skipped, so this is safe whether or not that Unbound setting is on. Requires the Kea DHCP service (kea-dhcp4/kea-dhcp6) to be running.</help>
+        <help>Show the manual "Sync static reservations" button on the Status page. This is a UI convenience only and does not change automatic behaviour: the resident daemon always reconciles both static reservations and active leases into Unbound on startup and after every Kea or Unbound restart, regardless of this setting. Names already managed by OPNsense in Unbound (Host Overrides, or "Register DHCP Static Mappings") are always skipped.</help>
     </field>
 
     <field>
         <id>general.general.sync_dynamic_leases</id>
-        <label>Sync Kea active leases to Unbound</label>
+        <label>Show manual "Sync active leases" button</label>
         <type>checkbox</type>
-        <help>Register Kea active leases in Unbound DNS with TTL matching lease expiration. Repopulates Unbound on startup and after each Kea or Unbound restart. Requires the Kea DHCP service (kea-dhcp4/kea-dhcp6) to be running.</help>
+        <help>Show the manual "Sync active leases" button on the Status page. This is a UI convenience only and does not change automatic behaviour: active leases (TTL = remaining lease time) are always included in the daemon's reconcile on startup and after every Kea or Unbound restart, regardless of this setting.</help>
     </field>
     <field>
         <id>general.general.synthesize_ptr</id>

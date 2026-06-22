@@ -22,15 +22,21 @@
                 <MaximumValue>65535</MaximumValue>
             </port>
 
-            <!-- Sync static reservations from Kea to Unbound during the bulk
-                 reconcile (run by the daemon after a Kea/Unbound restart). -->
+            <!-- UI-only: controls whether the manual "Sync static reservations"
+                 button is shown on the Status page (see status.volt). Does NOT
+                 gate automatic behaviour — the resident daemon always reconciles
+                 both reservations and active leases into Unbound on startup and
+                 after every Kea/Unbound restart. Kept as a persistent setting so
+                 the button's visibility survives reloads. -->
             <sync_static_reservations type="BooleanField">
                 <Default>1</Default>
                 <Required>Y</Required>
             </sync_static_reservations>
 
-            <!-- Sync active DHCP leases from Kea to Unbound during the bulk
-                 reconcile. TTL is set to the remaining lease lifetime. -->
+            <!-- UI-only: controls whether the manual "Sync active leases" button
+                 is shown on the Status page. Does NOT gate automatic behaviour —
+                 active leases (TTL = remaining lease time) are always included in
+                 the daemon's reconcile. -->
             <sync_dynamic_leases type="BooleanField">
                 <Default>1</Default>
                 <Required>Y</Required>
