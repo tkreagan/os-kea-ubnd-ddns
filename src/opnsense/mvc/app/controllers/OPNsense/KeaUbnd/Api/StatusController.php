@@ -31,6 +31,7 @@ namespace OPNsense\KeaUbnd\Api;
 
 use OPNsense\Base\ApiControllerBase;
 use OPNsense\Core\Backend;
+use OPNsense\KeaUbnd\General;
 
 class StatusController extends ApiControllerBase
 {
@@ -79,12 +80,23 @@ class StatusController extends ApiControllerBase
             ];
         }
 
+        // Build flags from plugin config so the script itself stays config-free.
+        $cfg = new General();
+        $flags = '';
+        $policy = (string)$cfg->general->collision_policy;
+        if ($policy !== '') {
+            $flags .= ' --collision-policy=' . escapeshellarg($policy);
+        }
+        if ((string)$cfg->general->synthesize_ptr !== '1') {
+            $flags .= ' --no-synthesize-ptr';
+        }
+
         // Run the audit script with JSON output. $script is a fixed constant
-        // path with no user input, so no shell-argument escaping is needed.
+        // path with no user input; $flags values are validated above.
         $output = [];
         $returnCode = 0;
 
-        exec($script . ' --report-json 2>&1', $output, $returnCode);
+        exec($script . ' --report-json' . $flags . ' 2>&1', $output, $returnCode);
 
         // Join output lines
         $jsonOutput = implode("\n", $output);

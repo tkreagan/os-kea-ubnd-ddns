@@ -23,9 +23,9 @@ Two modes:
   script removes. Designed for cron and GUI (the [clean] configd action).
 
   Targeted mode (--hostname): remove only IPs for one specific hostname that
-  are no longer in Kea. Leaves all other hostnames untouched. Called by the
-  DDNS listener daemon after a successful ADD when aggressive_cleanup is
-  enabled, to clean up old IPs that Kea did not send a DELETE for.
+  are no longer in Kea. Leaves all other hostnames untouched. Available for
+  manual/scripted use; not called by the daemon (which handles IP replacement
+  inline via last_wins collision policy).
 
 Usage:
   local-data-clean.py                            # Bulk: remove all stale records
@@ -38,7 +38,7 @@ Usage:
 
 import argparse
 import sys
-from typing import Dict, Optional
+from typing import Optional
 
 # Add parent directory to path so we can import lib
 sys.path.insert(0, "/usr/local/opnsense/scripts/keaubnd")
@@ -46,58 +46,26 @@ sys.path.insert(0, "/usr/local/opnsense/scripts/keaubnd")
 from lib.keaubnd_sync import (
     KeaUnavailableError,
     KeaServiceUnavailableError,
-    read_host_entries,
-    unbound_list_local_data,
-    unbound_control,
-    unbound_local_datas_batch,
-    collect_kea_pairs,
-    find_stale_records,
-    setup_logging,
-    query_kea_reservations,
-    query_kea_leases,
-    reverse_ptr,
+    clean_stale_records,
+    discover_stale,
     is_in_host_entries,
-    get_synthesize_ptr,
-    read_d2_reverse_zones,
+    kea_ips_for_hostname,
+    purge_released_ip,
+    query_kea_leases,
+    query_kea_reservations,
+    read_host_entries,
+    reverse_ptr,
+    setup_logging,
+    unbound_control,
+    unbound_list_local_data,
+    unbound_local_datas_batch,
     unbound_mutation_lock,
 )
 
 
 def _kea_ips_for_hostname(hostname: str, logger) -> Optional[set]:
-    """
-    Query Kea (both dhcp4 and dhcp6, leases and reservations) for all IPs
-    currently associated with hostname.
-
-    Returns a set of IP strings (possibly empty if Kea has no record of this
-    hostname), or None if Kea is unreachable — callers must treat None as
-    "abort cleanup, do not remove anything."
-
-    KeaServiceUnavailableError (service offline / not configured) is silently
-    skipped so a DHCPv4-only setup doesn't abort when dhcp6 isn't running.
-    KeaUnavailableError (daemon unreachable) aborts the entire query because
-    we cannot safely identify stale records without authoritative data.
-    """
-    hn = hostname.rstrip(".").lower()
-    valid_ips: set = set()
-    for service in ("dhcp4", "dhcp6"):
-        try:
-            for res in query_kea_reservations(service=service):
-                if res["hostname"].rstrip(".").lower() == hn:
-                    for ip in (res.get("ip"), res.get("ipv6")):
-                        if ip:
-                            valid_ips.add(ip)
-            for lease in query_kea_leases(service=service):
-                if lease["hostname"].rstrip(".").lower() == hn:
-                    for ip in (lease.get("ip"), lease.get("ipv6")):
-                        if ip:
-                            valid_ips.add(ip)
-        except KeaServiceUnavailableError:
-            pass  # service not running / not configured — skip it
-        except KeaUnavailableError as e:
-            logger.warning("[cleanup] Kea unreachable querying %s for %s: %s",
-                           service, hostname, e)
-            return None  # cannot safely clean without authoritative data
-    return valid_ips
+    """Thin wrapper around the shared keaubnd_sync.kea_ips_for_hostname."""
+    return kea_ips_for_hostname(hostname, logger)
 
 
 def clean_host(hostname: str, keep_ip: Optional[str] = None,
@@ -105,18 +73,15 @@ def clean_host(hostname: str, keep_ip: Optional[str] = None,
     """
     Targeted cleanup: remove IPs for one hostname that are no longer in Kea.
 
-    Called by the DDNS listener daemon after a successful A/AAAA ADD when
-    aggressive_cleanup is enabled. Handles the common case where Kea issues a
-    client a new IP without sending a DNS DELETE for the old one.
+    Handles the case where a client received a new IP without Kea sending a
+    DNS DELETE for the old one. Available for manual/scripted use via
+    --hostname; the daemon handles same-FQDN replacement inline.
 
-    hostname: the FQDN just registered (trailing dot optional).
-    keep_ip:  always treat this IP as valid, even if not yet committed to
-              Kea's lease DB — ensures the just-added IP is never removed.
+    hostname: FQDN to clean (trailing dot optional).
+    keep_ip:  always treat this IP as valid even if not yet in Kea's lease DB
+              (e.g. pass the just-added IP to avoid an immediate self-removal).
 
-    Returns 0 always. Errors are logged but cleanup is best-effort; the
-    ADD and its DDNS response are unaffected regardless of outcome.
-
-    NOTE: This script requires the OPNsense environment. See module docstring.
+    Returns 0 always. Errors are logged; cleanup is best-effort.
     """
     logger = setup_logging(verbose)
     hn = hostname.rstrip(".")
@@ -216,210 +181,34 @@ def clean_host(hostname: str, keep_ip: Optional[str] = None,
 
 
 def clean_ip(ip: str, verbose: bool = False) -> int:
-    """
-    IP-targeted cleanup: remove every Unbound record for one specific IP address
-    that is no longer present in Kea.
+    """IP-targeted cleanup: remove every Unbound record for a released IP.
 
-    Called by kea-ubnd-logwatch when a DHCP4_RELEASE / DHCP6_RELEASE is
-    detected in Kea's log.  Locates all forward names in Unbound that hold this
-    IP as an A or AAAA record, verifies with Kea that the IP is gone, then
-    removes it using the remove+restore dance (removes all records for the name,
-    re-adds whichever IPs Kea still considers valid, then removes the PTR).
-
-    Unlike clean_host, this correctly handles the case where the released IP was
-    the only IP for that name — clean_host refuses to remove the last record as
-    a safety guard, but here we have explicit Kea confirmation the IP is gone.
-
-    Returns 0 always; cleanup is best-effort, errors are logged.
+    Delegates to keaubnd_sync.purge_released_ip, which is also called by
+    kea-sync.py's --purge-ip pass.  Returns 0 always (best-effort).
     """
     logger = setup_logging(verbose)
-    logger.info("[cleanup] Purging released IP: %s", ip)
-
     host_entries = read_host_entries()
     unbound_data = unbound_list_local_data()
-
-    # Find every forward name in Unbound that currently has this IP.
-    affected_names: list[str] = []
-    for name, lines in unbound_data.items():
-        for line in lines:
-            parts = line.split()
-            if len(parts) >= 5 and parts[3] in ("A", "AAAA") and parts[4] == ip:
-                affected_names.append(name)
-                break
-
-    if not affected_names:
-        logger.info("[cleanup] IP %s not found in Unbound — nothing to do", ip)
-        return 0
-
-    for name in affected_names:
-        if is_in_host_entries(name, host_entries):
-            logger.info("[cleanup] %s is in host_entries.conf — skipping", name)
-            continue
-
-        # Ask Kea which IPs are still valid for this name (across all services).
-        valid_kea_ips = _kea_ips_for_hostname(name, logger)
-        if valid_kea_ips is None:
-            logger.warning("[cleanup] Kea unavailable for %s — skipping", name)
-            continue
-        if ip in valid_kea_ips:
-            logger.info("[cleanup] IP %s still valid in Kea for %s — skipping", ip, name)
-            continue
-
-        # Parse what Unbound currently has for this name.
-        all_records = []
-        for line in unbound_data.get(name, []):
-            parts = line.split()
-            if len(parts) >= 5 and parts[3] in ("A", "AAAA"):
-                all_records.append((parts[4], parts[1], parts[3]))  # ip, ttl, rdtype
-
-        # Split into records to restore (other valid IPs) and the stale one.
-        valid_records = [(r_ip, ttl, rtype) for r_ip, ttl, rtype in all_records
-                         if r_ip in valid_kea_ips]
-
-        # Remove all records for this name, then restore valid ones.
-        if not unbound_control(["local_data_remove", name]):
-            logger.error("[cleanup] Failed to remove records for %s", name)
-            continue
-
-        if valid_records:
-            rrs = [f"{name} {ttl} IN {rtype} {r_ip}" for r_ip, ttl, rtype in valid_records]
-            unbound_local_datas_batch(rrs)
-
-        logger.info("[cleanup] Removed released IP %s from %s (restored %d other record(s))",
-                    ip, name, len(valid_records))
-
-        # Remove PTR for this IP if present, not static, and no longer in Kea.
-        ptr_name = reverse_ptr(ip)
-        if ptr_name and ptr_name in unbound_data:
-            if not is_in_host_entries(ptr_name, host_entries):
-                logger.info("[cleanup] Removing PTR for released IP: %s", ptr_name)
-                unbound_control(["local_data_remove", ptr_name])
-
+    purge_released_ip(ip, unbound_data, host_entries, logger)
     return 0
 
 
-def clean_stale_records(interactive: bool = False, dry_run: bool = False, verbose: bool = False) -> int:
-    """
-    Identify and remove stale records from Unbound local_data.
-    Returns 0 on success, non-zero on error.
-    """
-    logger = setup_logging(verbose)
-    logger.info("Starting stale record cleanup")
-
-    host_entries = read_host_entries()
-    unbound_data = unbound_list_local_data()
-
-    # Stale detection requires authoritative Kea data; never guess without it.
-    try:
-        kea_pairs = collect_kea_pairs()
-    except KeaUnavailableError as e:
-        logger.error(f"Kea unavailable: {e}")
-        logger.error("Cannot safely identify stale records without Kea data — aborting")
-        return 1
-
-    synthesize_ptr = get_synthesize_ptr()
-    d2_reverse_zones = read_d2_reverse_zones()
-    stale_pairs, orphaned_ptrs = find_stale_records(
-        unbound_data, kea_pairs, host_entries,
-        synthesize_ptr=synthesize_ptr, d2_reverse_zones=d2_reverse_zones,
-    )
-
-    # Group stale (name, ip) pairs by name for the remove+restore loop.
-    stale_ips_by_name: Dict[str, set] = {}
-    for name, ip in stale_pairs:
-        stale_ips_by_name.setdefault(name, set()).add(ip)
-
-    total_stale = len(stale_pairs) + len(orphaned_ptrs)
-
-    if total_stale == 0:
-        logger.info("No stale records found")
+def _print_stale_summary(stale_pairs, orphaned_ptrs) -> None:
+    total = len(stale_pairs) + len(orphaned_ptrs)
+    if total == 0:
         print("No stale records found")
-        return 0
-
+        return
     print(f"Found {len(stale_pairs)} stale address(es), {len(orphaned_ptrs)} orphaned PTR(s):")
     print()
-
     if stale_pairs:
         print(f"Stale addresses ({len(stale_pairs)}):")
         for name, ip in sorted(stale_pairs):
             print(f"  {name} [{ip}]")
-
     if orphaned_ptrs:
         print(f"Orphaned PTRs ({len(orphaned_ptrs)}):")
         for ptr in sorted(orphaned_ptrs):
             print(f"  {ptr}")
-
     print()
-
-    if dry_run:
-        logger.info(f"[dry-run] Would remove {total_stale} stale record(s)")
-        print("[dry-run] Would remove the above records")
-        return 0
-
-    # Interactive confirmation (manual use only). Guard against no stdin so a
-    # stray --confirm under a non-interactive context fails safe instead of
-    # raising EOFError.
-    if interactive:
-        try:
-            response = input(f"Remove {total_stale} stale record(s)? [y/N] ")
-        except EOFError:
-            print("No input available — aborting (use the default mode for unattended runs)")
-            return 0
-        if response.lower() != "y":
-            print("Aborted")
-            return 0
-
-    print("Removing stale records...")
-
-    removed = 0
-    errors = 0
-
-    # Forward records: group by name so partial-staleness (e.g. valid A, stale
-    # AAAA) is handled with a remove-all + restore-valid dance rather than
-    # dropping the entire name. local_data_remove wipes ALL types for a name,
-    # so surviving records must be re-added explicitly.
-    for name in sorted(stale_ips_by_name):
-        stale_ips = stale_ips_by_name[name]
-        all_records = []
-        for line in unbound_data.get(name, []):
-            parts = line.split()
-            if len(parts) >= 5 and parts[3] in ("A", "AAAA"):
-                all_records.append((parts[4], parts[1], parts[3]))  # ip, ttl, rtype
-        valid_records = [(ip, ttl, rt) for ip, ttl, rt in all_records
-                         if ip not in stale_ips]
-
-        if not unbound_control(["local_data_remove", name]):
-            logger.error(f"Failed to remove forward records for: {name}")
-            print(f"  FAILED {name}")
-            errors += 1
-            continue
-
-        if valid_records:
-            rrs = [f"{name} {ttl} IN {rtype} {ip}" for ip, ttl, rtype in valid_records]
-            if not unbound_local_datas_batch(rrs):
-                logger.error(f"Failed to restore records for: {name}")
-                errors += 1
-
-        label = f"{name} [{', '.join(sorted(stale_ips))}]"
-        logger.info(f"Removed stale address(es): {label}")
-        print(f"  removed {label}")
-        removed += len(stale_ips)
-
-    # PTR records (includes PTRs for stale IPs and any other orphans).
-    for ptr in sorted(orphaned_ptrs):
-        if unbound_control(["local_data_remove", ptr]):
-            logger.info(f"Removed orphaned PTR: {ptr}")
-            print(f"  removed {ptr}")
-            removed += 1
-        else:
-            logger.error(f"Failed to remove PTR: {ptr}")
-            print(f"  FAILED {ptr}")
-            errors += 1
-
-    print()
-    logger.info(f"Cleanup complete: removed={removed} errors={errors}")
-    print(f"Cleanup complete: removed {removed}, errors {errors}")
-    return 0 if errors == 0 else 1
 
 
 def main():
@@ -443,20 +232,29 @@ def main():
     # Bulk mode
     parser.add_argument("--confirm", action="store_true",
                         help="Bulk mode: prompt before removing (manual debugging only)")
+    parser.add_argument("--no-synthesize-ptr", action="store_true", default=False,
+                        help="Treat PTR records as D2-managed; do not synthesize or clean them")
     parser.add_argument("--dry-run", "-n", action="store_true",
                         help="Bulk mode: preview what would be removed without making changes")
     parser.add_argument("--verbose", "-v", action="store_true",
                         help="Log additional details to stderr")
     args = parser.parse_args()
+    synthesize_ptr = not args.no_synthesize_ptr
 
-    # A dry-run mutates nothing, so it needn't serialize against other writers.
+    # Bulk dry-run: discovery only, no lock needed, no writes.
     if args.dry_run and not args.hostname and not args.purge_ip:
-        return clean_stale_records(interactive=args.confirm, dry_run=True,
-                                   verbose=args.verbose)
+        logger = setup_logging(args.verbose)
+        logger.info("Starting stale record cleanup (dry run)")
+        try:
+            _, stale_pairs, orphaned_ptrs = discover_stale(synthesize_ptr, logger)
+        except KeaUnavailableError as e:
+            logger.error("Kea unavailable: %s", e)
+            return 1
+        _print_stale_summary(stale_pairs, orphaned_ptrs)
+        if stale_pairs or orphaned_ptrs:
+            print("[dry-run] Would remove the above records")
+        return 0
 
-    # Hold the shared Unbound-mutation lock for the whole run so cleanup is
-    # atomic with respect to kea-sync and the daemon's live path. Blocking
-    # acquire: external clean invocations wait their turn rather than racing.
     try:
         with unbound_mutation_lock(blocking=True):
             if args.purge_ip:
@@ -464,8 +262,39 @@ def main():
             if args.hostname:
                 return clean_host(hostname=args.hostname, keep_ip=args.keep_ip,
                                   verbose=args.verbose)
-            return clean_stale_records(interactive=args.confirm,
-                                       dry_run=args.dry_run, verbose=args.verbose)
+
+            # Bulk clean.
+            logger = setup_logging(args.verbose)
+            logger.info("Starting stale record cleanup")
+            try:
+                unbound_data, stale_pairs, orphaned_ptrs = discover_stale(
+                    synthesize_ptr, logger)
+            except KeaUnavailableError as e:
+                logger.error("Kea unavailable: %s — aborting", e)
+                return 1
+
+            _print_stale_summary(stale_pairs, orphaned_ptrs)
+            total = len(stale_pairs) + len(orphaned_ptrs)
+            if total == 0:
+                return 0
+
+            if args.confirm:
+                try:
+                    response = input(f"Remove {total} stale record(s)? [y/N] ")
+                except EOFError:
+                    print("No input available — aborting (use the default mode for unattended runs)")
+                    return 0
+                if response.lower() != "y":
+                    print("Aborted")
+                    return 0
+
+            print("Removing stale records...")
+            errors = clean_stale_records(unbound_data, stale_pairs, orphaned_ptrs,
+                                         dry_run=False, logger=logger)
+            logger.info("Cleanup complete: removed=%d errors=%d", total, errors)
+            print(f"\nCleanup complete: removed {total}, errors {errors}")
+            return 0 if errors == 0 else 1
+
     except Exception as e:
         setup_logging(args.verbose).error("clean failed acquiring lock: %s", e)
         return 1

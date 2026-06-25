@@ -132,10 +132,13 @@ class SSHSession:
 
     def __call__(self, cmd: str, check: bool = True, timeout: int = 60) -> str:
         """Run cmd with sudo, supplying password via stdin."""
-        # Wrap in sh -c so shell builtins and pipes work as expected
+        import shlex
+        # Wrap in sh -c so shell builtins and pipes work as expected.
+        # Use shlex.quote() for shell-safe quoting — Python repr() escaping
+        # does not translate to shell syntax when the string contains single quotes.
         full = (
-            f"echo {self.sudo_password!r} | "
-            f"sudo -S -p '' sh -c {cmd!r}"
+            f"echo {shlex.quote(self.sudo_password)} | "
+            f"sudo -S -p '' sh -c {shlex.quote(cmd)}"
         )
         return self.run(full, check=check, timeout=timeout)
 
@@ -160,6 +163,25 @@ class SSHSession:
         result = out.decode().strip()
         return result
 
+    def sudo_script(self, interpreter: str, code: str, timeout: int = 30) -> str:
+        """
+        Like script() but runs the interpreter with sudo via a temporary file.
+
+        Uploads code to a remote temp file over SFTP, then invokes it through
+        the sudo-aware __call__ path.  Use when the script needs to write
+        privileged files (e.g. /conf/config.xml).
+        """
+        import tempfile, pathlib as _pathlib
+        remote = f"/tmp/_sudo_script_{id(self)}.py"
+        with tempfile.NamedTemporaryFile(suffix=".py", mode="w", delete=False) as f:
+            f.write(code)
+            local = _pathlib.Path(f.name)
+        try:
+            self.sftp_put(local, remote)
+            return self(f"{interpreter} {remote}; rm -f {remote}", timeout=timeout)
+        finally:
+            local.unlink(missing_ok=True)
+
     def sftp_put(self, local: pathlib.Path | str, remote: str) -> None:
         sftp = self._client.open_sftp()
         try:
@@ -175,9 +197,11 @@ class SSHSession:
 
 @pytest.fixture(scope="session")
 def opnsense_info():
+    user = _require_env("OPNSENSE_SSH_USER")
     return {
         "host":       _require_env("OPNSENSE_HOST"),
-        "user":       _require_env("OPNSENSE_SSH_USER"),
+        "user":       user,
+        "ssh_user":   user,   # alias used by some tests
         "password":   _require_env("OPNSENSE_SSH_PASS"),
         "api_key":    os.environ.get("OPNSENSE_API_KEY",    ""),
         "api_secret": os.environ.get("OPNSENSE_API_SECRET", ""),
@@ -234,8 +258,9 @@ def dhcpclient(dhcpclient_info) -> SSHSession:
 @pytest.fixture(scope="session")
 def api(opnsense_info):
     """requests.Session pre-configured for the OPNsense plugin API."""
-    if not opnsense_info["api_key"]:
-        pytest.skip("OPNSENSE_API_KEY not set — skipping API tests")
+    key = opnsense_info["api_key"]
+    if not key or key.startswith("<"):
+        pytest.skip("OPNSENSE_API_KEY not configured — skipping API tests")
 
     import urllib3
     urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -278,11 +303,8 @@ def kea(ssh: SSHSession):
         "dhcp6": "/var/run/kea/kea6-ctrl-socket",
     }
 
-    def query(command: str, service: str = "dhcp4",
-              arguments: dict | None = None) -> dict:
-        sock = _SOCKETS.get(service, "/var/run/kea/kea4-ctrl-socket")
-        payload = json.dumps({"command": command,
-                              "arguments": arguments or {}})
+    def _raw_query(command: str, arguments: dict, sock: str) -> dict:
+        payload = json.dumps({"command": command, "arguments": arguments})
         code = f"""
 import socket, json, sys, os
 path = {sock!r}
@@ -314,6 +336,86 @@ print(b"".join(parts).decode().strip())
         if resp.get("result") == 99:
             pytest.skip(f"Kea socket unavailable: {resp.get('text')}")
         return resp
+
+    def _config_set_reservation(
+        action: str, arguments: dict, sock: str
+    ) -> dict:
+        """Add/remove reservations via config-set (Kea 3.x has no hosts-database by default)."""
+        code = f"""
+import socket, json, sys, os
+
+def kea_raw(cmd, args, path):
+    payload = json.dumps({{"command": cmd, "arguments": args}}) + "\\n"
+    s = socket.socket(socket.AF_UNIX)
+    s.settimeout(10)
+    s.connect(path)
+    s.sendall(payload.encode())
+    parts = []
+    while True:
+        try:
+            chunk = s.recv(65536)
+            if not chunk: break
+            parts.append(chunk)
+        except socket.timeout:
+            break
+    resp = json.loads(b"".join(parts).decode())
+    return resp[0] if isinstance(resp, list) else resp
+
+path = {sock!r}
+action = {action!r}
+arguments = {json.dumps(arguments)!r}
+arguments = json.loads(arguments)
+
+conf_resp = kea_raw("config-get", {{}}, path)
+conf = conf_resp.get("arguments", {{}})
+conf.pop("hash", None)
+
+dhcp4 = conf.get("Dhcp4", {{}})
+subnets = dhcp4.get("subnet4", []) or dhcp4.get("subnet6", [])
+
+if action == "add":
+    resv = arguments.get("reservation", {{}})
+    subnet_id = resv.get("subnet-id") or arguments.get("subnet-id")
+    target = next((s for s in subnets if not subnet_id or s.get("id") == subnet_id), subnets[0] if subnets else None)
+    if target is None:
+        print(json.dumps({{"result": 1, "text": "no subnet found"}}))
+        sys.exit(0)
+    resv_clean = {{k: v for k, v in resv.items() if k != "subnet-id"}}
+    resv_ip = resv_clean.get("ip-address")
+    existing = target.get("reservations", [])
+    target["reservations"] = [r for r in existing if r.get("ip-address") != resv_ip]
+    target["reservations"].append(resv_clean)
+elif action == "del":
+    subnet_id = arguments.get("subnet-id")
+    ip = arguments.get("ip-address")
+    target = next((s for s in subnets if not subnet_id or s.get("id") == subnet_id), subnets[0] if subnets else None)
+    if target is not None:
+        target["reservations"] = [r for r in target.get("reservations", []) if r.get("ip-address") != ip]
+
+result = kea_raw("config-set", conf, path)
+print(json.dumps(result))
+"""
+        raw = ssh.script("python3", code)
+        try:
+            resp = json.loads(raw)
+        except json.JSONDecodeError as e:
+            raise RuntimeError(f"Kea config-set returned non-JSON: {raw!r}") from e
+        if isinstance(resp, list):
+            resp = resp[0]
+        return resp
+
+    def query(command: str, service: str = "dhcp4",
+              arguments: dict | None = None) -> dict:
+        sock = _SOCKETS.get(service, "/var/run/kea/kea4-ctrl-socket")
+        args = arguments or {}
+        # Kea 3.x removed subnet4-reservation-add/del in favour of config-set
+        # (reservation-add/del require a hosts-database backend that isn't configured
+        # in this test environment). Intercept and implement via config-set.
+        if command in ("subnet4-reservation-add", "reservation-add"):
+            return _config_set_reservation("add", args, sock)
+        if command in ("subnet4-reservation-del", "reservation-del"):
+            return _config_set_reservation("del", args, sock)
+        return _raw_query(command, args, sock)
 
     return query
 
@@ -351,7 +453,7 @@ def unbound(ssh: SSHSession):
                    for l in list_local_data().get(ptr_name, []))
 
     def add_record(record_str: str) -> None:
-        ssh(f"{UC} local_data {record_str!r}")
+        ssh(f"{UC} local_data {record_str}")
 
     def remove_record(name: str) -> None:
         ssh(f"{UC} local_data_remove {name}", check=False)
@@ -382,19 +484,44 @@ def test_log(request):
     request.node._cleaned  = log.get("cleaned")
 
 
+# ── System domain discovery ───────────────────────────────────────────────────
+
+@pytest.fixture(scope="session")
+def system_domain(ssh: SSHSession) -> str:
+    """Read the fallback-system-domain from the daemon runtime config."""
+    try:
+        raw = ssh(
+            "python3 -c \""
+            "import json; "
+            "print(json.load(open('/var/run/keaubnd/keaubnd.json'))"
+            ".get('fallback-system-domain', 'lan'))"
+            "\"",
+            check=False,
+        ).strip()
+        return raw if raw else "lan"
+    except Exception:
+        return "lan"
+
+
 # ── Test IP / hostname allocator ──────────────────────────────────────────────
 
 @pytest.fixture
-def test_host():
-    """Allocate a unique (hostname, ip) pair for one test."""
+def test_host(system_domain: str):
+    """Allocate a unique (hostname, label, ip) pair for one test.
+
+    'hostname' is the FQDN that kea-sync.py will register in Unbound
+    (label + system domain). 'label' is the bare hostname without domain,
+    as stored in Kea reservations.
+    """
     global _ip_counter, _host_counter
     _host_counter += 1
     _ip_counter += 1
     if _ip_counter > 254:
         pytest.fail("Test IP pool exhausted — too many concurrent tests")
-    hostname = f"{TEST_HOST_PREFIX}{_host_counter:03d}.lan"
+    label = f"{TEST_HOST_PREFIX}{_host_counter:03d}"
+    hostname = f"{label}.{system_domain}"
     ip = f"{TEST_IP_PREFIX}{_ip_counter}"
-    return {"hostname": hostname, "ip": ip}
+    return {"hostname": hostname, "label": label, "ip": ip}
 
 
 # ── dhcp4 subnet-ID discovery ─────────────────────────────────────────────────
@@ -408,18 +535,57 @@ def dhcp4_subnet_id(kea):
     return subnets[0]["id"]
 
 
+# ── Environment configuration ─────────────────────────────────────────────────
+
+@pytest.fixture(scope="session", autouse=True)
+def chaos_env_configured():
+    """
+    Run configure-chaos-env.sh --opnsense-only before any test runs.
+
+    This configures Kea (lease database, DDNS wiring, D2 forwarding to port 53535)
+    and is idempotent — safe to run on every session. Uses tools/.env for SSH key.
+    Skips gracefully if the script or tools/.env is absent.
+    """
+    import subprocess
+    script = REPO / "tools" / "setup" / "configure-chaos-env.sh"
+    env_file = REPO / "tools" / ".env"
+    if not script.exists():
+        pytest.skip("configure-chaos-env.sh not found — skipping environment setup")
+        return
+    if not env_file.exists():
+        pytest.skip("tools/.env not found — cannot configure environment")
+        return
+    result = subprocess.run(
+        ["bash", str(script), "--opnsense-only"],
+        cwd=str(REPO),
+        capture_output=True,
+        text=True,
+        timeout=300,
+    )
+    if result.returncode != 0:
+        pytest.fail(
+            f"configure-chaos-env.sh failed (rc={result.returncode}):\n"
+            f"stdout: {result.stdout[-1000:]}\n"
+            f"stderr: {result.stderr[-500:]}"
+        )
+
+
 # ── Deploy fixture ────────────────────────────────────────────────────────────
 
 @pytest.fixture(scope="session")
 def deploy(ssh: SSHSession, opnsense_info):
     """
-    Upload the working tree to the OPNsense box and run `make upgrade`.
+    Upload the working tree to the OPNsense box and install it.
+
+    Two strategies (auto-detected by checking for the Mk build infrastructure):
+      make upgrade  — when /usr/plugins/Mk/plugins.mk exists on the OPNsense box.
+      direct copy   — fallback: extract src/ directly into /usr/local/, restart configd.
 
     Steps:
       1. Build a clean tarball of src/ locally (COPYFILE_DISABLE=1, no xattrs).
       2. Upload via SFTP to /tmp/keaubnd-src.tar.gz on the OPNsense box.
-      3. Extract into the plugin build tree src/ directory.
-      4. Run `make upgrade` (rebuilds .pkg and upgrades the installed package).
+      3a. If build tree: extract into plugin_dir/src and run `make upgrade`.
+      3b. If no build tree: extract directly into /usr/local/, fix perms, restart configd.
     """
     import subprocess
 
@@ -446,16 +612,38 @@ def deploy(ssh: SSHSession, opnsense_info):
 
         ssh.sftp_put(tarball, "/tmp/keaubnd-src.tar.gz")
 
-        # Extract into the build-tree src/ (replaces source files only)
-        ssh(
-            f"tar --no-xattrs --no-acls --no-fflags "
-            f"-xzf /tmp/keaubnd-src.tar.gz "
-            f"-C {plugin_dir}/src",
-            timeout=30,
-        )
+        # Detect install strategy
+        has_mk = ssh(
+            f"test -f /usr/plugins/Mk/plugins.mk && echo yes || echo no",
+            check=False,
+        ).strip()
 
-        # Rebuild and upgrade the installed package
-        ssh(f"cd {plugin_dir} && make upgrade", timeout=120)
+        if has_mk == "yes":
+            # make upgrade path: create build tree if missing, then make upgrade
+            ssh(f"mkdir -p {plugin_dir}/src", check=False)
+            ssh(
+                f"tar --no-xattrs --no-acls --no-fflags "
+                f"-xzf /tmp/keaubnd-src.tar.gz "
+                f"-C {plugin_dir}/src",
+                timeout=30,
+            )
+            ssh(f"cd {plugin_dir} && make upgrade", timeout=120)
+        else:
+            # Direct copy path (no Mk infrastructure)
+            ssh(
+                "tar --no-xattrs --no-acls --no-fflags "
+                "-xzf /tmp/keaubnd-src.tar.gz -C /usr/local/",
+                timeout=30,
+            )
+            ssh("chmod 755 /usr/local/sbin/kea-ubnd-ddns.py", check=False)
+            ssh(
+                "find /usr/local/opnsense/scripts/keaubnd -name '*.py' "
+                "-exec chmod 755 {} \\;",
+                check=False,
+            )
+            ssh("service configd restart", check=False)
+
+        ssh("rm -f /tmp/keaubnd-src.tar.gz", check=False)
 
     finally:
         tarball.unlink(missing_ok=True)
@@ -487,19 +675,20 @@ def dhcp6_subnet_id(kea6):
 # ── Unique IPv6 test-address allocator ───────────────────────────────────────
 # Allocates addresses in a configurable ULA range so v6 tests have unique IPs
 # without conflicting with the DHCPv6 lease pool.
-_v6_prefix = os.environ.get("TEST_IPV6_PREFIX", "fd00:db8:test::")
+_v6_prefix = os.environ.get("TEST_IPV6_PREFIX", "fd00:db8:cafe::")
 _v6_counter = 0
 
 
 @pytest.fixture
-def test_host_v6():
-    """Allocate a unique (hostname, v6_ip) pair for one test."""
+def test_host_v6(system_domain: str):
+    """Allocate a unique (hostname, label, v6_ip) pair for one test."""
     global _v6_counter, _host_counter
     _v6_counter += 1
     _host_counter += 1
-    hostname = f"{TEST_HOST_PREFIX}v6-{_host_counter:03d}.lan"
+    label = f"{TEST_HOST_PREFIX}v6-{_host_counter:03d}"
+    hostname = f"{label}.{system_domain}"
     ip = f"{_v6_prefix}{_v6_counter}"
-    return {"hostname": hostname, "ip": ip}
+    return {"hostname": hostname, "label": label, "ip": ip}
 
 
 # ── v6 lease release helper ───────────────────────────────────────────────────

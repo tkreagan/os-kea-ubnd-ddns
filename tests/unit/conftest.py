@@ -74,11 +74,16 @@ def load_script(filename: str):
 
 @pytest.fixture(autouse=True)
 def clear_kea_transport_cache():
-    """Clear the per-process memoized connection cache between tests."""
+    """Clear per-process memoized caches between tests."""
     from lib import kea_transport
+    from lib import keaubnd_runtime
     kea_transport._resolved.clear()
+    keaubnd_runtime._cache = None
+    keaubnd_runtime._config_path = keaubnd_runtime.RUNTIME_CONFIG_PATH
     yield
     kea_transport._resolved.clear()
+    keaubnd_runtime._cache = None
+    keaubnd_runtime._config_path = keaubnd_runtime.RUNTIME_CONFIG_PATH
 
 
 @pytest.fixture

@@ -64,10 +64,10 @@ def test_audit_shows_reservation_as_ok(ssh, kea, dhcp4_subnet_id,
             "subnet-id": dhcp4_subnet_id,
             "hw-address": "aa:bb:cc:66:00:01",
             "ip-address": ip,
-            "hostname": hostname.replace(".lan", ""),
+            "hostname": test_host["label"],
         }
     })
-    ssh("/usr/local/sbin/configctl keaubnd sync_static")
+    ssh("/usr/local/sbin/configctl keaubnd sync_full")
     time.sleep(2)
     test_log("injected", {"type": "reservation", "hostname": hostname, "ip": ip})
 

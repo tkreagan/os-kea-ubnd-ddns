@@ -10,6 +10,9 @@ unbound_list_local_data, query_kea_reservations, query_kea_leases.
 
 from __future__ import annotations
 
+import fcntl
+import signal
+import threading
 import time
 import unittest.mock as mock
 
@@ -20,12 +23,16 @@ from lib.keaubnd_sync import (
     KeaServiceUnavailableError,
     KeaUnavailableError,
     _arpa_to_ip,
+    compute_magic_suffix,
+    discover_stale,
+    duid_extract_mac,
     find_stale_records,
-    get_synthesize_ptr,
     ip_covered_by_d2_reverse,
     is_in_host_entries,
+    is_laa,
     is_ptr_name,
-    is_sane_name,
+    normalize_hostname,
+    protected_magic_from_state,
     qualify_hostname,
     query_kea_leases,
     query_kea_reservations,
@@ -38,34 +45,39 @@ from lib.keaubnd_sync import (
 pytestmark = pytest.mark.unit
 
 
-# ── is_sane_name ──────────────────────────────────────────────────────────────
+# ── normalize_hostname ────────────────────────────────────────────────────────
+# is_sane_name was removed; validate via normalize_hostname (returns None on reject).
 
-@pytest.mark.parametrize("name,expect", [
+@pytest.mark.parametrize("name,expect_valid", [
     ("myhost.lan",              True),
     ("foo-bar.lan",             True),
     ("a.b.c.d",                 True),
     ("x1.example.com",          True),
-    ("a" * 63 + ".lan",         True),   # 63-char label is ok
+    ("a" * 63 + ".lan",         True),
     # all-label validation: invalid chars in non-first labels
     ("valid.evil!label.lan",    False),
     ("valid._svc.lan",          False),
     ("valid.bad-.lan",          False),
     ("valid.-bad.lan",          False),
-    ("a" * 64 + ".lan",         False),  # 64-char label exceeds RFC 1035 max
+    ("a" * 64 + ".lan",         False),
     # reserved / nonsense
     ("",                        False),
     (".",                       False),
     ("localhost",               False),
     ("localdomain",             False),
-    # all-numeric
+    # all-numeric (IP-like names)
     ("192.168.1.1",             False),
     ("10.0.0.1",                False),
     # invalid first label
     ("-bad.lan",                False),
     ("_svc.lan",                False),
 ])
-def test_is_sane_name(name, expect):
-    assert is_sane_name(name) is expect
+def test_normalize_hostname_validity(name, expect_valid):
+    result = normalize_hostname(name)
+    if expect_valid:
+        assert result is not None, f"expected valid result for {name!r}, got None"
+    else:
+        assert result is None, f"expected None for {name!r}, got {result!r}"
 
 
 # ── qualify_hostname ──────────────────────────────────────────────────────────
@@ -113,34 +125,34 @@ def test_is_ptr_name(name, expect):
 # ── read_host_entries ─────────────────────────────────────────────────────────
 
 def test_read_host_entries_parses_fixture(host_entries_path, monkeypatch):
-    monkeypatch.setattr(keaubnd_sync, "HOST_ENTRIES", str(host_entries_path))
+    monkeypatch.setattr(keaubnd_sync._rt, "get_host_entries", lambda: str(host_entries_path))
     entries = read_host_entries()
     assert "router.lan" in entries
     assert "static-host.lan" in entries
 
 
 def test_read_host_entries_ptr_by_ip(host_entries_path, monkeypatch):
-    monkeypatch.setattr(keaubnd_sync, "HOST_ENTRIES", str(host_entries_path))
+    monkeypatch.setattr(keaubnd_sync._rt, "get_host_entries", lambda: str(host_entries_path))
     entries = read_host_entries()
     assert "192.168.1.1" in entries
 
 
 def test_read_host_entries_missing_file_returns_empty(monkeypatch):
-    monkeypatch.setattr(keaubnd_sync, "HOST_ENTRIES", "/nonexistent/file.conf")
+    monkeypatch.setattr(keaubnd_sync._rt, "get_host_entries", lambda: "/nonexistent/file.conf")
     assert read_host_entries() == {}
 
 
 def test_read_host_entries_empty_file(tmp_path, monkeypatch):
     f = tmp_path / "he.conf"
     f.write_text("")
-    monkeypatch.setattr(keaubnd_sync, "HOST_ENTRIES", str(f))
+    monkeypatch.setattr(keaubnd_sync._rt, "get_host_entries", lambda: str(f))
     assert read_host_entries() == {}
 
 
 def test_read_host_entries_skips_comments(tmp_path, monkeypatch):
     f = tmp_path / "he.conf"
     f.write_text("# this is a comment\n")
-    monkeypatch.setattr(keaubnd_sync, "HOST_ENTRIES", str(f))
+    monkeypatch.setattr(keaubnd_sync._rt, "get_host_entries", lambda: str(f))
     assert read_host_entries() == {}
 
 
@@ -173,7 +185,7 @@ def test_find_stale_records_identifies_stale_forward():
     kea_pairs = set()  # nothing in Kea
     host_entries = {}
     stale, orphans = find_stale_records(unbound, kea_pairs, host_entries)
-    assert "ghost.lan" in stale
+    assert any(n == "ghost.lan" for n, _ in stale)
 
 
 def test_find_stale_records_keeps_kea_backed():
@@ -181,7 +193,7 @@ def test_find_stale_records_keeps_kea_backed():
     kea_pairs = {("live.lan", "192.168.1.10")}
     host_entries = {}
     stale, orphans = find_stale_records(unbound, kea_pairs, host_entries)
-    assert "live.lan" not in stale
+    assert not any(n == "live.lan" for n, _ in stale)
 
 
 def test_find_stale_records_respects_host_entries():
@@ -189,7 +201,7 @@ def test_find_stale_records_respects_host_entries():
     kea_pairs = set()
     host_entries = {"static-host.lan": ["local-data: ..."]}
     stale, orphans = find_stale_records(unbound, kea_pairs, host_entries)
-    assert "static-host.lan" not in stale
+    assert not any(n == "static-host.lan" for n, _ in stale)
 
 
 def test_find_stale_records_per_pair_not_per_ip():
@@ -199,7 +211,7 @@ def test_find_stale_records_per_pair_not_per_ip():
     kea_pairs = {("host-b.lan", "10.0.0.1")}
     host_entries = {}
     stale, orphans = find_stale_records(unbound, kea_pairs, host_entries)
-    assert "host-a.lan" in stale
+    assert any(n == "host-a.lan" for n, _ in stale)
 
 
 def test_find_stale_records_orphaned_ptr():
@@ -220,7 +232,7 @@ def test_find_stale_records_ptr_backed_by_live_forward():
     kea_pairs = {("live.lan", "192.168.1.10")}
     host_entries = {}
     stale, orphans = find_stale_records(unbound, kea_pairs, host_entries)
-    assert "live.lan" not in stale
+    assert not any(n == "live.lan" for n, _ in stale)
     assert "10.1.168.192.in-addr.arpa" not in orphans
 
 
@@ -232,7 +244,7 @@ def test_find_stale_records_ptr_becomes_orphan_when_forward_stale():
     kea_pairs = set()
     host_entries = {}
     stale, orphans = find_stale_records(unbound, kea_pairs, host_entries)
-    assert "ghost.lan" in stale
+    assert any(n == "ghost.lan" for n, _ in stale)
     assert "99.1.168.192.in-addr.arpa" in orphans
 
 
@@ -396,39 +408,6 @@ def test_query_kea_leases_infinite_expiry(mock_dom, mock_api):
     assert leases[0]["expires"] > int(time.time())
 
 
-# ── get_synthesize_ptr ────────────────────────────────────────────────────────
-
-def test_get_synthesize_ptr_default_when_missing(tmp_path, monkeypatch):
-    xml = "<opnsense><OPNsense><KeaUbnd><general></general></KeaUbnd></OPNsense></opnsense>"
-    f = tmp_path / "config.xml"
-    f.write_text(xml)
-    monkeypatch.setattr(keaubnd_sync, "CONFIG_XML", str(f))
-    assert get_synthesize_ptr() is True
-
-
-def test_get_synthesize_ptr_returns_true_when_one(tmp_path, monkeypatch):
-    xml = "<opnsense><OPNsense><KeaUbnd><general><synthesize_ptr>1</synthesize_ptr></general></KeaUbnd></OPNsense></opnsense>"
-    f = tmp_path / "config.xml"
-    f.write_text(xml)
-    monkeypatch.setattr(keaubnd_sync, "CONFIG_XML", str(f))
-    assert get_synthesize_ptr() is True
-
-
-def test_get_synthesize_ptr_returns_false_when_zero(tmp_path, monkeypatch):
-    xml = "<opnsense><OPNsense><KeaUbnd><general><synthesize_ptr>0</synthesize_ptr></general></KeaUbnd></OPNsense></opnsense>"
-    f = tmp_path / "config.xml"
-    f.write_text(xml)
-    monkeypatch.setattr(keaubnd_sync, "CONFIG_XML", str(f))
-    assert get_synthesize_ptr() is False
-
-
-def test_get_synthesize_ptr_default_on_bad_xml(tmp_path, monkeypatch):
-    f = tmp_path / "config.xml"
-    f.write_text("not xml")
-    monkeypatch.setattr(keaubnd_sync, "CONFIG_XML", str(f))
-    assert get_synthesize_ptr() is True
-
-
 # ── _arpa_to_ip ───────────────────────────────────────────────────────────────
 
 @pytest.mark.parametrize("name,expected", [
@@ -466,14 +445,14 @@ def test_read_d2_reverse_zones_parses(tmp_path, monkeypatch):
     import json
     f = tmp_path / "kea-dhcp-ddns.conf"
     f.write_text(json.dumps(conf))
-    monkeypatch.setattr(keaubnd_sync, "D2_CONF", str(f))
+    monkeypatch.setattr(keaubnd_sync._rt, "get_kea_conf", lambda svc: str(f) if svc == "d2" else None)
     zones = read_d2_reverse_zones()
     assert "1.168.192.in-addr.arpa" in zones
     assert "2.168.192.in-addr.arpa" in zones
 
 
 def test_read_d2_reverse_zones_absent_file(monkeypatch):
-    monkeypatch.setattr(keaubnd_sync, "D2_CONF", "/nonexistent/kea-dhcp-ddns.conf")
+    monkeypatch.setattr(keaubnd_sync._rt, "get_kea_conf", lambda svc: "/nonexistent/kea-dhcp-ddns.conf" if svc == "d2" else None)
     assert read_d2_reverse_zones() == set()
 
 
@@ -482,7 +461,7 @@ def test_read_d2_reverse_zones_no_reverse_domains(tmp_path, monkeypatch):
     import json
     f = tmp_path / "kea-dhcp-ddns.conf"
     f.write_text(json.dumps(conf))
-    monkeypatch.setattr(keaubnd_sync, "D2_CONF", str(f))
+    monkeypatch.setattr(keaubnd_sync._rt, "get_kea_conf", lambda svc: str(f) if svc == "d2" else None)
     assert read_d2_reverse_zones() == set()
 
 
@@ -526,7 +505,7 @@ def test_find_stale_records_synthesis_on_keeps_active_lease_ptr():
     )
     kea_pairs = {("live.lan", "192.168.1.10")}
     stale, orphans = find_stale_records(unbound, kea_pairs, {}, synthesize_ptr=True)
-    assert "live.lan" not in stale
+    assert not any(n == "live.lan" for n, _ in stale)
     assert "10.1.168.192.in-addr.arpa" not in orphans
 
 
@@ -540,7 +519,7 @@ def test_find_stale_records_synthesis_off_no_d2_removes_ptr():
     stale, orphans = find_stale_records(
         unbound, kea_pairs, {}, synthesize_ptr=False, d2_reverse_zones=set()
     )
-    assert "live.lan" not in stale          # forward kept — Kea still backs it
+    assert not any(n == "live.lan" for n, _ in stale)          # forward kept — Kea still backs it
     assert "10.1.168.192.in-addr.arpa" in orphans  # PTR unconditionally removed
 
 
@@ -574,7 +553,7 @@ def test_find_stale_records_host_override_ptr_preserved_synthesis_on():
     stale, orphans = find_stale_records(
         unbound, kea_pairs, host_entries, synthesize_ptr=True
     )
-    assert "router.lan" not in stale
+    assert not any(n == "router.lan" for n, _ in stale)
     assert "1.1.168.192.in-addr.arpa" not in orphans
 
 
@@ -593,7 +572,7 @@ def test_find_stale_records_host_override_ptr_preserved_synthesis_off():
         unbound, kea_pairs, host_entries,
         synthesize_ptr=False, d2_reverse_zones=set()
     )
-    assert "router.lan" not in stale
+    assert not any(n == "router.lan" for n, _ in stale)
     assert "1.1.168.192.in-addr.arpa" not in orphans
 
 
@@ -609,5 +588,389 @@ def test_find_stale_records_synthesis_off_v6_removes_ptr():
     stale, orphans = find_stale_records(
         unbound, kea_pairs, {}, synthesize_ptr=False, d2_reverse_zones=set()
     )
-    assert "v6host.lan" not in stale
+    assert not any(n == "v6host.lan" for n, _ in stale)
     assert v6_arpa in orphans
+
+
+# ── protected_magic_from_state ────────────────────────────────────────────────
+
+def _magic_state(fqdn_key: str, ip: str, fqdn: str, source: str) -> dict:
+    """Build a magic state dict. fqdn_key must be the full FQDN (e.g. 'laptop.lan'),
+    not a bare label — magic state keys changed to full FQDNs in Finding 2 fix."""
+    return {"magic_names": {fqdn_key: [{"magic_fqdn": fqdn, "ip": ip, "source": source}]}}
+
+
+def test_protected_magic_static_always_protected():
+    state = _magic_state("laptop.lan", "192.168.1.5", "laptop-mAABBCC.lan", "static")
+    protected = protected_magic_from_state(state, kea_pairs=set())
+    assert "laptop-maabbcc.lan" in protected
+
+
+def test_protected_magic_override_always_protected():
+    state = _magic_state("laptop.lan", "192.168.1.5", "laptop-mAABBCC.lan", "override")
+    protected = protected_magic_from_state(state, kea_pairs=set())
+    assert "laptop-maabbcc.lan" in protected
+
+
+def test_protected_magic_lease_protected_when_active():
+    state = _magic_state("laptop.lan", "192.168.1.5", "laptop-mAABBCC.lan", "lease")
+    kea_pairs = {("laptop.lan", "192.168.1.5")}
+    protected = protected_magic_from_state(state, kea_pairs=kea_pairs)
+    assert "laptop-maabbcc.lan" in protected
+
+
+def test_protected_magic_lease_not_protected_when_expired():
+    state = _magic_state("laptop.lan", "192.168.1.5", "laptop-mAABBCC.lan", "lease")
+    protected = protected_magic_from_state(state, kea_pairs=set())
+    assert "laptop-maabbcc.lan" not in protected
+
+
+def test_protected_magic_empty_state():
+    assert protected_magic_from_state({}, kea_pairs=set()) == set()
+
+
+# ── discover_stale ────────────────────────────────────────────────────────────
+
+@mock.patch.object(keaubnd_sync, "find_stale_records", return_value=(set(), set()))
+@mock.patch.object(keaubnd_sync, "protected_magic_from_state", return_value=set())
+@mock.patch.object(keaubnd_sync, "read_magic_state", return_value={})
+@mock.patch.object(keaubnd_sync, "read_d2_reverse_zones", return_value={"1.168.192.in-addr.arpa"})
+@mock.patch.object(keaubnd_sync, "collect_kea_pairs", return_value=set())
+@mock.patch.object(keaubnd_sync, "unbound_list_local_data", return_value={})
+@mock.patch.object(keaubnd_sync, "read_host_entries", return_value={})
+def test_discover_stale_passes_d2_zones_to_find_stale(
+        mock_rhe, mock_ld, mock_ckp, mock_rdz, mock_rms, mock_pms, mock_fsr):
+    discover_stale(synthesize_ptr=True)
+    _, kwargs = mock_fsr.call_args
+    assert kwargs.get("d2_reverse_zones") == {"1.168.192.in-addr.arpa"}
+
+
+@mock.patch.object(keaubnd_sync, "find_stale_records", return_value=(set(), set()))
+@mock.patch.object(keaubnd_sync, "protected_magic_from_state", return_value=set())
+@mock.patch.object(keaubnd_sync, "read_magic_state", return_value={})
+@mock.patch.object(keaubnd_sync, "read_d2_reverse_zones", return_value=set())
+@mock.patch.object(keaubnd_sync, "collect_kea_pairs", return_value=set())
+@mock.patch.object(keaubnd_sync, "unbound_list_local_data", return_value={})
+@mock.patch.object(keaubnd_sync, "read_host_entries", return_value={})
+def test_discover_stale_passes_synthesize_ptr(
+        mock_rhe, mock_ld, mock_ckp, mock_rdz, mock_rms, mock_pms, mock_fsr):
+    discover_stale(synthesize_ptr=False)
+    _, kwargs = mock_fsr.call_args
+    assert kwargs.get("synthesize_ptr") is False
+
+
+@mock.patch.object(keaubnd_sync, "read_d2_reverse_zones", return_value=set())
+@mock.patch.object(keaubnd_sync, "collect_kea_pairs",
+                   side_effect=KeaUnavailableError("down"))
+@mock.patch.object(keaubnd_sync, "unbound_list_local_data", return_value={})
+@mock.patch.object(keaubnd_sync, "read_host_entries", return_value={})
+def test_discover_stale_propagates_kea_unavailable(mock_rhe, mock_ld, mock_ckp, mock_rdz):
+    with pytest.raises(KeaUnavailableError):
+        discover_stale()
+
+
+@mock.patch.object(keaubnd_sync, "find_stale_records")
+@mock.patch.object(keaubnd_sync, "protected_magic_from_state", return_value={"laptop-m112233.lan"})
+@mock.patch.object(keaubnd_sync, "read_magic_state", return_value={})
+@mock.patch.object(keaubnd_sync, "read_d2_reverse_zones", return_value=set())
+@mock.patch.object(keaubnd_sync, "collect_kea_pairs", return_value=set())
+@mock.patch.object(keaubnd_sync, "unbound_list_local_data", return_value={})
+@mock.patch.object(keaubnd_sync, "read_host_entries", return_value={})
+def test_discover_stale_passes_protected_magic(
+        mock_rhe, mock_ld, mock_ckp, mock_rdz, mock_rms, mock_pms, mock_fsr):
+    mock_fsr.return_value = (set(), set())
+    discover_stale()
+    _, kwargs = mock_fsr.call_args
+    assert kwargs.get("protected_magic_fqdns") == {"laptop-m112233.lan"}
+
+
+# ── unbound_mutation_lock — bounded-wait (Phase C) ───────────────────────────
+
+def test_lock_yields_when_uncontested(tmp_path, monkeypatch):
+    """Lock acquired immediately when uncontested; body runs without exception."""
+    monkeypatch.setattr(keaubnd_sync, "MUTATION_LOCK_DIR", str(tmp_path))
+    monkeypatch.setattr(keaubnd_sync, "MUTATION_LOCK_PATH", str(tmp_path / "test.lock"))
+    reached = []
+    with keaubnd_sync.unbound_mutation_lock(blocking=True, timeout_secs=2):
+        reached.append(True)
+    assert reached == [True]
+
+
+def test_lock_timeout_raises_timeout_error(tmp_path, monkeypatch):
+    """When the lock is held by another fd, a short timeout raises TimeoutError."""
+    monkeypatch.setattr(keaubnd_sync, "MUTATION_LOCK_DIR", str(tmp_path))
+    lock_path = str(tmp_path / "test.lock")
+    monkeypatch.setattr(keaubnd_sync, "MUTATION_LOCK_PATH", lock_path)
+
+    # Hold the lock on a separate fd so our attempt blocks.
+    holder = open(lock_path, "w")
+    fcntl.flock(holder, fcntl.LOCK_EX)
+    try:
+        with pytest.raises(TimeoutError):
+            with keaubnd_sync.unbound_mutation_lock(blocking=True, timeout_secs=0.1):
+                pass
+    finally:
+        fcntl.flock(holder, fcntl.LOCK_UN)
+        holder.close()
+
+
+def test_lock_timeout_restores_signal_handler(tmp_path, monkeypatch):
+    """After a timeout, SIGALRM handler is restored to its pre-call value."""
+    monkeypatch.setattr(keaubnd_sync, "MUTATION_LOCK_DIR", str(tmp_path))
+    lock_path = str(tmp_path / "test.lock")
+    monkeypatch.setattr(keaubnd_sync, "MUTATION_LOCK_PATH", lock_path)
+
+    sentinel = object()
+    original = signal.signal(signal.SIGALRM, lambda s, f: sentinel)
+
+    holder = open(lock_path, "w")
+    fcntl.flock(holder, fcntl.LOCK_EX)
+    try:
+        try:
+            with keaubnd_sync.unbound_mutation_lock(blocking=True, timeout_secs=0.1):
+                pass
+        except TimeoutError:
+            pass
+        restored = signal.getsignal(signal.SIGALRM)
+        assert restored is original or callable(restored), \
+            "SIGALRM handler must be restored after timeout"
+    finally:
+        fcntl.flock(holder, fcntl.LOCK_UN)
+        holder.close()
+        signal.signal(signal.SIGALRM, signal.SIG_DFL)
+
+
+def test_lock_float_timeout_accepted(tmp_path, monkeypatch):
+    """float timeout_secs is accepted (no TypeError from signal.alarm's int-only API)."""
+    monkeypatch.setattr(keaubnd_sync, "MUTATION_LOCK_DIR", str(tmp_path))
+    monkeypatch.setattr(keaubnd_sync, "MUTATION_LOCK_PATH", str(tmp_path / "test.lock"))
+    # 0.5s float must not raise TypeError — that was the alarm() limitation
+    with keaubnd_sync.unbound_mutation_lock(blocking=True, timeout_secs=0.5):
+        pass  # acquired immediately; just verifying no TypeError
+
+
+def test_lock_spurious_sigalrm_after_acquired(tmp_path, monkeypatch):
+    """SIGALRM delivered in the tiny window after flock returns but before
+    setitimer(0) cancels the timer must be suppressed (acquired=True), not
+    raise TimeoutError. Finding H.
+
+    Simulated by injecting a SIGALRM delivery inside the setitimer(0) call —
+    at that moment the _alarm_handler closure is still installed and acquired=True."""
+    import os as _os
+    monkeypatch.setattr(keaubnd_sync, "MUTATION_LOCK_DIR", str(tmp_path))
+    monkeypatch.setattr(keaubnd_sync, "MUTATION_LOCK_PATH", str(tmp_path / "test.lock"))
+
+    real_setitimer = signal.setitimer
+
+    def inject_alarm_on_cancel(which, seconds, interval=0.0):
+        # Simulate a queued SIGALRM firing just as we try to cancel it.
+        if which == signal.ITIMER_REAL and seconds == 0:
+            _os.kill(_os.getpid(), signal.SIGALRM)
+        return real_setitimer(which, seconds, interval)
+
+    reached = []
+    with mock.patch("signal.setitimer", side_effect=inject_alarm_on_cancel):
+        # Must NOT raise TimeoutError despite the injected SIGALRM —
+        # because acquired=True when the alarm fires during cancel.
+        with keaubnd_sync.unbound_mutation_lock(blocking=True, timeout_secs=2):
+            reached.append(True)
+    assert reached == [True], "lock body must be reached without TimeoutError"
+
+
+# ── is_laa ────────────────────────────────────────────────────────────────────
+
+@pytest.mark.parametrize("mac,expect", [
+    ("02:00:00:00:00:01", True),    # U/L bit set
+    ("06:00:00:00:00:01", True),    # multicast+LAA bits both set
+    ("00:11:22:33:44:55", False),   # globally unique
+    ("aa:bb:cc:dd:ee:ff", True),    # LAA bit set (0xaa & 0x02)
+    ("de:ad:be:ef:00:01", True),    # 0xde = 0b11011110, U/L bit set
+    ("0c:00:00:00:00:01", False),   # 0x0c = 0b00001100, U/L bit clear
+    ("001122334455",      False),   # bare hex, globally unique
+    ("021122334455",      True),    # bare hex, LAA bit set
+    ("",                  False),   # empty
+    ("zz:bad",            False),   # invalid hex
+])
+def test_is_laa(mac, expect):
+    assert is_laa(mac) == expect
+
+
+# ── duid_extract_mac ──────────────────────────────────────────────────────────
+
+@pytest.mark.parametrize("duid,expected_mac", [
+    # DUID-LL (type 3), hw-type 1 (Ethernet)
+    ("00:03:00:01:de:ad:be:ef:00:01", "de:ad:be:ef:00:01"),
+    # DUID-LLT (type 1), hw-type 1 (Ethernet) — 4-byte time 0x12345678
+    ("00:01:00:01:12:34:56:78:aa:bb:cc:dd:ee:ff", "aa:bb:cc:dd:ee:ff"),
+    # DUID-LL (type 3), hw-type 6 (IEEE 802)
+    ("00:03:00:06:02:00:5e:10:20:30", "02:00:5e:10:20:30"),
+    # DUID-LLT (type 1), hw-type 6 (IEEE 802)
+    ("00:01:00:06:00:00:00:00:02:00:5e:10:20:30", "02:00:5e:10:20:30"),
+    # DUID-EN (type 2) — no embedded MAC
+    ("00:02:00:00:09:bf:00:01:02:03", None),
+    # DUID-UUID (type 4) — no embedded MAC
+    ("00:04:00:01:02:03:04:05:06:07:08:09:0a:0b:0c:0d:0e:0f", None),
+    # hw-type 7 (ArcNet) — not an Ethernet family type
+    ("00:03:00:07:aa:bb:cc:dd:ee:ff", None),
+    # too short to contain a MAC
+    ("00:03:00:01:aa:bb",             None),
+    # completely malformed
+    ("not-hex",                       None),
+    # bare hex string (no colons) — DUID-LL, hw-type 1
+    ("000300010a0b0c0d0e0f",          "0a:0b:0c:0d:0e:0f"),
+])
+def test_duid_extract_mac(duid, expected_mac):
+    assert duid_extract_mac(duid) == expected_mac
+
+
+# ── compute_magic_suffix — DUID LAA detection ─────────────────────────────────
+
+def test_compute_magic_suffix_duid_llt_laa_tagged():
+    # DUID-LLT with LAA MAC (0x02 bit set in first byte)
+    duid = "00:01:00:01:12:34:56:78:02:00:5e:10:20:30"
+    result = compute_magic_suffix("duid", duid, laa_tag=True)
+    assert result.startswith("laa-d"), f"Expected laa-d prefix, got {result!r}"
+
+
+def test_compute_magic_suffix_duid_ll_laa_tagged():
+    # DUID-LL with LAA MAC
+    duid = "00:03:00:01:de:ad:be:ef:00:01"  # 0xde has U/L bit set
+    result = compute_magic_suffix("duid", duid, laa_tag=True)
+    assert result.startswith("laa-d"), f"Expected laa-d prefix, got {result!r}"
+
+
+def test_compute_magic_suffix_duid_llt_globally_unique_no_laa():
+    # DUID-LLT with globally unique MAC — no laa- prefix even with laa_tag
+    duid = "00:01:00:01:12:34:56:78:00:11:22:33:44:55"
+    result = compute_magic_suffix("duid", duid, laa_tag=True)
+    assert not result.startswith("laa-"), f"Expected no laa- prefix, got {result!r}"
+    assert result.startswith("d"), f"Expected d prefix, got {result!r}"
+
+
+def test_compute_magic_suffix_duid_en_not_tagged():
+    # DUID-EN has no embedded MAC — no laa- prefix even with laa_tag
+    duid = "00:02:00:00:09:bf:00:01:02:03"
+    result = compute_magic_suffix("duid", duid, laa_tag=True)
+    assert not result.startswith("laa-"), f"Expected no laa- prefix, got {result!r}"
+
+
+def test_compute_magic_suffix_duid_laa_tag_disabled():
+    # laa_tag=False suppresses laa- prefix even for LAA DUIDs
+    duid = "00:03:00:01:de:ad:be:ef:00:01"
+    result = compute_magic_suffix("duid", duid, laa_tag=False)
+    assert not result.startswith("laa-"), f"Expected no laa- prefix, got {result!r}"
+
+
+# ── _evict_record ─────────────────────────────────────────────────────────────
+
+def _make_qub(data: dict):
+    """Build a qub callable from {name: {rtype: [(ip, ttl)]}} mapping.
+
+    Example: {"host.lan": {"A": [("10.0.0.1", "300"), ("10.0.0.2", "300")], "AAAA": []}}
+    """
+    def qub(name, rtype):
+        return list(data.get(name, {}).get(rtype, []))
+    return qub
+
+
+class TestEvictRecord:
+    """_evict_record: targeted removal preserving sibling records."""
+
+    def _uc_capture(self):
+        calls = []
+        def uc(args):
+            calls.append(list(args))
+            return True
+        return uc, calls
+
+    def test_evict_removes_target_and_restores_sibling(self):
+        """Evicting one IP from a name with a sibling must restore the sibling."""
+        uc, calls = self._uc_capture()
+        qub = _make_qub({"host.lan": {
+            "A": [("192.168.1.10", "300"), ("192.168.1.11", "300")],
+            "AAAA": [],
+        }})
+        import logging
+        result = keaubnd_sync._evict_record(
+            uc, qub, "host.lan", "A", {"192.168.1.10"}, logging.getLogger("t"))
+        assert result is True
+        remove_calls = [c for c in calls if c[0] == "local_data_remove"]
+        add_calls = [c for c in calls if c[0] == "local_data"]
+        assert any("host.lan" in c[1] for c in remove_calls), "local_data_remove must be called"
+        assert any("192.168.1.11" in c[1] for c in add_calls), \
+            "sibling 192.168.1.11 must be restored"
+        assert not any("192.168.1.10" in c[1] for c in add_calls), \
+            "evicted IP must not be re-added"
+
+    def test_evict_clears_all_when_no_siblings(self):
+        """Evicting the only IP in a name leaves no records at that name."""
+        uc, calls = self._uc_capture()
+        qub = _make_qub({"host.lan": {"A": [("192.168.1.10", "300")], "AAAA": []}})
+        import logging
+        keaubnd_sync._evict_record(
+            uc, qub, "host.lan", "A", {"192.168.1.10"}, logging.getLogger("t"))
+        remove_calls = [c for c in calls if c[0] == "local_data_remove"]
+        add_calls = [c for c in calls if c[0] == "local_data"]
+        assert remove_calls, "local_data_remove must be called"
+        assert not any("192.168.1.10" in c[1] for c in add_calls), \
+            "evicted IP must not be re-added"
+
+
+# ── purge_released_ip: PTR target guard ───────────────────────────────────────
+
+class TestPurgeReleasedIpPtrGuard:
+    """purge_released_ip must NOT remove a PTR that already points at a new host.
+
+    Finding: if a released IP was immediately reassigned and the logwatcher
+    fires for the old release, the PTR in Unbound may already target the new
+    hostname. The guard checks ptr_targets before removing.
+    """
+
+    def _run_purge(self, ip, unbound_data, kea_ips=None, removed=None):
+        """Run purge_released_ip with mocked Kea query and unbound_control."""
+        if removed is None:
+            removed = []
+
+        def fake_uc(cmd):
+            removed.append(list(cmd))
+            return True
+
+        def fake_kea_ips(name, logger=None):
+            return kea_ips or set()
+
+        with mock.patch.object(keaubnd_sync, "unbound_control", side_effect=fake_uc), \
+             mock.patch.object(keaubnd_sync, "kea_ips_for_hostname",
+                               side_effect=fake_kea_ips):
+            import logging
+            keaubnd_sync.purge_released_ip(
+                ip, unbound_data, host_entries={}, logger=logging.getLogger("t"))
+        return removed
+
+    def test_ptr_removed_when_still_targets_purged_host(self):
+        """PTR is removed if it still points at the released host."""
+        ptr = "10.1.168.192.in-addr.arpa"
+        unbound_data = {
+            "old-host.lan": ["old-host.lan 300 IN A 192.168.1.10"],
+            ptr: [f"{ptr} 300 IN PTR old-host.lan."],
+        }
+        removed = self._run_purge("192.168.1.10", unbound_data)
+        assert any("local_data_remove" in " ".join(c) and ptr in " ".join(c)
+                   for c in removed), \
+            "PTR must be removed when it still targets the purged host"
+
+    def test_ptr_left_when_already_reassigned(self):
+        """Finding: PTR is NOT removed if it now points at a different host.
+
+        Scenario: 192.168.1.10 was released by old-host.lan, then immediately
+        reassigned to new-host.lan. Unbound PTR now targets new-host.lan.
+        purge_released_ip fires for old-host.lan's release — it must NOT touch
+        the PTR because it already belongs to the new host.
+        """
+        ptr = "10.1.168.192.in-addr.arpa"
+        unbound_data = {
+            "old-host.lan": ["old-host.lan 300 IN A 192.168.1.10"],
+            ptr: [f"{ptr} 300 IN PTR new-host.lan."],  # already reassigned
+        }
+        removed = self._run_purge("192.168.1.10", unbound_data)
+        assert not any(ptr in " ".join(c) for c in removed), \
+            "PTR must NOT be removed when it already targets a different host (Finding)"

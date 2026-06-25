@@ -77,21 +77,8 @@ settings below. The Lease Audit tab shows a full preview of what each cleanup wo
         <label>DNS Synchronization</label>
     </field>
     <field>
-        <id>general.general.sync_static_reservations</id>
-        <label>Sync Kea static reservations to Unbound</label>
-        <type>checkbox</type>
-        <help>Register Kea static reservations in Unbound DNS so they resolve immediately (before any client connects). Names already managed by OPNsense in Unbound (Host Overrides, or "Register DHCP Static Mappings") are skipped, so this is safe whether or not that Unbound setting is on. Requires the Kea DHCP service (kea-dhcp4/kea-dhcp6) to be running.</help>
-    </field>
-
-    <field>
-        <id>general.general.sync_dynamic_leases</id>
-        <label>Sync Kea active leases to Unbound</label>
-        <type>checkbox</type>
-        <help>Register Kea active leases in Unbound DNS with TTL matching lease expiration. Repopulates Unbound on startup and after each Kea or Unbound restart. Requires the Kea DHCP service (kea-dhcp4/kea-dhcp6) to be running.</help>
-    </field>
-    <field>
         <id>general.general.synthesize_ptr</id>
-        <label>Synthesize PTR records from DDNS updates</label>
+        <label>Synthesize PTR records</label>
         <type>checkbox</type>
         <help>Automatically create the standard in-addr.arpa / ip6.arpa PTR (reverse) record for every A/AAAA update received from kea-dhcp-ddns. Enabled by default — PTRs work immediately without needing a reverse zone in kea-dhcp-ddns. Disable only if you manage reverse DNS separately (e.g. another authoritative server for in-addr.arpa). Explicit PTR updates from kea-dhcp-ddns are always applied regardless of this setting. When both this option and a kea-dhcp-ddns reverse zone are configured for a subnet, PTRs are written by both paths — harmless, but the Config Check tab will flag it per subnet.</help>
     </field>
@@ -111,9 +98,63 @@ settings below. The Lease Audit tab shows a full preview of what each cleanup wo
         Static reservations are always synced before dynamic leases, so First wins
         naturally protects reservation DNS entries from being overwritten by dynamic
         clients. Best-effort on reconcile after restart (ordering is deterministic within
-        a run, not across restarts).<br><br>
+        a run, not across restarts).<br>
+        <b>None</b>: on any dynamic conflict, no dynamic lease gets the bare hostname —
+        existing dynamic records for that name are deleted. The hostname becomes available
+        again once all competing leases expire and a new lease registers. Useful when
+        hostname conflicts indicate misconfiguration and you want conflicts to be silent
+        rather than resolved arbitrarily.<br><br>
         Note: this plugin does not store or validate DHCID records. Collision detection
         is based on name-to-IP conflicts in Unbound, not client identity.]]></help>
+    </field>
+    <field>
+        <id>general.general.magic_names</id>
+        <label>Magic hostnames</label>
+        <type>checkbox</type>
+        <help><![CDATA[When enabled, every host involved in a hostname collision receives an
+        additional disambiguated forward record alongside whatever the collision policy
+        determines for the bare hostname. The magic hostname encodes the hardware
+        identifier type and last 6 characters of the identifier:<br><br>
+        <code>laptop-mAABBCC</code> — MAC-identified host (last 3 octets)<br>
+        <code>laptop-dAABBCC</code> — DUID-identified host<br>
+        <code>laptop-i001050</code> — IP-only host override (last 2 octets, 3-padded)<br><br>
+        Magic hostnames are not removed eagerly when a collision resolves — they persist
+        until the lease expires naturally, so cached references (SSH sessions, monitoring)
+        remain valid. Enable <b>LAA tagging</b> below to mark devices using randomized
+        MACs (iOS, Android) with an extra <code>-laa-</code> infix.]]></help>
+    </field>
+    <field>
+        <id>general.general.write_magic_ptrs</id>
+        <label>Magic PTR records</label>
+        <type>checkbox</type>
+        <help><![CDATA[When enabled, PTR (reverse) records for dynamic lease IPs in a
+        collision group point to the magic FQDN rather than the bare hostname. Every IP
+        in the group gets a stable, unambiguous PTR that never changes as collision
+        winners rotate:<br><br>
+        <code>101.1.168.192.in-addr.arpa PTR laptop-mAABBCC.home.lan.</code><br><br>
+        When disabled (default), PTR behaviour is unchanged from non-magic mode: the
+        collision winner gets PTR to the bare hostname, losers get no PTR record. The
+        mixed state (winner bare, losers magic) is deliberately avoided — PTR targets
+        would otherwise change each time the collision winner rotates.<br><br>
+        Requires both <b>Magic hostnames</b> and <b>Synthesize PTR records</b> to be
+        enabled. Note: magic PTRs cause a mismatch between the hostname in a TLS
+        certificate (issued for the bare hostname) and the PTR returned by a reverse
+        lookup, which can break tools that perform reverse-lookup certificate
+        verification.]]></help>
+    </field>
+    <field>
+        <id>general.general.magic_laa_tag</id>
+        <label>LAA tagging for magic hostnames</label>
+        <type>checkbox</type>
+        <help><![CDATA[When enabled alongside magic hostnames, devices whose MAC address has
+        the locally administered bit set (IEEE 802c / RFC 9724) receive an
+        <code>-laa-</code> infix in their magic hostname:<br><br>
+        <code>laptop-laa-mAABBCC</code><br><br>
+        LAA MACs are assigned by the device itself (not the manufacturer) and are commonly
+        used for MAC randomization on iOS, Android, and Windows. The infix signals that the
+        suffix may not be stable across reconnections — the device may rotate its MAC per
+        network or per day. Do not use LAA magic hostnames in long-lived references such
+        as TLS certificates or SSH <code>known_hosts</code> entries.]]></help>
     </field>
 
     <field>
@@ -121,35 +162,65 @@ settings below. The Lease Audit tab shows a full preview of what each cleanup wo
         <label>DNS Record Cleaning</label>
     </field>
     <field>
-        <id>general.general.clean_on_restart</id>
+        <id>general.general.clean_stale_records</id>
         <label>Clean stale records after restart</label>
         <type>checkbox</type>
         <help>After each full reconcile triggered by a Kea or Unbound restart, sweep Unbound for records no longer backed by any Kea reservation or active lease and remove them immediately. Useful when static reservations are removed — the stale DNS records disappear on the next restart rather than waiting for the scheduled auto-clean.</help>
     </field>
     <field>
-        <id>general.general.enable_logwatch</id>
-        <label>Watch logs for DHCP lease releases and missed updates</label>
+        <id>general.general.enable_auto_clean</id>
+        <label>Enable scheduled sync / clean</label>
         <type>checkbox</type>
-        <help>Enable a secondary daemon that tails both Kea's DHCP log and the listener log to catch DNS updates the live path missed. On a lease release (DHCP4_RELEASE / DHCP6_RELEASE) it immediately purges the DNS records for that IP. On a listener SERVFAIL (Unbound was briefly unavailable or locked) it triggers a targeted resync for the affected names. Runs as a separate daemon alongside the main listener, using the same shared cleanup scripts and lock. Requires Kea's kea-dhcp4 / kea-dhcp6 loggers to be at INFO severity or lower and writing to /var/log/kea/ — the OPNsense default.</help>
+        <help>Run Kea→Unbound sync and/or stale-record cleaning on a schedule. Use the sub-options below to choose what runs. The frequency and hour fields below control when jobs fire.</help>
     </field>
     <field>
-        <id>general.general.enable_auto_clean</id>
-        <label>Automatically clean stale DNS records</label>
+        <id>general.general.cron_run_sync</id>
+        <label>Full sync</label>
         <type>checkbox</type>
-        <help>Periodically compare all of Unbound's runtime DNS records against all Kea leases, reservations, and Unbound Host Overrides, and remove any record not backed by one of those sources. Requires Kea to be reachable; the job is skipped if Kea is unavailable. Warning: this removes ANY A/AAAA/PTR record in Unbound's runtime local-data not backed by Kea or an Unbound Host Override — records injected by another tool or script will be erased. Use the Lease Audit tab to preview exactly what would be removed before enabling this.</help>
+        <help>Reconcile all Kea leases and reservations into Unbound at each scheduled interval. Catches any drift the live path or log watcher missed — including new leases registered while kea-dhcp-ddns was temporarily down. Only active when scheduled sync / clean is enabled.</help>
+    </field>
+    <field>
+        <id>general.general.cron_run_clean</id>
+        <label>Clean stale records</label>
+        <type>checkbox</type>
+        <help>Remove Unbound records not backed by any active Kea lease, reservation, or Unbound Host Override — primarily records left behind by leases that expired without an explicit release. Review the Lease Audit tab to preview what would be removed. Only active when scheduled sync / clean is enabled.</help>
     </field>
     <field>
         <id>general.general.auto_clean_interval</id>
-        <label>Auto-clean frequency</label>
+        <label>Schedule frequency</label>
         <type>dropdown</type>
-        <help>How often to run the scheduled bulk cleanup. Only used when auto-clean is enabled. The manual Clean button on the Lease Audit tab runs the same operation on demand.</help>
+        <help>How often to run the scheduled sync and/or clean. The manual Sync and Clean buttons on the Lease Audit tab run the same operations on demand.</help>
     </field>
     <field>
         <id>general.general.auto_clean_hour</id>
-        <label>Auto-clean hour (0–23)</label>
+        <label>Schedule hour (0–23)</label>
         <type>text</type>
         <hint>0</hint>
-        <help>Hour of the day (0–23, UTC) to run the daily auto-clean. Only used when frequency is set to "Daily".</help>
+        <help>Hour of the day (0–23, UTC) for the daily scheduled run. Only used when frequency is set to "Daily".</help>
+    </field>
+    <field>
+        <id>general.general.enable_logwatch</id>
+        <label>Enable log watcher</label>
+        <type>checkbox</type>
+        <help>Enable a secondary daemon that tails the Kea DHCP log and the listener log for events the live DDNS path missed. Use the sub-options below to choose which events trigger action. Requires Kea's kea-dhcp4 / kea-dhcp6 loggers at INFO severity or lower writing to /var/log/kea/ — the OPNsense default. Off by default — the scheduled sync covers most deployments without it.</help>
+    </field>
+    <field>
+        <id>general.general.logwatch_on_release</id>
+        <label>Purge IP on lease release</label>
+        <type>checkbox</type>
+        <help>When a DHCP4_RELEASE or DHCP6_RELEASE is seen in the Kea log, immediately purge all DNS records for that IP. This is the fastest path to removing stale forward and reverse records when a device explicitly releases its lease. Only active when Log Watcher is enabled.</help>
+    </field>
+    <field>
+        <id>general.general.logwatch_on_servfail</id>
+        <label>Re-sync names after listener SERVFAIL</label>
+        <type>checkbox</type>
+        <help>When the DDNS listener returns SERVFAIL (Unbound briefly unavailable or locked during an update), trigger a targeted kea-sync for the affected names. Supplements the dirty-name drain so missed adds and removes recover quickly rather than waiting for the next scheduled sync. Only active when Log Watcher is enabled.</help>
+    </field>
+    <field>
+        <id>general.general.logwatch_on_missed_remove</id>
+        <label>Re-sync on missed DNS removes</label>
+        <type>checkbox</type>
+        <help><![CDATA[When a DNS Remove is seen in the listener log without a corresponding Add within a short grace window, trigger a targeted kea-sync for that hostname. Closes the LEASE_REUSE gap: when kea-dhcp-ddns sends a CHG_REMOVE for a hostname/IP and then skips the follow-up Add (because the lease looks unchanged to D2), the DNS record disappears until the next scheduled sync. With this option on, the gap is closed within seconds. Only active when Log Watcher is enabled.]]></help>
     </field>
 
     <field>
@@ -172,14 +243,6 @@ settings below. The Lease Audit tab shows a full preview of what each cleanup wo
         <advanced>true</advanced>
     </field>
     <field>
-        <id>general.general.dirty_set_cap</id>
-        <label>Dirty-set cap</label>
-        <type>text</type>
-        <hint>100</hint>
-        <advanced>true</advanced>
-        <help>Maximum number of deferred hostname updates tracked before the next reconcile becomes a full sync. Lower values reduce targeted-drain scope at high churn. Default 100.</help>
-    </field>
-    <field>
         <id>general.general.max_full_sync_attempts</id>
         <label>Max reconcile attempts</label>
         <type>text</type>
@@ -194,6 +257,54 @@ settings below. The Lease Audit tab shows a full preview of what each cleanup wo
         <hint>10</hint>
         <advanced>true</advanced>
         <help>Minutes to wait for Kea and Unbound to become ready after startup before the watchdog terminates the daemon (daemon(8) will restart it). 0 disables the watchdog. Default 10.</help>
+    </field>
+
+    <field>
+        <type>header</type>
+        <label>Unbound Memory Recovery</label>
+        <advanced>true</advanced>
+    </field>
+    <field>
+        <id>general.general.enable_fast_reload</id>
+        <label>Enable daemon-triggered recovery</label>
+        <type>checkbox</type>
+        <advanced>true</advanced>
+        <help><![CDATA[After the NCR threshold below is reached, the daemon calls
+        <code>unbound-control fast-reload</code> to reclaim heap memory fragmented by
+        repeated local_data add and remove calls, then immediately runs a full Kea sync
+        to repopulate records. Falls back to <code>unbound-control reload</code> on
+        Unbound older than 1.22. This controls only the daemon NCR counter — the
+        scheduled recovery job below is independent and has its own toggle.]]></help>
+    </field>
+    <field>
+        <id>general.general.fast_reload_threshold</id>
+        <label>NCR threshold</label>
+        <type>text</type>
+        <hint>5000</hint>
+        <advanced>true</advanced>
+        <help>Number of live-path DNS UPDATE packets (NCRs) returning NOERROR before the daemon triggers a fast-reload. Each NCR typically generates 1-3 unbound-control calls. Range 100-100000. Default 5000. Only active when fast-reload is enabled.</help>
+    </field>
+    <field>
+        <id>general.general.enable_fast_reload_cron</id>
+        <label>Enable scheduled recovery</label>
+        <type>checkbox</type>
+        <advanced>true</advanced>
+        <help>Run a cron job that triggers fast-reload on a fixed schedule, independent of the daemon NCR counter. Catches the case where the daemon restarts (resetting its counter) but Unbound keeps running, allowing memory to accumulate indefinitely.</help>
+    </field>
+    <field>
+        <id>general.general.fast_reload_cron_days</id>
+        <label>Scheduled recovery interval</label>
+        <type>dropdown</type>
+        <advanced>true</advanced>
+        <help>How often the scheduled recovery cron job fires. Only active when scheduled recovery is enabled.</help>
+    </field>
+    <field>
+        <id>general.general.fast_reload_cron_hour</id>
+        <label>Scheduled recovery time (hour)</label>
+        <type>text</type>
+        <hint>3</hint>
+        <advanced>true</advanced>
+        <help>Hour of day (0–23) at which the scheduled recovery cron job fires. Default is 3 (03:00). Only active when scheduled recovery is enabled.</help>
     </field>
 
 </form>

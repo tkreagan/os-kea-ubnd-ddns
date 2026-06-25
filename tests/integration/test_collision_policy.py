@@ -25,9 +25,9 @@ import pytest
 
 pytestmark = [pytest.mark.integration, pytest.mark.slow]
 
-# DNS rcode integers we care about
+# DNS rcode integers we care about (per RFC 2136 Section 2.2)
 _NOERROR = 0
-_YXRRSET = 9
+_YXRRSET = 7  # "An RRset that should not exist, does exist"
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -39,7 +39,7 @@ _LISTENER_PORT = 53535
 
 def _set_collision_policy(ssh, policy: str) -> None:
     """Write collision_policy into config.xml via the OPNsense box."""
-    ssh.script("python3", f"""\
+    ssh.sudo_script("python3", f"""\
 import xml.etree.ElementTree as ET
 tree = ET.parse("/conf/config.xml")
 root = tree.getroot()
@@ -353,6 +353,76 @@ class TestCollisionPolicy:
                 f"last_wins: old record {ip_a} must be removed"
             assert unbound.has_record(hostname, ip_b, "A"), \
                 f"last_wins: new record {ip_b} must be present"
+
+        finally:
+            unbound.remove_record(hostname)
+            test_log("cleaned", {"hostname": hostname})
+
+    # ── CP-6: none ────────────────────────────────────────────────────────────
+
+    def test_cp6_none_evicts_existing_skips_new(
+            self, ssh, unbound, test_host, test_log):
+        """
+        CP-6 (none): on collision both records are evicted — existing record is
+        removed and the new registrant is also blocked. The name slot is left
+        empty (the drain reconciles from Kea state). NOERROR is returned because
+        the UPDATE was processed (the eviction is the intended action).
+        """
+        hostname = test_host["hostname"]
+        ip_b     = test_host["ip"]
+        ip_a     = _other_ip(ip_b)
+
+        _set_collision_policy(ssh, "none")
+        _restart_daemon(ssh)
+
+        unbound.add_record(f'"{hostname}. 300 IN A {ip_a}"')
+
+        try:
+            rcode = _send_a_update(ssh, hostname, ip_b)
+
+            test_log("injected", {"hostname": hostname, "ip_a": ip_a, "ip_b": ip_b})
+            test_log("observed", {
+                "rcode": rcode,
+                "has_ip_a": unbound.has_record(hostname, ip_a, "A"),
+                "has_ip_b": unbound.has_record(hostname, ip_b, "A"),
+            })
+
+            assert rcode == _NOERROR, \
+                f"none must return NOERROR; got rcode {rcode}"
+            assert not unbound.has_record(hostname, ip_a, "A"), \
+                f"none: existing record {ip_a} must be evicted"
+            assert not unbound.has_record(hostname, ip_b, "A"), \
+                f"none: collider record {ip_b} must not be added"
+
+        finally:
+            unbound.remove_record(hostname)
+            test_log("cleaned", {"hostname": hostname})
+
+    def test_cp6_none_no_collision_adds_normally(
+            self, ssh, unbound, test_host, test_log):
+        """
+        CP-6b (none): when there is no existing record, none behaves like allow
+        — the new record is added normally (there's nothing to collide with).
+        """
+        hostname = test_host["hostname"]
+        ip_b     = test_host["ip"]
+
+        _set_collision_policy(ssh, "none")
+        _restart_daemon(ssh)
+
+        try:
+            rcode = _send_a_update(ssh, hostname, ip_b)
+
+            test_log("injected", {"hostname": hostname, "ip_b": ip_b})
+            test_log("observed", {
+                "rcode": rcode,
+                "has_ip_b": unbound.has_record(hostname, ip_b, "A"),
+            })
+
+            assert rcode == _NOERROR, \
+                f"none (no collision) must return NOERROR; got rcode {rcode}"
+            assert unbound.has_record(hostname, ip_b, "A"), \
+                f"none: first registrant {ip_b} must be added when no collision"
 
         finally:
             unbound.remove_record(hostname)

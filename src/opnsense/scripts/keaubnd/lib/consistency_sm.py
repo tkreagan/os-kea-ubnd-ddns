@@ -45,17 +45,29 @@ Key invariants:
     ev = kevent()
     if pid-dir VNODE or timer:   ds = sm.on_wake(now, stat_pids())
     if reconcile child exited:   ds = sm.on_sync_exit(now, code, overflowed)
-    if live NCR contended/blocked: sm.note_dirty(names)   # no directives
+    if live NCR contended/blocked: sm.note_dirty_ncr(names, ips)  # no directives
     for d in ds: execute(d)
 
 Directives the daemon must execute:
-  Spawn(mode, names)  -- Popen kea-sync.py --mode=<mode> [--names=...]; register
-                         NOTE_EXIT; feed the exit back via on_sync_exit().
-                         names=None => full reconcile; a frozenset => targeted.
+  Spawn(mode, names, purge_ips) -- Popen kea-sync.py [--names=...] [--purge-ip=...];
+                         register NOTE_EXIT; feed the exit back via on_sync_exit().
+                         names=None => full reconcile; a frozenset => targeted drain.
+                         purge_ips=frozenset of IPs to purge-release in the same child.
   KillPending()       -- SIGTERM the running reconcile child and waitpid it.
   ScheduleWake(delay) -- arm an EVFILT_TIMER to call on_wake() after `delay` s.
   Terminate(reason)   -- watchdog fired: clean full stop of the whole plugin.
   Alert(message)      -- raise a loud, user-visible alert (UI status + log).
+  FastReload()        -- Popen fast-reload.py; register NOTE_EXIT; feed the exit
+                         back via on_sync_exit(). Emitted from NORMAL when the
+                         daemon sets fast_reload_pending=True (mutation threshold
+                         reached). fast-reload.py acquires the mutation lock,
+                         calls unbound-control fast-reload (falling back to reload
+                         on Unbound < 1.22), then runs a full kea-sync to
+                         repopulate the runtime local_data records that a reload
+                         clears. On success the SM stays NORMAL with _pending
+                         cleared. On failure (reload succeeded but resync failed)
+                         the SM stays NORMAL and forces a RECONCILE so
+                         _after_reconcile can backoff-retry repopulation.
 """
 
 from __future__ import annotations
@@ -65,11 +77,19 @@ import enum
 from typing import Dict, FrozenSet, List, Optional, Tuple
 
 
+# ── Dirty-pool entry ────────────────────────────────────────────────────────
+@dataclasses.dataclass(frozen=True)
+class _DirtyEntry:
+    kind: str   # "name" | "ip"
+    value: str
+
+
 # ── Directives (what the daemon must do) ────────────────────────────────────
 @dataclasses.dataclass(frozen=True)
 class Spawn:
     mode: str                      # "full" | "static" | "dynamic"
     names: Optional[FrozenSet[str]]  # None = full reconcile; set = targeted drain
+    purge_ips: Optional[FrozenSet[str]] = None  # IPs to purge-release in the same child
 
 
 @dataclasses.dataclass(frozen=True)
@@ -92,6 +112,11 @@ class Alert:
     message: str
 
 
+@dataclasses.dataclass(frozen=True)
+class FastReload:
+    pass
+
+
 Directive = object  # one of the above
 
 
@@ -103,14 +128,15 @@ class State(enum.Enum):
 
 class _Pending(enum.Enum):
     NONE = "none"
-    RECONCILE = "reconcile"   # a full (names=None) reconcile is running
-    DRAIN = "drain"           # a targeted (names=snapshot) reconcile is running
+    RECONCILE = "reconcile"      # a full (names=None) reconcile is running
+    DRAIN = "drain"              # a targeted (names=snapshot) reconcile is running
+    FAST_RELOAD = "fast_reload"  # fast-reload.py subprocess is running
 
 
 @dataclasses.dataclass
 class SMConfig:
     """Tunables (wired from advanced settings; see General.xml in Phase 5)."""
-    dirty_cap: int = 100
+    dirty_cap: int = 50
     max_full_sync_attempts: int = 5
     watchdog_seconds: float = 600.0     # 0 == wait forever
     backoff_base: float = 0.25
@@ -133,15 +159,20 @@ class ConsistencySM:
         self.cfg = config or SMConfig()
         self.state = State.BLOCKED
         self._pending = _Pending.NONE
-        # Dirty NAMES (deduped). We trust only the name (a hint of where to look)
-        # and re-resolve from Kea at drain time -- never replay the NCR.
-        self.dirty: set[str] = set()
-        # Names handed to the in-flight drain; re-added on drain failure so a
-        # failed drain can never lose an update.
-        self._draining: set[str] = set()
+        # Unified dirty pool: deferred names (kind="name") and IPs from deferred
+        # DELETE NCRs (kind="ip"). Names re-resolve from Kea at drain time;
+        # IPs are passed as --purge-ip to the same drain child.
+        self.dirty: set[_DirtyEntry] = set()
+        # Snapshot of the dirty pool handed to the in-flight drain; merged back
+        # on failure so a failed drain can never lose a deferred update.
+        self._draining: set[_DirtyEntry] = set()
         self.overflowed = False
         self.full_sync_counter = 0
+        self._drain_fail_counter = 0
         self.degraded = False           # hit max_full_sync_attempts; best-effort
+        # Set by the daemon when the live-path mutation counter hits the threshold.
+        # Cleared when a FastReload directive is emitted.
+        self.fast_reload_pending: bool = False
         # backoff (consecutive failures against a *stable* pid set)
         self._backoff = self.cfg.backoff_base
         self._next_attempt_at = 0.0
@@ -163,28 +194,23 @@ class ConsistencySM:
         return [ScheduleWake(0.0)]
 
     # ── inputs ────────────────────────────────────────────────────────────────
-    def note_dirty(self, names) -> None:
-        """Record names whose live apply was deferred.
-        Two callers: (1) daemon is BLOCKED -- NCR received, ACK-failed;
-        (2) daemon is NORMAL but live apply lost the advisory lock race --
-        ACK-failed, will re-resolve by name on next on_wake drain.
-        Pure bookkeeping; the next on_wake acts. Sets the overflow flag if the
-        set blows past the cap."""
+    def note_dirty_ncr(self, names, ips=()) -> None:
+        """Record names and/or IPs from a deferred NCR into the unified dirty pool.
+        Names are re-resolved from Kea at drain time; IPs are passed as --purge-ip
+        to remove stale PTRs even if Kea briefly still shows the lease as active.
+        Called by all four defer paths in _apply_or_defer so they are symmetric."""
         for n in names:
-            self.dirty.add(n)
+            self.dirty.add(_DirtyEntry("name", n))
+        for ip in ips:
+            self.dirty.add(_DirtyEntry("ip", ip))
         if len(self.dirty) > self.cfg.dirty_cap:
             self.overflowed = True
 
-    def on_apply_failure(self, now: float, names) -> List[Directive]:
-        """The live path failed to apply against unbound with a CONNECTION ERROR
-        (refused -> Unbound is down/restarting). Distinct from lock contention:
-        record the name(s) and enter BLOCKED now (the pid watch will confirm the
-        restart; recovery drains these). Lock contention takes a different path --
-        the daemon just ACK-fails and stays NORMAL, no call here."""
-        for n in names:
-            self.dirty.add(n)
-        if len(self.dirty) > self.cfg.dirty_cap:
-            self.overflowed = True
+    def on_apply_failure(self, now: float) -> List[Directive]:
+        """Unbound connection refused on the live path: enter BLOCKED.
+        The caller must call note_dirty_ncr() first to record deferred names/IPs.
+        Distinct from lock contention, which stays NORMAL and uses note_dirty_ncr
+        directly without calling this."""
         if self.state is State.NORMAL:
             self.state = State.BLOCKED
             self._blocked_since = now
@@ -207,6 +233,7 @@ class ConsistencySM:
             # fall to BLOCKED. If a reconcile/drain is mid-flight, preempt it.
             self._reset_backoff()
             self.full_sync_counter = 0
+            self._drain_fail_counter = 0
             self.degraded = False
             if self._pending is not _Pending.NONE:
                 ds.append(KillPending())
@@ -223,7 +250,7 @@ class ConsistencySM:
 
     def on_sync_exit(self, now: float, exit_code: int,
                      overflowed: bool = False) -> List[Directive]:
-        """A reconcile/drain subprocess we spawned has exited."""
+        """A reconcile/drain/fast-reload subprocess we spawned has exited."""
         if overflowed:
             self.overflowed = True
         pend, self._pending = self._pending, _Pending.NONE
@@ -232,6 +259,18 @@ class ConsistencySM:
             return self._after_reconcile(now, exit_code)
         if pend is _Pending.DRAIN:
             return self._after_drain(now, exit_code)
+        if pend is _Pending.FAST_RELOAD:
+            if exit_code != 0:
+                # Unbound responded to the reload (so it is UP) but runtime
+                # local_data was cleared and not repopulated. Force a full
+                # reconcile; _after_reconcile owns backoff/retry on repeated
+                # failure. Stay NORMAL — Unbound is up, so live NCRs keep
+                # applying; BLOCKED would needlessly SERVFAIL them all.
+                # Do NOT clear dirty: _after_reconcile clears on success.
+                self._pending = _Pending.RECONCILE
+                return [Spawn("full", None)]
+            # Success: drain any names that accumulated while fast-reload ran.
+            return self._spawn_drain_or_normal()
         # Spurious exit (e.g. we already preempted via KillPending). Ignore.
         return []
 
@@ -293,44 +332,70 @@ class ConsistencySM:
 
     # ── drain (shared by BLOCKED-recovery and NORMAL) ──────────────────────────
     def _spawn_drain_or_normal(self) -> List[Directive]:
-        """Snapshot+clear the dirty set; if non-empty spawn a targeted reconcile,
-        else transition to NORMAL."""
+        """Snapshot+clear the unified dirty pool; spawn a targeted drain if
+        non-empty, else transition to NORMAL. Escalates to a full reconcile if
+        the pool overflowed the cap (_after_reconcile clears overflowed on success)."""
+        if self.overflowed:
+            self._pending = _Pending.RECONCILE
+            return [Spawn("full", None)]
         snapshot = set(self.dirty)
         self.dirty.clear()
         if not snapshot:
             return self._go_normal()
         self._draining = snapshot
         self._pending = _Pending.DRAIN
-        return [Spawn("full", frozenset(snapshot))]
+        names = frozenset(e.value for e in snapshot if e.kind == "name")
+        ips   = frozenset(e.value for e in snapshot if e.kind == "ip")
+        return [Spawn("full", names if names else None, ips if ips else None)]
 
     def _after_drain(self, now: float, exit_code: int) -> List[Directive]:
         snapshot, self._draining = self._draining, set()
         if exit_code != 0:
-            # Durability: a failed drain must NOT lose its names. Re-add them and
-            # retry after a backoff. (The prose design omits this.)
+            # Durability: a failed drain must NOT lose deferred names or IPs.
             self.dirty |= snapshot
+            self._drain_fail_counter += 1
+            if self._drain_fail_counter >= self.cfg.max_full_sync_attempts:
+                self._drain_fail_counter = 0
+                self.dirty.difference_update(snapshot)
+                self.degraded = True
+                return self._go_normal() + [
+                    Alert("degraded: targeted drain failed repeatedly; "
+                          "check Unbound config and logs")]
             self._bump_backoff(now)
             return [ScheduleWake(self._next_attempt_at - now)]
         # Drained successfully; loop on anything that accumulated meanwhile.
+        self._drain_fail_counter = 0
         return self._spawn_drain_or_normal()
 
     # ── NORMAL ──────────────────────────────────────────────────────────────
     def _tick_normal(self, now: float, all_present: bool) -> List[Directive]:
         # NORMAL live path: successful NCRs applied directly; no reconcile.
-        # Lock-contention misses ACK-fail and call note_dirty(names); the daemon
-        # saves the NAME only (not the raw NCR) so re-resolve is safe and
-        # idempotent.  On the next timer/vnode wake, drain those names here.
+        # Deferred NCRs (lock-contention, BLOCKED, UnboundRefused, unexpected)
+        # call note_dirty_ncr(); the drain re-resolves by name from Kea.
         if self._pending is not _Pending.NONE:
-            # A drain is already in flight -- on_sync_exit drives the next step.
+            # A drain or fast-reload is already in flight — on_sync_exit drives next.
             return []
         if self.dirty:
+            if now < self._next_attempt_at:
+                return [ScheduleWake(self._next_attempt_at - now)]
             return self._spawn_drain_or_normal()
+        # Emit FastReload only when NORMAL, idle (no subprocess, no dirty names).
+        # Dirty names drain first so records are correct before the reload clears
+        # them, and so we don't lose dirty tracking across the reload.
+        if self.fast_reload_pending:
+            self.fast_reload_pending = False
+            self._pending = _Pending.FAST_RELOAD
+            return [FastReload()]
         return []
 
     def _go_normal(self) -> List[Directive]:
         self.state = State.NORMAL
         self._blocked_since = None
         self._reset_backoff()
+        if self.fast_reload_pending:
+            # A reload is queued; schedule an immediate wake so _tick_normal
+            # can emit FastReload() now that we're idle.
+            return [ScheduleWake(0.0)]
         return []
 
     # ── helpers ───────────────────────────────────────────────────────────────
@@ -352,7 +417,7 @@ class ConsistencySM:
 
     def _on_pending_aborted(self) -> None:
         """A pending reconcile/drain was preempted by KillPending. If it was a
-        drain, restore its snapshot so those names aren't lost."""
+        drain, restore its snapshot so those entries aren't lost."""
         if self._pending is _Pending.DRAIN or self._draining:
             self.dirty |= self._draining
             self._draining = set()

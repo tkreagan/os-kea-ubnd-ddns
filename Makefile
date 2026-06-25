@@ -1,5 +1,5 @@
 PLUGIN_NAME=		kea-ubnd-ddns
-PLUGIN_VERSION=		0.96
+PLUGIN_VERSION=		0.98
 PLUGIN_COMMENT=		Kea DHCP to Unbound DNS registration (DDNS bridge)
 PLUGIN_DEPENDS=		py313-dnspython
 PLUGIN_MAINTAINER=	tk@rgn.ltd

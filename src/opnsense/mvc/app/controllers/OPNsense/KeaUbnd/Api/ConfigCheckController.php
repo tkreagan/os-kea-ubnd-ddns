@@ -357,14 +357,25 @@ class ConfigCheckController extends ApiControllerBase
                 continue;
             }
             $opt15 = '';
-            if (isset($node->option_data) && isset($node->option_data->domain_name)) {
-                $opt15 = trim((string)$node->option_data->domain_name);
+            $opt24 = '';
+            if (isset($node->option_data)) {
+                if (isset($node->option_data->domain_name)) {
+                    $opt15 = trim((string)$node->option_data->domain_name);
+                }
+                if (isset($node->option_data->domain_search)) {
+                    $raw24 = trim((string)$node->option_data->domain_search);
+                    if ($raw24 !== '') {
+                        $parts24 = preg_split('/[\s,]+/', $raw24, -1, PREG_SPLIT_NO_EMPTY);
+                        $opt24 = $parts24[0] ?? '';
+                    }
+                }
             }
             $idx[$cidr] = [
                 'uuid'         => (string)$node['uuid'],
                 'suffix'       => trim((string)$node->ddns_qualifying_suffix),
                 'forward_zone' => trim((string)$node->ddns_forward_zone),
                 'option15'     => $opt15,
+                'option24'     => $opt24,
             ];
         }
         return $idx;
@@ -386,6 +397,9 @@ class ConfigCheckController extends ApiControllerBase
         }
         if (!empty($entry['option15'])) {
             return [rtrim($entry['option15'], '.'), 'option15'];
+        }
+        if (!empty($entry['option24'])) {
+            return [rtrim($entry['option24'], '.'), 'option24'];
         }
         if ($system_domain !== '') {
             return [rtrim($system_domain, '.'), 'system'];
@@ -1032,9 +1046,19 @@ class ConfigCheckController extends ApiControllerBase
     {
         $suffix  = trim((string)$node->ddns_qualifying_suffix);
         $forward = trim((string)$node->ddns_forward_zone);
-        $opt15   = '';
-        if (isset($node->option_data) && isset($node->option_data->domain_name)) {
-            $opt15 = trim((string)$node->option_data->domain_name);
+        $opt15 = '';
+        $opt24 = '';
+        if (isset($node->option_data)) {
+            if (isset($node->option_data->domain_name)) {
+                $opt15 = trim((string)$node->option_data->domain_name);
+            }
+            if (isset($node->option_data->domain_search)) {
+                $raw24 = trim((string)$node->option_data->domain_search);
+                if ($raw24 !== '') {
+                    $parts24 = preg_split('/[\s,]+/', $raw24, -1, PREG_SPLIT_NO_EMPTY);
+                    $opt24 = $parts24[0] ?? '';
+                }
+            }
         }
 
         // Resolve a domain basis only if we actually need to fill something.
@@ -1045,11 +1069,11 @@ class ConfigCheckController extends ApiControllerBase
                 $basis = rtrim($domain_override, '.');
             } else {
                 list($basis, $source) = $this->resolveDomainBasis(
-                    ['suffix' => $suffix, 'forward_zone' => $forward, 'option15' => $opt15],
+                    ['suffix' => $suffix, 'forward_zone' => $forward, 'option15' => $opt15, 'option24' => $opt24],
                     $system_domain
                 );
                 if ($source === 'none') {
-                    return ['action' => 'skipped', 'reason' => 'no domain configured (no suffix, forward zone, option 15, or system domain)'];
+                    return ['action' => 'skipped', 'reason' => 'no domain configured (no suffix, forward zone, option 15/24, or system domain)'];
                 }
             }
         }

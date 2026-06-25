@@ -5,7 +5,7 @@
 kea-ubnd-logwatch.py -- Kea log watcher for timely DNS cleanup.
 
 Tails Kea's DHCP log and the kea-ubnd-ddns listener log.  On each detected
-lease release (DHCP4_RELEASE, DHCP6_RELEASE) or listener SERVFAIL (errors>0),
+lease release (DHCP4_RELEASE*, DHCP6_RELEASE_NA*) or listener SERVFAIL (errors>0),
 dispatches existing cleanup scripts via subprocess so all Unbound mutations go
 through the shared advisory lock.
 
@@ -17,48 +17,45 @@ Design principles:
     or kea-sync so the unbound_mutation_lock is always held during mutations.
   - Startup cutoff: seeks to end of each log file on startup so pre-start
     events (already handled by the main daemon's reconcile path) are ignored.
+  - Log discovery: globs for the lexicographically latest <prefix>_*.log in
+    the log directory rather than guessing a date-based name.  Handles both
+    midnight rotation and pre-existing files from before daemon start.
   - Log rotation: watches log directories with kqueue EVFILT_VNODE NOTE_WRITE
-    to detect new dated files at midnight.  Computed filename: kea_YYYYMMDD.log.
+    to detect new files.  On each directory event, refresh() re-globs and
+    switches to a newer file if one appeared.
   - Grace window: coalesces events per IP/name for 10 s before dispatching,
     preventing storms when Kea reclaims multiple leases in a burst.
   - Status gate: only dispatches when the main daemon status file reports
     "running" — avoids racing a concurrent reconcile during BLOCKED/alert states.
+  - Config: reads paths from keaubnd.json (written by start.py).  Pass
+    --config to specify an alternative runtime config location.
   - Lifecycle: launched by start.py after the main listener; stopped by stop.py.
     Own daemon(8) supervisor/child pidfiles under /var/run/.
 
 Run directly for testing:
-  /usr/local/sbin/kea-ubnd-logwatch.py [--log-dir DIR] [--grace-secs N]
+  /usr/local/sbin/kea-ubnd-logwatch.py [--config PATH] [--grace-secs N]
 """
 from __future__ import annotations
 
 import argparse
+import glob
 import os
 import select
 import signal
 import subprocess
 import sys
-import time
-from datetime import datetime
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 sys.path.insert(0, "/usr/local/opnsense/scripts/keaubnd")
 
-from lib.keaubnd_sync import setup_logging  # noqa: E402
-from lib.logwatch import (  # noqa: E402
-    EventQueue, ReleaseEvent, ServfailEvent,
+from lib import keaubnd_runtime as _rt          # noqa: E402  # type: ignore[import]
+from lib.keaubnd_sync import setup_logging      # noqa: E402  # type: ignore[import]
+from lib.logwatch import (                      # noqa: E402  # type: ignore[import]
+    AddOpSeen, EventQueue, MissedRemoveEvent, PendingRemoveTracker,
+    ReleaseEvent, RemoveOpSeen, ServfailEvent,
     parse_kea_line, parse_listener_line,
 )
-from lib.preconditions import STATUS_FILE  # noqa: E402
-
-# ── Paths ────────────────────────────────────────────────────────────────────
-
-KEA_LOG_DIR       = "/var/log/kea"
-LISTENER_LOG_DIR  = "/var/log/keaubnd"
-KEA_LOG_PREFIX    = "kea"
-LISTENER_PREFIX   = "keaubnd"
-
-CLEAN_SCRIPT  = "/usr/local/opnsense/scripts/keaubnd/local-data-clean.py"
-SYNC_SCRIPT   = "/usr/local/opnsense/scripts/keaubnd/kea-sync.py"
+from lib.preconditions import STATUS_FILE       # noqa: E402  # type: ignore[import]
 
 # ── Internals ────────────────────────────────────────────────────────────────
 
@@ -86,16 +83,19 @@ def _main_daemon_running() -> bool:
 
 class LogTailer:
     """
-    Manages an open tail of a dated log file, including rotation detection.
+    Manages an open tail of a log file, including rotation detection.
 
-    File naming: <log_dir>/<prefix>_YYYYMMDD.log
-    Rotation: the log directory is watched with kqueue EVFILT_VNODE NOTE_WRITE;
-    when a new dated file appears (midnight rollover), this tailer detects it
-    and transitions to the new file.
+    File discovery: globs for <log_dir>/<prefix>_*.log and opens the
+    lexicographically latest match (YYYYMMDD suffix → correct ordering).
+    The log directory is watched with kqueue EVFILT_VNODE NOTE_WRITE; when
+    a new file appears (e.g. midnight rollover), refresh() re-globs and
+    transitions to the newer file.
     """
 
-    _FILE_FFLAGS = select.KQ_NOTE_WRITE | select.KQ_NOTE_EXTEND | select.KQ_NOTE_DELETE | select.KQ_NOTE_RENAME
-    _DIR_FFLAGS  = select.KQ_NOTE_WRITE | select.KQ_NOTE_DELETE | select.KQ_NOTE_RENAME
+    _FILE_FFLAGS = (select.KQ_NOTE_WRITE | select.KQ_NOTE_EXTEND
+                    | select.KQ_NOTE_DELETE | select.KQ_NOTE_RENAME)
+    _DIR_FFLAGS  = (select.KQ_NOTE_WRITE | select.KQ_NOTE_DELETE
+                    | select.KQ_NOTE_RENAME)
 
     def __init__(self, log_dir: str, prefix: str, kq: select.kqueue,
                  logger, startup_cutoff: bool = True):
@@ -111,13 +111,15 @@ class LogTailer:
         self.idents: set[int] = set()
 
         self._open_dir()
-        self._open_today()
+        self._open_latest()
 
-    def _today_path(self) -> str:
-        return os.path.join(
-            self.log_dir,
-            f"{self.prefix}_{datetime.now().strftime('%Y%m%d')}.log"
-        )
+    def _latest_path(self) -> Optional[str]:
+        """Return the lexicographically latest <prefix>_*.log in log_dir, or None."""
+        try:
+            files = glob.glob(os.path.join(self.log_dir, f"{self.prefix}_*.log"))
+            return max(files) if files else None
+        except OSError:
+            return None
 
     def _open_dir(self) -> None:
         if not os.path.isdir(self.log_dir):
@@ -133,9 +135,9 @@ class LogTailer:
         self._dir_fd = fd
         self.idents.add(fd)
 
-    def _open_today(self) -> None:
-        path = self._today_path()
-        if not os.path.exists(path):
+    def _open_latest(self) -> None:
+        path = self._latest_path()
+        if path is None:
             return
         try:
             fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
@@ -173,22 +175,21 @@ class LogTailer:
 
     def refresh(self) -> None:
         """
-        Check for a log rotation: if today's dated file differs from the
-        currently open file, transition to the new one.  Called every loop
-        iteration (cheap — just a date comparison and stat).
+        Check for a newer log file and transition to it if one appeared.
+        Called on every directory VNODE event and every loop iteration.
         """
-        today = self._today_path()
-        if today != self._file_path and os.path.exists(today):
-            self.logger.info("logwatch: rotating to %s", today)
-            # Rotation: new file starts at the beginning (no startup cutoff).
+        latest = self._latest_path()
+        if latest and latest != self._file_path:
+            self.logger.info("logwatch: rotating to %s", latest)
+            # New file: read from the beginning (no startup cutoff).
             orig_cutoff, self._startup_cutoff = self._startup_cutoff, False
-            self._open_today()
+            self._open_latest()
             self._startup_cutoff = orig_cutoff
 
     def read_lines(self) -> List[str]:
         """Read all available new lines from the current file."""
         if self._file_fd is None:
-            self._open_today()
+            self._open_latest()
             if self._file_fd is None:
                 return []
         lines = []
@@ -225,10 +226,11 @@ class LogTailer:
 
 def _dispatch_purge_ip(ip: str, logger) -> None:
     """Run local-data-clean.py --purge-ip under its own mutex lock."""
+    clean_script = _rt.get_logwatch_clean_script()
     logger.info("logwatch: dispatch purge-ip %s", ip)
     try:
         r = subprocess.run(
-            [sys.executable, CLEAN_SCRIPT, "--purge-ip", ip],
+            [sys.executable, clean_script, "--purge-ip", ip],
             capture_output=True, text=True, timeout=60,
         )
         if r.returncode != 0:
@@ -241,14 +243,14 @@ def _dispatch_purge_ip(ip: str, logger) -> None:
 
 
 def _dispatch_sync_names(names: List[str], logger) -> None:
-    """Run kea-sync.py --mode=full [--names=...] for SERVFAIL recovery."""
+    """Run run-sync.py [--names=...] for SERVFAIL/missed-remove recovery."""
+    sync_script = _rt.get_logwatch_sync_script()
     if names:
         unique = sorted(set(names))
-        args = [sys.executable, SYNC_SCRIPT, "--mode=full",
-                "--names=" + ",".join(unique)]
+        args = [sys.executable, sync_script, "--names=" + ",".join(unique)]
         label = f"names={unique}"
     else:
-        args = [sys.executable, SYNC_SCRIPT, "--mode=full"]
+        args = [sys.executable, sync_script]
         label = "full"
     logger.info("logwatch: dispatch sync %s", label)
     try:
@@ -262,78 +264,103 @@ def _dispatch_sync_names(names: List[str], logger) -> None:
         logger.error("logwatch: sync %s error: %s", label, e)
 
 
-def _dispatch_event(event, logger) -> None:
-    if isinstance(event, ReleaseEvent):
+def _dispatch_event(event, logger,
+                    on_release: bool, on_servfail: bool, on_missed_remove: bool) -> None:
+    if isinstance(event, ReleaseEvent) and on_release:
         _dispatch_purge_ip(event.ip, logger)
-    elif isinstance(event, ServfailEvent):
+    elif isinstance(event, ServfailEvent) and on_servfail:
         _dispatch_sync_names(event.names, logger)
+    elif isinstance(event, MissedRemoveEvent) and on_missed_remove:
+        _dispatch_sync_names([event.hostname], logger)
 
 
 # ── Main loop ─────────────────────────────────────────────────────────────────
 
-def run(grace_secs: float = 10.0) -> None:
+def run(config: str,
+        grace_secs: float = 10.0,
+        on_release: bool = True,
+        on_servfail: bool = True,
+        on_missed_remove: bool = True) -> None:
     global _running
     signal.signal(signal.SIGTERM, _sigterm)
     signal.signal(signal.SIGINT, _sigterm)
 
+    _rt.init(config)
     logger = setup_logging()
-    logger.info("kea-ubnd-logwatch starting")
+    logger.info(
+        "kea-ubnd-logwatch starting (config=%s on_release=%s on_servfail=%s on_missed_remove=%s)",
+        config, on_release, on_servfail, on_missed_remove,
+    )
 
     kq = select.kqueue()
     queue = EventQueue(grace_secs=grace_secs)
+    remove_tracker = PendingRemoveTracker(grace_secs=grace_secs)
 
-    kea_tailer      = LogTailer(KEA_LOG_DIR,      KEA_LOG_PREFIX,   kq, logger)
-    listener_tailer = LogTailer(LISTENER_LOG_DIR,  LISTENER_PREFIX,  kq, logger)
+    kea_tailer = LogTailer(
+        _rt.get_logwatch_kea_log_dir(),
+        _rt.get_logwatch_kea_log_prefix(),
+        kq, logger,
+    )
+    listener_tailer = LogTailer(
+        _rt.get_logwatch_listener_log_dir(),
+        _rt.get_logwatch_listener_prefix(),
+        kq, logger,
+    )
 
-    # State for correlating multi-line listener log batches
+    # Accumulated Add/Remove ops for the current NCR batch (SERVFAIL context).
     _listener_pending_ops: List[Tuple[str, str]] = []
 
-    all_idents = kea_tailer.idents | listener_tailer.idents
-
-    # kqueue timeout: wake at least every 60 s for date-change / deadline checks
+    # kqueue timeout: wake at least every 60 s for rotation / deadline checks
     _POLL_TIMEOUT = 60.0
 
     while _running:
-        # Compute wait time: min(deadline, poll)
-        dl = queue.next_deadline()
-        timeout = min(_POLL_TIMEOUT, dl) if dl is not None else _POLL_TIMEOUT
+        # Compute wait: soonest of event queue, remove tracker, and poll interval.
+        deadlines = [d for d in (queue.next_deadline(), remove_tracker.next_deadline())
+                     if d is not None]
+        timeout = min(_POLL_TIMEOUT, *deadlines) if deadlines else _POLL_TIMEOUT
 
         try:
-            events = kq.control(None, 32, timeout)
+            kq.control(None, 32, timeout)
         except (InterruptedError, OSError):
-            events = []
+            pass
 
-        # Check for rotation on every iteration (cheap date comparison).
+        # Check for a newer log file on every iteration (cheap glob).
         kea_tailer.refresh()
         listener_tailer.refresh()
 
-        # Read Kea log lines
+        # Read Kea log lines (ReleaseEvents).
         for line in kea_tailer.read_lines():
             ev = parse_kea_line(line)
             if ev is not None:
                 queue.add(f"ip:{ev.ip}", ev)
 
-        # Read listener log lines
+        # Read listener log lines (ServfailEvents + Remove/Add op signals).
         for line in listener_tailer.read_lines():
-            ev = parse_listener_line(line, _listener_pending_ops)
-            if ev is not None:
-                # ServfailEvent: coalesce by set of names
-                key = "servfail:" + ",".join(sorted(ev.names)) if ev.names else "servfail:full"
-                queue.add(key, ev)
+            result = parse_listener_line(line, _listener_pending_ops)
+            if isinstance(result, ServfailEvent):
+                key = ("servfail:" + ",".join(sorted(result.names))
+                       if result.names else "servfail:full")
+                queue.add(key, result)
                 _listener_pending_ops.clear()
-            elif "NCR id=" in line:
-                # New NCR boundary — clear accumulated ops
+            elif isinstance(result, RemoveOpSeen) and on_missed_remove:
+                remove_tracker.add_remove(result.hostname, result.ip)
+            elif isinstance(result, AddOpSeen) and on_missed_remove:
+                remove_tracker.cancel(result.hostname)
+            elif result is None and "NCR id=" in line:
                 _listener_pending_ops.clear()
 
-        # Dispatch ready events (grace window expired) if main daemon is running
+        # Collect MissedRemoveEvents whose grace window expired and enqueue them.
+        for missed in remove_tracker.ready():
+            queue.add(f"missed:{missed.hostname}", missed)
+
+        # Dispatch ready events if main daemon is running.
         ready = queue.ready()
         if ready:
             if _main_daemon_running():
                 for event in ready:
-                    _dispatch_event(event, logger)
+                    _dispatch_event(event, logger, on_release, on_servfail, on_missed_remove)
             else:
                 logger.debug("logwatch: main daemon not running — deferring %d event(s)", len(ready))
-                # Re-queue with a fresh grace window so we retry
                 for event in ready:
                     if isinstance(event, ReleaseEvent):
                         queue.add(f"ip:{event.ip}", event)
@@ -341,6 +368,8 @@ def run(grace_secs: float = 10.0) -> None:
                         key = ("servfail:" + ",".join(sorted(event.names))
                                if event.names else "servfail:full")
                         queue.add(key, event)
+                    elif isinstance(event, MissedRemoveEvent):
+                        queue.add(f"missed:{event.hostname}", event)
 
     kea_tailer.close()
     listener_tailer.close()
@@ -351,11 +380,25 @@ def run(grace_secs: float = 10.0) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--config", metavar="PATH",
+                        default=_rt.RUNTIME_CONFIG_PATH,
+                        help=f"Path to keaubnd.json "
+                             f"(default: {_rt.RUNTIME_CONFIG_PATH})")
     parser.add_argument("--grace-secs", type=float, default=10.0, metavar="N",
                         help="Seconds to wait after last event before dispatching "
                              "(coalesce window). Default 10.")
+    parser.add_argument("--no-on-release", dest="on_release", action="store_false",
+                        help="Disable purge-ip on DHCP lease release.")
+    parser.add_argument("--no-on-servfail", dest="on_servfail", action="store_false",
+                        help="Disable targeted sync on listener SERVFAIL.")
+    parser.add_argument("--no-on-missed-remove", dest="on_missed_remove", action="store_false",
+                        help="Disable targeted sync on Remove-without-Add.")
     args = parser.parse_args()
-    run(grace_secs=args.grace_secs)
+    run(config=args.config,
+        grace_secs=args.grace_secs,
+        on_release=args.on_release,
+        on_servfail=args.on_servfail,
+        on_missed_remove=args.on_missed_remove)
 
 
 if __name__ == "__main__":

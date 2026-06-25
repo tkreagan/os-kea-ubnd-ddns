@@ -84,31 +84,16 @@ class GeneralController extends ApiMutableModelControllerBase
     }
 
     /**
-     * Immediately sync Kea static reservations to Unbound.
-     * POST /api/keaubnd/general/sync_static
+     * Immediately run a full Kea → Unbound reconcile.
+     * POST /api/keaubnd/general/sync_full
      */
-    public function syncStaticAction()
+    public function syncFullAction()
     {
         if ($this->request->isPost()) {
             $backend = new Backend();
-            $backend->configdRun('keaubnd sync_static');
+            $backend->configdRun('keaubnd sync_full');
 
-            return ['status' => 'ok', 'message' => 'Static reservations sync triggered'];
-        }
-        return ['status' => 'error'];
-    }
-
-    /**
-     * Immediately sync Kea active leases to Unbound.
-     * POST /api/keaubnd/general/sync_dynamic
-     */
-    public function syncDynamicAction()
-    {
-        if ($this->request->isPost()) {
-            $backend = new Backend();
-            $backend->configdRun('keaubnd sync_dynamic');
-
-            return ['status' => 'ok', 'message' => 'Dynamic leases sync triggered'];
+            return ['status' => 'ok', 'message' => 'Full sync triggered'];
         }
         return ['status' => 'error'];
     }

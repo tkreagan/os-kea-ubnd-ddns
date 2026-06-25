@@ -27,18 +27,7 @@ import os
 import select
 from typing import Dict, List, Optional, Tuple
 
-# Re-export the enablement probe so callers resolve the watch set in one place.
-from .kea_transport import _is_service_enabled  # noqa: F401
-
-# service name -> pidfile path. Unbound rewrites in place; the kea procs
-# unlink+recreate under /var/run/kea (OPNsense's daemon(8) wrapper writes
-# <name>.<name>.pid). d2 == kea-dhcp-ddns is the NCR source.
-PIDFILES: Dict[str, str] = {
-    "unbound": "/var/run/unbound.pid",
-    "d2":      "/var/run/kea/kea-dhcp-ddns.kea-dhcp-ddns.pid",
-    "dhcp4":   "/var/run/kea/kea-dhcp4.kea-dhcp4.pid",
-    "dhcp6":   "/var/run/kea/kea-dhcp6.kea-dhcp6.pid",
-}
+from . import keaubnd_runtime as _rt
 
 # A service's pid sample: (exists, pid_or_None) -- the SM's PidState value type.
 PidSample = Tuple[bool, Optional[int]]
@@ -49,14 +38,27 @@ def resolve_watched_services() -> Dict[str, str]:
     """Return {service: pidfile} for the services this daemon should watch.
 
     Always watches unbound (the flush source -- its restart wipes our local_data)
-    and d2 (the NCR source). Watches dhcp4/dhcp6 only when OPNsense has them
-    enabled, so the SM's all-present check never waits on a service that will
-    never appear.
+    and d2 (the NCR source). Watches dhcp4/dhcp6 only when the runtime config
+    records a socket for them (i.e. they are enabled and started), so the SM's
+    all-present check never waits on a service that will never appear.
     """
-    watched = {"unbound": PIDFILES["unbound"], "d2": PIDFILES["d2"]}
+    watched: Dict[str, str] = {}
+
+    # Unbound: always watch; its restart wipes our local_data
+    watched["unbound"] = _rt.get_unbound_pid()
+
+    # d2: always watch (NCR source); skip only if not configured
+    d2_pid = _rt.get_kea_pid("d2")
+    if d2_pid:
+        watched["d2"] = d2_pid
+
+    # dhcp4/dhcp6: watch only when enabled (has a socket in runtime config)
     for svc in ("dhcp4", "dhcp6"):
-        if _is_service_enabled(svc):
-            watched[svc] = PIDFILES[svc]
+        if _rt.get_kea_socket(svc):
+            pid = _rt.get_kea_pid(svc)
+            if pid:
+                watched[svc] = pid
+
     return watched
 
 

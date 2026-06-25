@@ -53,7 +53,7 @@ def test_start_writes_to_log(ssh, test_log):
 
 
 def test_sync_static_writes_to_log(ssh, test_log):
-    ssh("/usr/local/sbin/configctl keaubnd sync_static")
+    ssh("/usr/local/sbin/configctl keaubnd sync_full")
     time.sleep(2)
     log = _read_log(ssh)
     test_log("observed", {"log_snippet": log[-300:]})
@@ -83,7 +83,7 @@ def test_log_tag_is_kea_ubnd(ssh, test_log):
 
 def test_log_no_debug_in_normal_mode(ssh, test_log):
     """DEBUG lines should not appear without --verbose."""
-    ssh("/usr/local/sbin/configctl keaubnd sync_static")
+    ssh("/usr/local/sbin/configctl keaubnd sync_full")
     time.sleep(2)
     log = _read_log(ssh)
     debug_lines = [l for l in log.splitlines() if "[DEBUG]" in l]

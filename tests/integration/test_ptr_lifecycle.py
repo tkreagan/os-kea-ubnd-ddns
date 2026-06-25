@@ -128,16 +128,15 @@ class TestStaticPtrGuard:
         return ssh(f"cat {self.HOST_ENTRIES}", check=False)
 
     def _restore_host_entries(self, ssh, content: str) -> None:
-        # Write content to the file; escape is handled via heredoc
-        escaped = content.replace("'", "'\"'\"'")
-        ssh(f"printf '%s' '{escaped}' > {self.HOST_ENTRIES}", check=False)
-        # Reload Unbound to pick up the restored config
+        ssh.sudo_script("python3",
+                        f"open({self.HOST_ENTRIES!r}, 'w').write({content!r})")
         ssh("unbound-control -c /var/unbound/unbound.conf reload", check=False)
 
     def _add_static_ptr(self, ssh, ip: str, hostname: str) -> None:
         """Append an IP-keyed local-data-ptr line to host_entries.conf."""
-        entry = f'local-data-ptr: "{ip} {hostname}."'
-        ssh(f"echo {entry!r} >> {self.HOST_ENTRIES}")
+        entry = f'local-data-ptr: "{ip} {hostname}."\n'
+        ssh.sudo_script("python3",
+                        f"open({self.HOST_ENTRIES!r}, 'a').write({entry!r})")
         ssh("unbound-control -c /var/unbound/unbound.conf reload", check=False)
 
     # ── S1 / S2: F1 + F2 combined scenario (IPv4) ─────────────────────────────
@@ -416,19 +415,23 @@ class TestCustomReverseZoneGap:
     def test_c2_release_orphans_standard_ptr(self, ssh, unbound, test_host, test_log):
         """
         C2: After Path-2 delete (D2 removes custom-zone PTR only), the in-addr.arpa
-        PTR synthesized by Path 1 is orphaned.
+        PTR synthesized by Path 1 is orphaned.  Sets up its own state.
         """
-        import ipaddress
         ip = test_host["ip"]
         hostname = test_host["hostname"]
         custom_ptr = ".".join(reversed(ip.split("."))) + ".home.arpa"
 
-        # Simulate D2 Path-2 delete (removes only the custom zone PTR)
+        # Set up: inject A + standard PTR (Path 1) and custom-zone PTR (Path 2)
+        _inject_a_record(unbound, hostname, ip)
+        _inject_ptr_record(unbound, ip, hostname)
+        unbound.add_record(f'"{custom_ptr}. 300 IN PTR {hostname}."')
+        time.sleep(0.3)
+
+        # Simulate D2 Path-2 delete: removes custom-zone PTR and A record
         unbound.remove_record(custom_ptr)
-        # Path-1 PTR still in Unbound (no D2 delete for in-addr.arpa in custom zone)
-        # A record also removed (simulate forward NCR delete)
         unbound.remove_record(hostname)
-        # Path-1 PTR is now orphaned
+
+        # Standard in-addr.arpa PTR must still be present (orphaned)
         assert unbound.has_ptr(ip, hostname), \
             "in-addr.arpa PTR must still be present (orphaned)"
 
@@ -443,13 +446,21 @@ class TestCustomReverseZoneGap:
             "ip": ip, "orphaned_ptr": True, "custom_ptr_gone": True,
         })
 
+        # Cleanup
+        unbound.remove_record(str(__import__("ipaddress").ip_address(ip).reverse_pointer))
+
     def test_c3_cleanup_removes_orphan(self, ssh, unbound, test_host, test_log):
         """
-        C3: After running local-data-clean.py, the orphaned in-addr.arpa PTR is
-        removed (no longer backed by any Kea lease or reservation).
+        C3: After running local-data-clean.py, an orphaned in-addr.arpa PTR is
+        removed (no longer backed by any Kea lease or reservation).  Sets up own state.
         """
         ip = test_host["ip"]
         hostname = test_host["hostname"]
+
+        # Set up: inject standard PTR only (no A record → orphaned from the start)
+        _inject_ptr_record(unbound, ip, hostname)
+        time.sleep(0.3)
+        assert unbound.has_ptr(ip, hostname), "PTR must be present before cleanup"
 
         # Run cleanup
         _run_clean(ssh)
@@ -481,9 +492,11 @@ class TestDeleteAndBulkPath:
         _inject_lease4(kea, dhcp4_subnet_id, hostname, ip)
         time.sleep(0.3)
 
-        # Restart Unbound (simulates what happens when the user restarts it)
-        ssh("unbound-control -c /var/unbound/unbound.conf reload")
-        time.sleep(1)
+        # Restart Unbound (simulates what happens when the user restarts it).
+        # Must be a true restart (not reload) to change the PID so the daemon's
+        # kqueue pid-watch fires and triggers a bulk-path reconcile.
+        ssh("pluginctl -s unbound restart", check=False)
+        time.sleep(2)
 
         # The bulk path (triggered by the unbound_start hook) should have restored
         # the A record and PTR.  Wait for it.
@@ -529,7 +542,7 @@ class TestAuditPtrState:
         time.sleep(0.5)
 
         audit = _audit_json(ssh)
-        forward = audit.get("forward_records", [])
+        forward = audit.get("records", [])
         entry = next((r for r in forward
                       if r.get("hostname") == hostname and r.get("ip") == ip), None)
 
@@ -559,7 +572,7 @@ class TestAuditPtrState:
         time.sleep(0.5)
 
         audit = _audit_json(ssh)
-        forward = audit.get("forward_records", [])
+        forward = audit.get("records", [])
         entry = next((r for r in forward
                       if r.get("hostname") == hostname and r.get("ip") == ip), None)
 
@@ -729,8 +742,8 @@ class TestDhcpv6PtrLifecycle:
         HOST_ENTRIES = "/var/unbound/host_entries.conf"
         original = ssh(f"cat {HOST_ENTRIES}", check=False)
 
-        entry = f'local-data-ptr: "{ip} {static_hostname}."'
-        ssh(f"echo {entry!r} >> {HOST_ENTRIES}")
+        entry = f'local-data-ptr: "{ip} {static_hostname}."\n'
+        ssh.sudo_script("python3", f"open({HOST_ENTRIES!r}, 'a').write({entry!r})")
         ssh("unbound-control -c /var/unbound/unbound.conf reload")
 
         # Inject static PTR into Unbound
@@ -755,5 +768,5 @@ class TestDhcpv6PtrLifecycle:
 
         finally:
             unbound.remove_record(hostname)
-            ssh("printf '%s' " + repr(original) + f" > {HOST_ENTRIES}", check=False)
+            ssh.sudo_script("python3", f"open({HOST_ENTRIES!r}, 'w').write({original!r})")
             ssh("unbound-control -c /var/unbound/unbound.conf reload")
