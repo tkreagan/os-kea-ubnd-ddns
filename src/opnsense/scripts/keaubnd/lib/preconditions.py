@@ -22,11 +22,57 @@ from __future__ import annotations
 
 import json
 import os
+import xml.etree.ElementTree as _ET
 from typing import Dict, List, Optional, Tuple
 
 import time
 
-from .kea_transport import _CONF_FILES, _is_service_enabled, _is_manual_config
+# Conf file paths for each Kea service (same as the constants start.py uses).
+# preconditions.py reads these directly for DDNS-wiring checks; it is a startup
+# gate and runs AFTER start.py has written keaubnd.json, so reading Kea's own
+# conf files here is acceptable and expected.
+_CONF_FILES = {
+    "dhcp4": "/usr/local/etc/kea/kea-dhcp4.conf",
+    "dhcp6": "/usr/local/etc/kea/kea-dhcp6.conf",
+    "d2":    "/usr/local/etc/kea/kea-dhcp-ddns.conf",
+}
+
+_CONFIG_XML = "/conf/config.xml"
+
+_ENABLED_XPATHS = {
+    "dhcp4": "OPNsense/Kea/dhcp4/general/enabled",
+    "dhcp6": "OPNsense/Kea/dhcp6/general/enabled",
+}
+
+_MANUAL_XPATHS = {
+    "dhcp4": "OPNsense/Kea/dhcp4/general/manual_config",
+    "dhcp6": "OPNsense/Kea/dhcp6/general/manual_config",
+}
+
+
+def _is_service_enabled(service: str) -> bool:
+    xpath = _ENABLED_XPATHS.get(service)
+    if not xpath:
+        return True
+    try:
+        node = _ET.parse(_CONFIG_XML).getroot().find(xpath)
+    except (OSError, _ET.ParseError):
+        return True
+    if node is None:
+        return True
+    return (node.text or "").strip() in ("1", "true", "yes")
+
+
+def _is_manual_config(service: str) -> bool:
+    xpath = _MANUAL_XPATHS.get(service)
+    if not xpath:
+        return False
+    try:
+        node = _ET.parse(_CONFIG_XML).getroot().find(xpath)
+    except (OSError, _ET.ParseError):
+        return False
+    return node is not None and (node.text or "").strip() in ("1", "true", "yes")
+
 
 UNBOUND_CONTROL = "/usr/local/sbin/unbound-control"
 
@@ -161,5 +207,4 @@ def check_preconditions(port: int) -> Tuple[bool, str]:
 def _manual_supported() -> List[str]:
     """d2 has no manual_config xpath in OPNsense today; guard so a future one is
     honored without assuming it exists now."""
-    from .kea_transport import _MANUAL_XPATHS
     return list(_MANUAL_XPATHS.keys())

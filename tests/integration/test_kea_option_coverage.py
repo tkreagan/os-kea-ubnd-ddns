@@ -76,17 +76,26 @@ def test_dhcp4_qualifying_suffix_set(dhcp4_conf, ssh, test_log):
         )
 
 
-def test_dhcp4_ddns_server_points_to_listener(dhcp4_conf, test_log):
+def test_dhcp4_ddns_server_points_to_listener(dhcp4_conf, d2_conf, test_log):
     ddns = dhcp4_conf.get("Dhcp4", {}).get("dhcp-ddns", {})
     ip = ddns.get("server-ip", "")
     port = ddns.get("server-port", 0)
     test_log("observed", {"ddns-server-ip": ip, "ddns-server-port": port})
     if not ip and not port:
-        pytest.skip("dhcp-ddns.server-ip/port not set in kea-dhcp4.conf "
-                    "(may be using defaults or D2 not configured)")
+        pytest.skip("dhcp-ddns.server-ip/port not set in kea-dhcp4.conf")
     assert ip == "127.0.0.1", f"dhcp-ddns.server-ip should be 127.0.0.1, got {ip!r}"
-    assert port == LISTENER_PORT, \
-        f"dhcp-ddns.server-port should be {LISTENER_PORT}, got {port}"
+    if d2_conf:
+        # D2 in path: dhcp4 → D2 → plugin. Check D2 forwards to plugin port.
+        domains = (d2_conf.get("DhcpDdns", {})
+                   .get("forward-ddns", {}).get("ddns-domains", []))
+        d2_ports = [s.get("port") for dom in domains for s in dom.get("dns-servers", [])]
+        assert LISTENER_PORT in d2_ports, (
+            f"D2 does not forward to plugin port {LISTENER_PORT}; "
+            f"dns-servers ports seen: {d2_ports}"
+        )
+    else:
+        assert port == LISTENER_PORT, \
+            f"dhcp-ddns.server-port should be {LISTENER_PORT}, got {port}"
 
 
 def test_d2_forward_zones_configured(d2_conf, test_log):
@@ -103,13 +112,19 @@ def test_d2_forward_zones_configured(d2_conf, test_log):
 
 
 def test_d2_listens_on_correct_port(d2_conf, test_log):
-    port = d2_conf.get("DhcpDdns", {}).get("port", 0)
-    test_log("observed", {"d2_port": port})
+    """D2's dns-servers must forward to the plugin listener port."""
     if not d2_conf:
         pytest.skip("kea-dhcp-ddns.conf not found")
-    if port:
-        assert port == LISTENER_PORT, \
-            f"D2 is listening on port {port}, but plugin expects {LISTENER_PORT}"
+    domains = (d2_conf.get("DhcpDdns", {})
+               .get("forward-ddns", {}).get("ddns-domains", []))
+    if not domains:
+        pytest.skip("No forward DDNS domains configured in D2")
+    d2_ports = [s.get("port") for dom in domains for s in dom.get("dns-servers", [])]
+    test_log("observed", {"d2_dns_server_ports": d2_ports})
+    assert LISTENER_PORT in d2_ports, (
+        f"D2 does not forward to plugin listener port {LISTENER_PORT}; "
+        f"dns-servers ports seen: {d2_ports}"
+    )
 
 
 def test_dhcp4_conflict_resolution_flag(dhcp4_conf, test_log):

@@ -17,8 +17,9 @@ STATUS_VIEW_SUMMARY.md
 PLUGIN_BRIEF.md
 
 # Dev tooling and internal docs — private infrastructure references.
-tools/
+tools/.env
 int-docs/
+web/
 
 # Claude Code session state.
 .claude/
@@ -26,3 +27,4 @@ int-docs/
 # Python virtualenv and test caches.
 .venv/
 .pytest_cache/
+private/

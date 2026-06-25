@@ -57,16 +57,70 @@
         $('tr[id="row_general.general.auto_clean_hour"]').toggle(isDaily);
     }
 
+    var _logwatchSubopts = [
+        'general.general.logwatch_on_release',
+        'general.general.logwatch_on_servfail',
+        'general.general.logwatch_on_missed_remove',
+    ];
+    var _cronSubopts = [
+        'general.general.cron_run_sync',
+        'general.general.cron_run_clean',
+        'general.general.auto_clean_interval',
+        'general.general.auto_clean_hour',
+    ];
+    var _magicSubopts = [
+        'general.general.write_magic_ptrs',
+        'general.general.magic_laa_tag',
+    ];
+
+    function indentSubopts() {
+        $.each(_logwatchSubopts.concat(_cronSubopts).concat(_magicSubopts), function(_, id) {
+            $('tr[id="row_' + id + '"] td:first-child').css('padding-left', '2.5em');
+        });
+    }
+
+    function updateMagicSuboptsUI() {
+        var magicOn = $('input[id="general.general.magic_names"]').prop('checked');
+        var synthOn = $('input[id="general.general.synthesize_ptr"]').prop('checked');
+        var ptrEnabled = magicOn && synthOn;
+        $('input[id="general.general.write_magic_ptrs"]').prop('disabled', !ptrEnabled);
+        $('tr[id="row_general.general.write_magic_ptrs"]').toggleClass('text-muted', !ptrEnabled);
+        $('input[id="general.general.magic_laa_tag"]').prop('disabled', !magicOn);
+        $('tr[id="row_general.general.magic_laa_tag"]').toggleClass('text-muted', !magicOn);
+    }
+
+    function updateLogwatchSuboptsUI() {
+        var on = $('input[id="general.general.enable_logwatch"]').prop('checked');
+        $('tr[id="row_general.general.logwatch_on_release"]').toggle(on);
+        $('tr[id="row_general.general.logwatch_on_servfail"]').toggle(on);
+        $('tr[id="row_general.general.logwatch_on_missed_remove"]').toggle(on);
+    }
+
+    function updateCronSuboptsUI() {
+        var on = $('input[id="general.general.enable_auto_clean"]').prop('checked');
+        $('tr[id="row_general.general.cron_run_sync"]').toggle(on);
+        $('tr[id="row_general.general.cron_run_clean"]').toggle(on);
+        $('tr[id="row_general.general.auto_clean_interval"]').toggle(on);
+        $('tr[id="row_general.general.auto_clean_hour"]').toggle(on && $('select[id="general.general.auto_clean_interval"]').val() === 'daily');
+    }
+
     $( document ).ready(function() {
         let data_get_map = {'frm_generalsettings': "/api/keaubnd/general/get"};
         mapDataToFormUI(data_get_map).done(function() {
             formatTokenizersUI();
             $('.selectpicker').selectpicker('refresh');
             updateServiceControlUI('keaubnd');
-            updateCleanScheduleUI();
+            indentSubopts();
+            updateLogwatchSuboptsUI();
+            updateCronSuboptsUI();
+            updateMagicSuboptsUI();
         });
 
-        $('select[id="general.general.auto_clean_interval"]').change(updateCleanScheduleUI);
+        $('input[id="general.general.enable_logwatch"]').change(updateLogwatchSuboptsUI);
+        $('input[id="general.general.enable_auto_clean"]').change(updateCronSuboptsUI);
+        $('select[id="general.general.auto_clean_interval"]').change(updateCronSuboptsUI);
+        $('input[id="general.general.magic_names"]').change(updateMagicSuboptsUI);
+        $('input[id="general.general.synthesize_ptr"]').change(updateMagicSuboptsUI);
 
         updateReadiness();
         setInterval(updateReadiness, 5000);
@@ -74,6 +128,30 @@
         $("#reconfigureAct").SimpleActionButton({
             onPreAction: function() {
                 const dfObj = new $.Deferred();
+
+                var logwatchOn = $('input[id="general.general.enable_logwatch"]').prop('checked');
+                if (logwatchOn) {
+                    var lwAny = $('input[id="general.general.logwatch_on_release"]').prop('checked')
+                             || $('input[id="general.general.logwatch_on_servfail"]').prop('checked')
+                             || $('input[id="general.general.logwatch_on_missed_remove"]').prop('checked');
+                    if (!lwAny) {
+                        alert('{{ lang._("Log Watcher is enabled but no actions are selected. Enable at least one sub-option or disable Log Watcher.") }}');
+                        dfObj.reject();
+                        return dfObj;
+                    }
+                }
+
+                var cronOn = $('input[id="general.general.enable_auto_clean"]').prop('checked');
+                if (cronOn) {
+                    var cronAny = $('input[id="general.general.cron_run_sync"]').prop('checked')
+                               || $('input[id="general.general.cron_run_clean"]').prop('checked');
+                    if (!cronAny) {
+                        alert('{{ lang._("Scheduled sync / clean is enabled but no jobs are selected. Enable at least one sub-option or disable the schedule.") }}');
+                        dfObj.reject();
+                        return dfObj;
+                    }
+                }
+
                 saveFormToEndpoint(
                     "/api/keaubnd/general/set",
                     'frm_generalsettings',

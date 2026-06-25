@@ -2,6 +2,6 @@
     "product_id": "os-kea-ubnd-ddns",
     "product_name": "kea-ubnd-ddns",
     "product_tier": "3",
-    "product_version": "0.96",
+    "product_version": "0.98",
     "product_website": "https://github.com/tkreagan/os-kea-ubnd-ddns"
 }

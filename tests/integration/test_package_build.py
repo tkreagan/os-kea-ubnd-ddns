@@ -33,12 +33,16 @@ EXPECTED_FILES = [
     "/usr/local/opnsense/scripts/keaubnd/start.py",
     "/usr/local/opnsense/scripts/keaubnd/stop.py",
     "/usr/local/opnsense/scripts/keaubnd/kea-sync.py",
+    "/usr/local/opnsense/scripts/keaubnd/run-sync.py",
+    "/usr/local/opnsense/scripts/keaubnd/run-clean.py",
+    "/usr/local/opnsense/scripts/keaubnd/fast-reload.py",
     "/usr/local/opnsense/scripts/keaubnd/local-data-audit.py",
     "/usr/local/opnsense/scripts/keaubnd/local-data-clean.py",
     "/usr/local/opnsense/scripts/keaubnd/uninstall.sh",
     # Script library
     "/usr/local/opnsense/scripts/keaubnd/lib/__init__.py",
     "/usr/local/opnsense/scripts/keaubnd/lib/keaubnd_sync.py",
+    "/usr/local/opnsense/scripts/keaubnd/lib/keaubnd_runtime.py",
     "/usr/local/opnsense/scripts/keaubnd/lib/kea_transport.py",
     "/usr/local/opnsense/scripts/keaubnd/lib/consistency_sm.py",
     "/usr/local/opnsense/scripts/keaubnd/lib/pid_watch.py",
@@ -286,9 +290,10 @@ class TestInstalledFiles:
             "keaubnd stop",
             "keaubnd restart",
             "keaubnd status",
-            "keaubnd sync_static",
-            "keaubnd sync_dynamic",
+            "keaubnd logwatcher_status",
+            "keaubnd sync_full",
             "keaubnd clean",
+            "keaubnd fast_reload",
         ]
         missing = [a for a in expected_actions if a not in actions]
         assert not missing, f"configd actions not registered after install: {missing}"

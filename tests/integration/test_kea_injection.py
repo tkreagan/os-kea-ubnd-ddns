@@ -92,7 +92,7 @@ def injected_reservation(kea, dhcp4_subnet_id, test_host, unbound, test_log):
             "subnet-id": dhcp4_subnet_id,
             "hw-address": "aa:bb:cc:99:00:02",
             "ip-address": ip,
-            "hostname": hostname.replace(".lan", ""),
+            "hostname": test_host["label"],
         }
     })
     if resp.get("result", 1) != 0:
@@ -118,7 +118,7 @@ def injected_reservation(kea, dhcp4_subnet_id, test_host, unbound, test_log):
 
 def test_lease_sync_registers_active_lease(ssh, injected_lease, unbound, test_log):
     hostname, ip = injected_lease
-    ssh("/usr/local/sbin/configctl keaubnd sync_dynamic")
+    ssh("/usr/local/sbin/configctl keaubnd sync_full")
     time.sleep(2)
 
     has_a = unbound.has_record(hostname, ip, "A")
@@ -139,7 +139,7 @@ def test_lease_sync_ttl_is_bounded(ssh, kea, dhcp4_subnet_id, test_host, unbound
         "subnet-id": dhcp4_subnet_id,
         "expire": expire, "valid-lft": 500, "state": 0,
     })
-    ssh("/usr/local/sbin/configctl keaubnd sync_dynamic")
+    ssh("/usr/local/sbin/configctl keaubnd sync_full")
     time.sleep(2)
 
     data = unbound.list_local_data()
@@ -160,7 +160,7 @@ def test_lease_sync_ttl_is_bounded(ssh, kea, dhcp4_subnet_id, test_host, unbound
 
 def test_reservation_sync_registers_static(ssh, injected_reservation, unbound, test_log):
     hostname, ip = injected_reservation
-    ssh("/usr/local/sbin/configctl keaubnd sync_static")
+    ssh("/usr/local/sbin/configctl keaubnd sync_full")
     time.sleep(2)
 
     has_a = unbound.has_record(hostname, ip, "A")
@@ -181,7 +181,7 @@ def test_expired_lease_not_synced(ssh, kea, dhcp4_subnet_id, test_host, unbound,
         "subnet-id": dhcp4_subnet_id,
         "expire": past, "valid-lft": 3600, "state": 0,
     })
-    ssh("/usr/local/sbin/configctl keaubnd sync_dynamic")
+    ssh("/usr/local/sbin/configctl keaubnd sync_full")
     time.sleep(2)
 
     has_a = unbound.has_record(hostname, ip, "A")
@@ -204,7 +204,7 @@ def test_declined_lease_not_synced(ssh, kea, dhcp4_subnet_id, test_host, unbound
         "expire": expire, "valid-lft": 3600,
         "state": 1,  # declined
     })
-    ssh("/usr/local/sbin/configctl keaubnd sync_dynamic")
+    ssh("/usr/local/sbin/configctl keaubnd sync_full")
     time.sleep(2)
 
     has_a = unbound.has_record(hostname, ip, "A")
@@ -230,7 +230,7 @@ def test_dual_stack_both_registered(ssh, kea, dhcp4_subnet_id, test_host, unboun
     ssh(f"/usr/local/sbin/unbound-control -c /var/unbound/unbound.conf "
         f"local_data '{hostname} 300 IN AAAA {ip6}'")
 
-    ssh("/usr/local/sbin/configctl keaubnd sync_dynamic")
+    ssh("/usr/local/sbin/configctl keaubnd sync_full")
     time.sleep(2)
 
     test_log("observed", {

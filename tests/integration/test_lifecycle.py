@@ -31,7 +31,14 @@ def _pidfile_exists(ssh, path: str) -> bool:
 
 
 def _pgrep_count(ssh) -> int:
-    result = ssh("pgrep -c -f kea-ubnd-ddns.py || echo 0", check=False)
+    # pgrep -c is unreliable on FreeBSD (doesn't print count); use pidfiles instead
+    result = ssh(
+        "n=0; "
+        "for f in /var/run/kea-ubnd-ddns.supervisor.pid /var/run/kea-ubnd-ddns.pid; do "
+        "  [ -f \"$f\" ] && kill -0 \"$(cat $f)\" 2>/dev/null && n=$((n+1)); "
+        "done; echo $n",
+        check=False,
+    )
     try:
         return int(result.strip())
     except ValueError:
@@ -119,7 +126,7 @@ def test_status_reflects_running_state(ssh):
     time.sleep(2)
     status = ssh("/usr/local/sbin/pluginctl -s kea-ubnd-ddns status",
                  check=False)
-    assert "running" in status.lower() or pid_after, \
+    assert "running" in status.lower(), \
         f"Unexpected status output: {status!r}"
 
 

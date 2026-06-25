@@ -13,28 +13,19 @@ care whether the channel is a unix socket or an HTTP listener:
   - UnixSocketTransport -- AF_UNIX stream socket (what OPNsense provisions today)
   - HttpTransport       -- HTTP/HTTPS listener on localhost (Kea's longer-term
                            direction; fully implemented here, selected only when
-                           the running Kea config actually declares one)
+                           the runtime config records an http(s):// socket URL)
 
-resolve_kea_connection(service) figures out which transport to use by *reading
-configuration* (never by probing sockets/ports on a running firewall):
-
-  Step 0  explicit plugin override   (//OPNsense/KeaUbnd/... -- reserved,
-          currently disabled in the UI, so this falls through)
-  Step 1  configd discovery          (reserved no-op: OPNsense 26.1 exposes no
-          socket-discovery action)
-  Step 2  parse the active Kea conf   (/usr/local/etc/kea/kea-dhcp{4,6}.conf):
-          read its control-socket / control-sockets stanza for type + path or
-          host/port. This is the real source of truth and also reflects any
-          hand-edited "manual configuration".
-  Step 3  hardcoded OPNsense default  (/var/run/kea/kea{4,6}-ctrl-socket) --
-          skipped when manual configuration is enabled, since guessing a path
-          for an admin-owned config would be wrong.
-  Step 4  graceful KeaUnavailableError
+resolve_kea_connection(service) figures out which transport to use by reading
+the runtime config written by start.py (/var/run/keaubnd/keaubnd.json). All
+OPNsense-specific path resolution (parsing Kea conf files, reading config.xml
+for enabled flags) happens once at daemon startup in start.py, not at runtime
+in this module. Non-OPNsense deployments write keaubnd.json via their own
+startup script.
 
 Resolution is memoized for the lifetime of the process only. Every caller is a
-short-lived script (lease-sync, reservation-sync, audit, clean) that re-resolves
-on its next invocation, so a Kea reconfigure is picked up by the next run with
-no cache-invalidation logic -- process restart is the invalidation. The live
+short-lived script (kea-sync, audit, clean) that re-resolves on its next
+invocation, so a Kea reconfigure is picked up by the next run with no
+cache-invalidation logic -- process restart is the invalidation. The live
 lease/reservation data itself is always fetched fresh; only the connection
 descriptor is memoized.
 
@@ -49,46 +40,13 @@ import os
 import socket as _socket
 import ssl
 import urllib.error
+import urllib.parse
 import urllib.request
-import xml.etree.ElementTree as ET
 from typing import Dict, List, Optional
 
 # Matches SYSLOG_IDENT in keaubnd_sync; duplicated (rather than imported) to
 # avoid a circular import, since keaubnd_sync imports from this module.
 _LOG_TAG = "kea-ub"
-
-CONFIG_XML = "/conf/config.xml"
-
-# Per-service generated Kea config files and their top-level config keys.
-_CONF_FILES = {
-    "dhcp4": "/usr/local/etc/kea/kea-dhcp4.conf",
-    "dhcp6": "/usr/local/etc/kea/kea-dhcp6.conf",
-    "d2":    "/usr/local/etc/kea/kea-dhcp-ddns.conf",
-}
-_ROOT_KEYS = {"dhcp4": "Dhcp4", "dhcp6": "Dhcp6", "d2": "DhcpDdns"}
-
-# Hardcoded OPNsense defaults -- identical to what OPNsense core's own KeaCtrl
-# uses. Note OPNsense provisions no control socket for d2, so it has no default.
-_DEFAULT_SOCKETS = {
-    "dhcp4": "/var/run/kea/kea4-ctrl-socket",
-    "dhcp6": "/var/run/kea/kea6-ctrl-socket",
-}
-
-# config.xml flags for OPNsense's "manual configuration" mode, per service.
-# Confirmed against OPNsense 26.1: //OPNsense/Kea/dhcp{4,6}/general/manual_config.
-# Read defensively so a missing path simply means "not manual".
-_MANUAL_XPATHS = {
-    "dhcp4": "OPNsense/Kea/dhcp4/general/manual_config",
-    "dhcp6": "OPNsense/Kea/dhcp6/general/manual_config",
-}
-
-# config.xml enable flags per service: //OPNsense/Kea/dhcp{4,6}/general/enabled.
-# A disabled service has no control socket to reach, so treating its absence as
-# an error is wrong — we skip it (KeaServiceUnavailableError) rather than fail.
-_ENABLED_XPATHS = {
-    "dhcp4": "OPNsense/Kea/dhcp4/general/enabled",
-    "dhcp6": "OPNsense/Kea/dhcp6/general/enabled",
-}
 
 
 class KeaUnavailableError(Exception):
@@ -97,10 +55,18 @@ class KeaUnavailableError(Exception):
 
 
 class KeaServiceUnavailableError(KeaUnavailableError):
-    """Raised when the channel is reachable but the daemon rejected the command
-    or the service is offline. Subclass of KeaUnavailableError so existing
-    handlers still catch it, while callers wanting per-service tolerance can
-    catch this and skip just that service."""
+    """Raised when a Kea service should be skipped rather than aborting the caller.
+
+    Two sources:
+      - Socket absent / not configured (service disabled or not started) — from
+        _build_connection when the runtime config has no socket for that service.
+      - rc == 2 (unsupported command) — from kea_query when a reachable daemon
+        doesn't recognise the command (e.g. lease_cmds hook library not loaded).
+
+    Subclass of KeaUnavailableError so existing handlers that catch the base
+    class still work; callers that want per-service tolerance catch this directly.
+    rc == 1 (command recognised but failed) raises the base KeaUnavailableError
+    to signal a hard error from a reachable daemon."""
     pass
 
 
@@ -224,162 +190,38 @@ def resolve_kea_connection(service: str, timeout: float = 5.0):
 def _build_connection(service: str, timeout: float):
     log = logging.getLogger(_LOG_TAG)
 
-    # Step -1: if the service is disabled in OPNsense, there is nothing to reach.
-    # Report it as a per-service skip (not a hard error) so callers move on
-    # quietly instead of surfacing a "control socket not found" warning.
-    if not _is_service_enabled(service):
-        raise KeaServiceUnavailableError(f"Kea {service} is not enabled")
-
     # Step 0: explicit plugin override (reserved -- UI fields disabled for now).
     override = _plugin_override(service, timeout)
     if override is not None:
         log.debug("kea %s: using plugin connection override", service)
         return override
 
-    # Step 1: configd discovery -- reserved no-op (OPNsense 26.1 exposes none).
-
-    # Step 2: parse the active Kea conf file.
-    manual = _is_manual_config(service)
-    desc = _parse_conf_socket(service)
-    if desc is not None:
-        log.debug("kea %s: resolved %s connection from conf file",
-                  service, desc["type"])
-        return _transport_from_desc(desc, timeout)
-
-    # Step 3: hardcoded default -- but never guess for an admin-owned config.
-    if manual:
-        raise KeaUnavailableError(
-            f"Kea {service}: manual configuration is enabled but no usable "
-            f"control socket was found in {_CONF_FILES.get(service)}. Add a "
-            f"control-socket stanza to the manual Kea configuration."
+    # Read the socket value from the runtime config written by start.py.
+    from . import keaubnd_runtime as _rt
+    socket_val = _rt.get_kea_socket(service)
+    if not socket_val:
+        raise KeaServiceUnavailableError(
+            f"Kea {service}: no socket configured (service disabled or not started)"
         )
-    default = _DEFAULT_SOCKETS.get(service)
-    if default:
-        log.debug("kea %s: falling back to default socket %s", service, default)
-        return UnixSocketTransport(default, timeout)
 
-    # Step 4: nothing resolved.
-    raise KeaUnavailableError(
-        f"Cannot resolve a Kea connection for '{service}': no control socket "
-        f"configured in {_CONF_FILES.get(service, 'its conf file')} and no "
-        f"default available."
-    )
+    if socket_val.startswith(("http://", "https://")):
+        parsed = urllib.parse.urlparse(socket_val)
+        log.debug("kea %s: HTTP transport → %s", service, socket_val)
+        return HttpTransport(
+            host=parsed.hostname or "127.0.0.1",
+            port=parsed.port or (443 if socket_val.startswith("https://") else 80),
+            tls=socket_val.startswith("https://"),
+            verify=False,
+            timeout=timeout,
+        )
+
+    log.debug("kea %s: unix socket → %s", service, socket_val)
+    return UnixSocketTransport(socket_val, timeout)
 
 
 def _plugin_override(service: str, timeout: float):
-    """Reserved hook for the (currently disabled) plugin connection settings.
-
-    When those settings are enabled, this is where we would read
-    //OPNsense/KeaUbnd/... for an explicit unix/http override and return the
-    matching transport. Until then it always falls through."""
+    """Reserved hook for the (currently disabled) plugin connection settings."""
     return None
-
-
-def _is_manual_config(service: str) -> bool:
-    """True if OPNsense's manual-configuration mode is enabled for the service,
-    meaning the conf file is admin-owned and must not be second-guessed with a
-    default socket path."""
-    xpath = _MANUAL_XPATHS.get(service)
-    if not xpath:
-        return False
-    try:
-        node = ET.parse(CONFIG_XML).getroot().find(xpath)
-    except (OSError, ET.ParseError):
-        return False
-    return node is not None and (node.text or "").strip() in ("1", "true", "yes")
-
-
-def _is_service_enabled(service: str) -> bool:
-    """True if OPNsense has the Kea service enabled. Defaults to True when the
-    flag is absent so we never wrongly skip a service on a config that lacks it
-    — only an explicit '0' is treated as disabled."""
-    xpath = _ENABLED_XPATHS.get(service)
-    if not xpath:
-        return True
-    try:
-        node = ET.parse(CONFIG_XML).getroot().find(xpath)
-    except (OSError, ET.ParseError):
-        return True
-    if node is None:
-        return True
-    return (node.text or "").strip() in ("1", "true", "yes")
-
-
-def _parse_conf_socket(service: str) -> Optional[Dict]:
-    """Parse the service's Kea conf file and return a connection descriptor for
-    its control socket, or None if the file is absent/unparseable/has no socket.
-
-    Handles both the singular `control-socket` (older Kea / OPNsense 26.1) and
-    the `control-sockets` list (Kea 3.x), preferring http(s) over unix when both
-    are present."""
-    conf_path = _CONF_FILES.get(service)
-    root_key = _ROOT_KEYS.get(service)
-    if not conf_path or not root_key or not os.path.exists(conf_path):
-        return None
-    try:
-        with open(conf_path) as f:
-            conf = json.load(f)
-    except (OSError, ValueError):
-        return None
-
-    root = conf.get(root_key, {})
-    if isinstance(root.get("control-sockets"), list):
-        sockets = root["control-sockets"]
-    elif isinstance(root.get("control-socket"), dict):
-        sockets = [root["control-socket"]]
-    else:
-        return None
-
-    return _select_socket(sockets)
-
-
-def _select_socket(sockets: List[Dict]) -> Optional[Dict]:
-    """Pick a usable socket, preferring http(s) over unix."""
-    unix_choice = None
-    for sock in sockets:
-        stype = (sock.get("socket-type") or "").lower()
-        if stype in ("http", "https"):
-            desc = _desc_from_socket(sock)
-            if desc is not None:
-                return desc
-        elif stype == "unix" and unix_choice is None:
-            unix_choice = sock
-    return _desc_from_socket(unix_choice) if unix_choice is not None else None
-
-
-def _desc_from_socket(sock: Dict) -> Optional[Dict]:
-    stype = (sock.get("socket-type") or "").lower()
-    if stype == "unix":
-        name = sock.get("socket-name")
-        return {"type": "unix", "path": name} if name else None
-    if stype in ("http", "https"):
-        try:
-            port = int(sock.get("socket-port") or 0)
-        except (TypeError, ValueError):
-            port = 0
-        if not port:
-            return None
-        return {
-            "type": "http",
-            "host": sock.get("socket-address") or "127.0.0.1",
-            "port": port,
-            "tls": stype == "https",
-            "verify": False,
-        }
-    return None
-
-
-def _transport_from_desc(desc: Dict, timeout: float):
-    if desc["type"] == "unix":
-        return UnixSocketTransport(desc["path"], timeout)
-    if desc["type"] == "http":
-        return HttpTransport(
-            desc["host"], desc["port"],
-            tls=desc.get("tls", False),
-            verify=desc.get("verify", False),
-            timeout=timeout,
-        )
-    raise KeaUnavailableError(f"Unknown Kea transport descriptor: {desc}")
 
 
 # ── High-level query ──────────────────────────────────────────────────────────
@@ -394,8 +236,11 @@ def kea_query(command: str, arguments: Optional[Dict] = None,
     Both are reduced to a single map here so transports are interchangeable.
 
     Kea result codes: 0=success, 1=error, 2=unsupported, 3=empty (success, no
-    data). EMPTY is treated as success; command-level failures raise
-    KeaServiceUnavailableError."""
+    data). EMPTY (3) is treated as success. rc=2 (command not recognised by any
+    loaded hook) raises KeaServiceUnavailableError so callers can skip that
+    service. rc=1 (command recognised but the daemon returned an error) raises
+    KeaUnavailableError — a reachable daemon that errors is not the same as a
+    disabled service and must not be silently skipped."""
     transport = resolve_kea_connection(service, timeout)
     result = transport.query(command, arguments, timeout)
 
@@ -409,10 +254,12 @@ def kea_query(command: str, arguments: Optional[Dict] = None,
             f"Kea command '{command}' returned an unexpected response")
 
     rc = result.get("result")
-    if rc == 3:
+    if rc in (0, 3):
         return result
-    if rc != 0:
+    if rc == 2:
         raise KeaServiceUnavailableError(
-            f"Kea command '{command}' failed: {result.get('text', 'unknown error')}"
+            f"Kea command '{command}' unsupported: {result.get('text', 'unknown')}"
         )
-    return result
+    raise KeaUnavailableError(
+        f"Kea command '{command}' failed (rc={rc}): {result.get('text', 'unknown error')}"
+    )

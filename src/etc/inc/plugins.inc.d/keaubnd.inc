@@ -99,51 +99,97 @@ function keaubnd_services()
 function keaubnd_cron()
 {
     /*
-     * Register the auto-clean cron job the OPNsense way.
+     * Register scheduled cron jobs the OPNsense way.
      *
-     * plugins_cron() collects this hook's return value and reconciles it into
-     * the cron model (OPNsense/cron/jobs) by origin, which the Cron template
-     * renders into the managed crontab. There is no file to write and no
-     * teardown to perform: when the feature is disabled we simply return no
-     * jobs, and the next cron rebuild drops the entry. The rebuild is triggered
-     * by 'cron restart' (issued from reconfigureAction) and on boot.
+     * plugins_cron() reconciles this return value into the cron model by
+     * origin; the Cron template renders it into the managed crontab. When
+     * the feature is disabled we return no jobs and the next cron rebuild
+     * drops all entries.
      *
-     * The job invokes the existing [clean] configd action so the schedule and
-     * the GUI "Clean" button share one code path.
+     * Two independent job groups:
      *
-     * Intervals: h1=every hour, h3=every 3h, h6=every 6h, h12=every 12h,
-     * daily=once per day at auto_clean_hour (0-23).
+     * Group 1 — sync/clean (enable_auto_clean):
+     *   1a. sync_full  -- full Kea -> Unbound reconcile (cron_run_sync)
+     *   1b. clean      -- stale-record purge (cron_run_clean)
+     *   Sync runs before clean; both hold the shared advisory mutex (blocking).
+     *   Intervals: h1/h3/h6/h12=every N hours, daily=once at auto_clean_hour.
+     *
+     * Group 2 — fast-reload safety net (enable_fast_reload_cron):
+     *   2a. fast_reload -- snapshot all records, unbound-control fast-reload,
+     *   restore snapshot (atomic under the mutation lock). No Kea queries;
+     *   records are preserved exactly as they were. Runs independently of the
+     *   sync/clean schedule. Catches the daemon-restart-without-Unbound-restart
+     *   scenario where the in-process mutation counter resets to zero but
+     *   Unbound heap keeps growing.
+     *   Interval: every N days (d1/d3/d7/d14/d30) at 03:00.
      */
     $jobs = [];
 
     $cfg = new \OPNsense\KeaUbnd\General();
-    if (!empty((string)$cfg->general->enabled) && !empty((string)$cfg->general->enable_auto_clean)) {
-        $interval = (string)$cfg->general->auto_clean_interval;
+    if (empty((string)$cfg->general->enabled)) {
+        return $jobs;
+    }
 
-        if ($interval === 'daily') {
-            $hour = (string)$cfg->general->auto_clean_hour;
-            if (!ctype_digit($hour) || (int)$hour < 0 || (int)$hour > 23) {
-                $hour = '0';
+    // ── Group 1: sync / clean ──────────────────────────────────────────────
+    if (!empty((string)$cfg->general->enable_auto_clean)) {
+        $run_sync  = !empty((string)$cfg->general->cron_run_sync);
+        $run_clean = !empty((string)$cfg->general->cron_run_clean);
+
+        if ($run_sync || $run_clean) {
+            $interval = (string)$cfg->general->auto_clean_interval;
+
+            if ($interval === 'daily') {
+                $hour = (string)$cfg->general->auto_clean_hour;
+                if (!ctype_digit($hour) || (int)$hour < 0 || (int)$hour > 23) {
+                    $hour = '0';
+                }
+                $minute = '0';
+            } else {
+                $hour_by_interval = [
+                    'h1'  => '*',
+                    'h3'  => '0,3,6,9,12,15,18,21',
+                    'h6'  => '0,6,12,18',
+                    'h12' => '0,12',
+                ];
+                $hour   = $hour_by_interval[$interval] ?? '0,6,12,18';
+                $minute = '0';
             }
-            $jobs[]['autocron'] = [
-                '/usr/local/sbin/configctl -d keaubnd clean',
-                '0',
-                $hour,
-            ];
-        } else {
-            $hour_by_interval = [
-                'h1'  => '*',
-                'h3'  => '0,3,6,9,12,15,18,21',
-                'h6'  => '0,6,12,18',
-                'h12' => '0,12',
-            ];
-            $hour = $hour_by_interval[$interval] ?? '0,6,12,18';
-            $jobs[]['autocron'] = [
-                '/usr/local/sbin/configctl -d keaubnd clean',
-                '0',
-                $hour,
-            ];
+
+            if ($run_sync) {
+                $jobs[]['autocron'] = [
+                    '/usr/local/sbin/configctl -d keaubnd sync_full',
+                    $minute,
+                    $hour,
+                ];
+            }
+            if ($run_clean) {
+                $jobs[]['autocron'] = [
+                    '/usr/local/sbin/configctl -d keaubnd clean',
+                    $minute,
+                    $hour,
+                ];
+            }
         }
+    }
+
+    // ── Group 2: fast-reload safety net ───────────────────────────────────
+    if (!empty((string)$cfg->general->enable_fast_reload_cron)) {
+        // Map d1/d3/d7/d14/d30 to a day-of-month step for standard cron.
+        // */N fires on days 1,1+N,1+2N,... of the month — close enough for
+        // a maintenance window that runs regardless of traffic volume.
+        $day_map = ['d1' => '1', 'd3' => '3', 'd7' => '7', 'd14' => '14', 'd30' => '30'];
+        $days_key = (string)$cfg->general->fast_reload_cron_days;
+        $day_step = $day_map[$days_key] ?? '7';
+        $day_field = ($day_step === '1') ? '*' : '*/' . $day_step;
+        $cron_hour = (string)$cfg->general->fast_reload_cron_hour;
+        $cron_hour = (is_numeric($cron_hour) && $cron_hour >= 0 && $cron_hour <= 23) ? $cron_hour : '3';
+
+        $jobs[]['autocron'] = [
+            '/usr/local/sbin/configctl -d keaubnd fast_reload',
+            '0',        // minute
+            $cron_hour, // hour
+            $day_field, // day-of-month
+        ];
     }
 
     return $jobs;

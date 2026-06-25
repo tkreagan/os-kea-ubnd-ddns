@@ -239,13 +239,12 @@ def test_audit_passes_synthesize_flag_to_find_stale():
                            side_effect=[[], KeaServiceUnavailableError("off")]), \
          mock.patch.object(audit, "query_kea_leases",
                            side_effect=[[], KeaServiceUnavailableError("off")]), \
-         mock.patch.object(audit, "get_synthesize_ptr", return_value=False) as mock_gsp, \
          mock.patch.object(audit, "read_d2_reverse_zones",
                            return_value={"1.168.192.in-addr.arpa"}) as mock_rdz, \
          mock.patch.object(audit, "find_stale_records",
                            return_value=(set(), set())) as mock_fsr, \
          mock.patch("sys.stdout", StringIO()):
-        audit.audit_local_data(report_json=True)
+        audit.audit_local_data(report_json=True, synthesize_ptr=False)
 
     mock_fsr.assert_called_once()
     _, kwargs = mock_fsr.call_args

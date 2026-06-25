@@ -1,6 +1,6 @@
 <model>
     <mount>//OPNsense/KeaUbnd</mount>
-    <version>1.0.0</version>
+    <version>1.0.1</version>
     <description>Kea Unbound DDNS registration</description>
     <items>
         <general>
@@ -21,20 +21,6 @@
                 <MinimumValue>1024</MinimumValue>
                 <MaximumValue>65535</MaximumValue>
             </port>
-
-            <!-- Sync static reservations from Kea to Unbound during the bulk
-                 reconcile (run by the daemon after a Kea/Unbound restart). -->
-            <sync_static_reservations type="BooleanField">
-                <Default>1</Default>
-                <Required>Y</Required>
-            </sync_static_reservations>
-
-            <!-- Sync active DHCP leases from Kea to Unbound during the bulk
-                 reconcile. TTL is set to the remaining lease lifetime. -->
-            <sync_dynamic_leases type="BooleanField">
-                <Default>1</Default>
-                <Required>Y</Required>
-            </sync_dynamic_leases>
 
             <!-- Synthesize PTR (reverse) records from forward A/AAAA DDNS updates.
                  When enabled (default), the DDNS listener automatically creates the
@@ -68,39 +54,106 @@
                     <allow>Allow — both records coexist</allow>
                     <first_wins>First wins — keep existing, reject new registrant</first_wins>
                     <last_wins>Last wins — replace existing with new record (default)</last_wins>
+                    <none>None — evict all dynamic records on conflict</none>
                 </OptionValues>
             </collision_policy>
+
+            <!-- Create disambiguated parallel forward records (magic hostnames) for
+                 all hosts involved in a hostname collision, orthogonal to collision_policy.
+                 The suffix encodes the hardware identifier type and last 6 chars of the
+                 identifier (e.g. laptop-mAABBCC for a MAC-identified host). -->
+            <magic_names type="BooleanField">
+                <Default>0</Default>
+            </magic_names>
+
+            <!-- When magic_names is on, insert -laa- into the magic hostname for devices
+                 whose MAC has the locally administered bit set (iOS/Android random MACs).
+                 Signals to the administrator that the suffix may not be stable. -->
+            <magic_laa_tag type="BooleanField">
+                <Default>0</Default>
+            </magic_laa_tag>
+
+            <!-- When magic_names is on AND synthesize_ptr is on, write PTR records
+                 pointing to the magic FQDN for every dynamic lease IP in a collision
+                 group, rather than the bare hostname. When off, PTR behaviour is
+                 unchanged from non-magic mode: the collision winner gets PTR to the
+                 bare hostname, losers get no PTR. Has no effect if either magic_names
+                 or synthesize_ptr is disabled. -->
+            <write_magic_ptrs type="BooleanField">
+                <Default>0</Default>
+            </write_magic_ptrs>
 
             <!-- After each full reconcile (triggered by a Kea or Unbound restart),
                  sweep Unbound for records no longer backed by any Kea reservation
                  or active lease and remove them. Equivalent to running the auto-clean
                  script immediately after every restart-driven resync. Requires Kea to
                  be reachable during the reconcile. -->
-            <clean_on_restart type="BooleanField">
+            <clean_stale_records type="BooleanField">
                 <Default>1</Default>
                 <Required>Y</Required>
-            </clean_on_restart>
+            </clean_stale_records>
 
             <!-- Watch Kea DHCP log and listener log for missed updates.
-                 On lease release (DHCP4_RELEASE / DHCP6_RELEASE): dispatches
-                 local-data-clean.py with purge-ip under the shared lock.
-                 On listener SERVFAIL: triggers kea-sync.py with targeted names
-                 for the affected hosts so dirty-name drain is not the only
-                 recovery path.
-                 Runs as a separate daemon started alongside the main listener. -->
+                 Runs as a separate daemon started alongside the main listener.
+                 The three sub-options below control which events trigger action.
+                 Off by default — the cron sync path covers most deployments. -->
             <enable_logwatch type="BooleanField">
-                <Default>1</Default>
+                <Default>0</Default>
                 <Required>Y</Required>
             </enable_logwatch>
 
-            <!-- Automatically clean stale DNS records from Unbound.
-                 When enabled, the local-data-clean.py script runs periodically
-                 to remove stale records (entries in Unbound that don't match
-                 any Kea reservation, lease, or OPNsense-managed entry). -->
+            <!-- On DHCP4_RELEASE / DHCP6_RELEASE: purge DNS records for that IP
+                 immediately via local-data-clean.py purge-ip.
+                 Only used when enable_logwatch is enabled. -->
+            <logwatch_on_release type="BooleanField">
+                <Default>1</Default>
+                <Required>Y</Required>
+            </logwatch_on_release>
+
+            <!-- On listener SERVFAIL (Unbound unavailable or locked during an
+                 update): trigger a targeted kea-sync.py for the affected names
+                 as an additional recovery path alongside the dirty-name drain.
+                 Only used when enable_logwatch is enabled. -->
+            <logwatch_on_servfail type="BooleanField">
+                <Default>1</Default>
+                <Required>Y</Required>
+            </logwatch_on_servfail>
+
+            <!-- On a DNS Remove without a subsequent Add within a short grace
+                 window: trigger a targeted kea-sync.py for the removed hostname.
+                 Catches the LEASE_REUSE gap where kea-dhcp-ddns sends a Remove
+                 for an IP that is immediately re-leased to the same client but
+                 skips the follow-up Add (lease record looks unchanged to D2).
+                 Only used when enable_logwatch is enabled. -->
+            <logwatch_on_missed_remove type="BooleanField">
+                <Default>1</Default>
+                <Required>Y</Required>
+            </logwatch_on_missed_remove>
+
+            <!-- Run scheduled sync and/or clean jobs via cron.
+                 The two sub-options below control what the cron job does.
+                 At least one should be enabled when this is on. -->
             <enable_auto_clean type="BooleanField">
                 <Default>1</Default>
                 <Required>Y</Required>
             </enable_auto_clean>
+
+            <!-- Run a full Kea → Unbound sync (kea-sync.py) on the cron
+                 schedule. Catches drift the live path and logwatcher missed.
+                 Only used when enable_auto_clean is enabled. -->
+            <cron_run_sync type="BooleanField">
+                <Default>0</Default>
+                <Required>Y</Required>
+            </cron_run_sync>
+
+            <!-- Run the stale-record cleaner (local-data-clean.py) on the cron
+                 schedule. Removes Unbound records not backed by any active Kea
+                 lease, reservation, or Unbound Host Override.
+                 Only used when enable_auto_clean is enabled. -->
+            <cron_run_clean type="BooleanField">
+                <Default>1</Default>
+                <Required>Y</Required>
+            </cron_run_clean>
 
             <!-- How often to run the auto-clean job.
                  Only used when enable_auto_clean is enabled.
@@ -126,16 +179,6 @@
                 <MaximumValue>23</MaximumValue>
             </auto_clean_hour>
 
-            <!-- Advanced: maximum number of dirty names held before the next
-                 reconcile is a full sync regardless of the names filter.
-                 Smaller values reduce targeted-drain scope at higher churn. -->
-            <dirty_set_cap type="IntegerField">
-                <Default>100</Default>
-                <Required>N</Required>
-                <MinimumValue>1</MinimumValue>
-                <MaximumValue>10000</MaximumValue>
-            </dirty_set_cap>
-
             <!-- Advanced: how many failed reconcile attempts are allowed before
                  the daemon marks itself degraded (alert state) and stops retrying.
                  0 means retry indefinitely. -->
@@ -155,6 +198,60 @@
                 <MinimumValue>0</MinimumValue>
                 <MaximumValue>1440</MaximumValue>
             </readiness_watchdog_minutes>
+
+            <!-- Enable periodic unbound-control fast-reload to reclaim heap memory
+                 fragmented by repeated local_data add/remove calls. When enabled,
+                 the daemon triggers fast-reload after fast_reload_threshold NCRs.
+                 A weekly safety-net cron job can also be enabled below. -->
+            <enable_fast_reload type="BooleanField">
+                <Default>1</Default>
+                <Required>Y</Required>
+            </enable_fast_reload>
+
+            <!-- Advanced: number of live-path NCRs (DNS UPDATE packets that
+                 returned NOERROR) before the daemon triggers unbound-control
+                 fast-reload. Each NCR typically generates 1-3 unbound-control
+                 calls (A record plus optional PTR). Only active when
+                 enable_fast_reload is enabled. -->
+            <fast_reload_threshold type="IntegerField">
+                <Default>5000</Default>
+                <Required>N</Required>
+                <MinimumValue>100</MinimumValue>
+                <MaximumValue>100000</MaximumValue>
+            </fast_reload_threshold>
+
+            <!-- Enable a scheduled safety-net cron job that calls
+                 unbound-control fast-reload even when the daemon counter has
+                 not been reached. Catches the daemon-restart-without-Unbound-
+                 restart scenario where the counter resets to zero but Unbound
+                 memory continues to accumulate. -->
+            <enable_fast_reload_cron type="BooleanField">
+                <Default>0</Default>
+                <Required>Y</Required>
+            </enable_fast_reload_cron>
+
+            <!-- How often the fast-reload safety-net cron job runs.
+                 Only used when enable_fast_reload_cron is enabled. -->
+            <fast_reload_cron_days type="OptionField">
+                <Required>Y</Required>
+                <Default>d7</Default>
+                <OptionValues>
+                    <d1>Every day</d1>
+                    <d3>Every 3 days</d3>
+                    <d7>Weekly (every 7 days)</d7>
+                    <d14>Every 14 days</d14>
+                    <d30>Monthly (every 30 days)</d30>
+                </OptionValues>
+            </fast_reload_cron_days>
+
+            <!-- Hour of day (0-23) at which the scheduled fast-reload cron job fires.
+                 Only used when enable_fast_reload_cron is enabled. -->
+            <fast_reload_cron_hour type="IntegerField">
+                <Default>3</Default>
+                <Required>N</Required>
+                <MinimumValue>0</MinimumValue>
+                <MaximumValue>23</MaximumValue>
+            </fast_reload_cron_hour>
         </general>
     </items>
 </model>

@@ -94,7 +94,16 @@ def _build_txz(ssh) -> str:
 
 @pytest.fixture(scope="module")
 def txz_path(ssh, deploy):
-    """Build the .txz on the box once per test module (deploy ensures source is current)."""
+    """Build the .txz on the box once per test module (deploy ensures source is current).
+    Skips if the plugin build tree is not accessible (e.g. dev-user path restrictions)."""
+    accessible = ssh(
+        f"test -d {PLUGIN_DIR} && echo yes || echo no", check=False
+    ).strip()
+    if accessible != "yes":
+        pytest.skip(
+            f"Plugin build tree {PLUGIN_DIR} not accessible — "
+            "uninstall functional tests require the build tree"
+        )
     return _build_txz(ssh)
 
 
@@ -132,18 +141,27 @@ class TestUninstallArtifacts:
         test_log("observed", {"has_flag": "--purge-logs" in content})
         assert "--purge-logs" in content, "uninstall.sh missing --purge-logs flag"
 
-    def test_pkg_manifest_has_pre_deinstall(self, ssh, deploy, test_log):
+    def _pkg_raw(self, ssh) -> str:
         raw = ssh(f"pkg info --raw {PACKAGE_NAME} 2>/dev/null", check=False)
+        if not raw.strip():
+            pytest.skip(
+                f"{PACKAGE_NAME} is not installed as a pkg package — "
+                "manifest tests require pkg-based installation (run build_package.sh)"
+            )
+        return raw
+
+    def test_pkg_manifest_has_pre_deinstall(self, ssh, deploy, test_log):
+        raw = self._pkg_raw(ssh)
         test_log("observed", {"has_pre": "pre-deinstall" in raw})
         assert "pre-deinstall" in raw, "pkg manifest missing pre-deinstall script"
 
     def test_pkg_manifest_has_post_deinstall(self, ssh, deploy, test_log):
-        raw = ssh(f"pkg info --raw {PACKAGE_NAME} 2>/dev/null", check=False)
+        raw = self._pkg_raw(ssh)
         test_log("observed", {"has_post": "post-deinstall" in raw})
         assert "post-deinstall" in raw, "pkg manifest missing post-deinstall script"
 
     def test_pre_deinstall_calls_uninstall_sh(self, ssh, deploy, test_log):
-        raw = ssh(f"pkg info --raw {PACKAGE_NAME} 2>/dev/null", check=False)
+        raw = self._pkg_raw(ssh)
         idx = raw.find("pre-deinstall")
         snippet = raw[idx: idx + 300] if idx >= 0 else ""
         test_log("observed", {"pre_deinstall_snippet": snippet})

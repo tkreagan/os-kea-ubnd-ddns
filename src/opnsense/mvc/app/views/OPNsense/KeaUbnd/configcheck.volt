@@ -345,6 +345,7 @@ function bindUnboundButtons() {
 
 function renderKeaConfig(data) {
     window._kuListenerPort = data.our_listener ? data.our_listener.port : 53535;
+    window._kuKcData = data.kea_control || {};
     const v4  = data.ipv4_subnets || [];
     const v6  = data.ipv6_subnets || [];
     const all = v4.concat(v6);
@@ -529,6 +530,8 @@ function openPushSubnetModal($btn) {
         caption = 'Using the subnet\'s existing qualifying suffix — it will not be changed.';
     } else if (source === 'option15') {
         caption = 'Default from DHCP option 15 (domain-name) handed to clients on this subnet.';
+    } else if (source === 'option24') {
+        caption = 'Default from DHCP option 24 (domain-search) handed to clients on this subnet.';
     } else if (source === 'system') {
         caption = 'Default from the OPNsense system domain (subnet has no domain configured).';
     } else {
@@ -795,6 +798,11 @@ function subnetPanel(title, subnets) {
 // Per-subnet "Apply" button. Disabled when the subnet has no matching config.xml
 // node (no UUID) — without it the push has nothing to write to.
 function pushButton(s) {
+    const kc = (window._kuKcData || {})[s.service] || {};
+    if (kc.manual_config) {
+        return '<button class="btn btn-xs btn-default" disabled ' +
+               'title="Kea ' + escapeHtml(s.service === 'dhcp6' ? 'DHCPv6' : 'DHCPv4') + ' is in manual configuration mode — edit the config file directly">Configure for Kea Unbound DDNS</button>';
+    }
     if (!s.opnsense_uuid) {
         return '<button class="btn btn-xs btn-default" disabled ' +
                'title="No matching OPNsense subnet found">Configure for Kea Unbound DDNS</button>';

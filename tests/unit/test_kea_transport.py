@@ -3,28 +3,28 @@
 """
 Unit tests for lib/kea_transport.py.
 
-Covers: _is_service_enabled, _is_manual_config, _parse_conf_socket,
-resolve_kea_connection waterfall, kea_query normalisation.
-All socket and HTTP I/O is mocked.
+Covers: _build_connection (runtime-config path), resolve_kea_connection
+memoisation, kea_query normalisation, transport classes.
+
+_build_connection now reads from keaubnd_runtime rather than config.xml or
+Kea's own conf files (that logic moved to start.py).  Tests mock
+lib.keaubnd_runtime.get_kea_socket to exercise the three code paths:
+unix-socket path, http(s):// URL, and absent/disabled (None).
 """
 
 from __future__ import annotations
 
-import json
 import unittest.mock as mock
 
 import pytest
 
 from lib import kea_transport
 from lib.kea_transport import (
+    HttpTransport,
     KeaServiceUnavailableError,
     KeaUnavailableError,
-    HttpTransport,
     UnixSocketTransport,
     _build_connection,
-    _is_manual_config,
-    _is_service_enabled,
-    _parse_conf_socket,
     kea_query,
     resolve_kea_connection,
 )
@@ -32,170 +32,87 @@ from lib.kea_transport import (
 pytestmark = pytest.mark.unit
 
 
-# ── _is_service_enabled ───────────────────────────────────────────────────────
+# ── _build_connection — runtime-config paths ──────────────────────────────────
 
-def test_service_enabled_explicit_one(fixture_dir, monkeypatch):
-    monkeypatch.setattr(kea_transport, "CONFIG_XML",
-                        str(fixture_dir / "config_full.xml"))
-    assert _is_service_enabled("dhcp4") is True
-
-
-def test_service_disabled_explicit_zero(fixture_dir, monkeypatch):
-    # config_full.xml has dhcp4 enabled=1; use a temp file with 0
-    import pathlib, tempfile
-    xml = """<opnsense><OPNsense><Kea><dhcp4>
-        <general><enabled>0</enabled></general></dhcp4></Kea></OPNsense></opnsense>"""
-    with tempfile.NamedTemporaryFile("w", suffix=".xml", delete=False) as f:
-        f.write(xml)
-        name = f.name
-    monkeypatch.setattr(kea_transport, "CONFIG_XML", name)
-    assert _is_service_enabled("dhcp4") is False
+def test_build_connection_unix_socket(monkeypatch):
+    monkeypatch.setattr(
+        "lib.keaubnd_runtime.get_kea_socket",
+        lambda svc: "/var/run/kea/kea4-ctrl-socket",
+    )
+    t = _build_connection("dhcp4", 5.0)
+    assert isinstance(t, UnixSocketTransport)
+    assert t.path == "/var/run/kea/kea4-ctrl-socket"
 
 
-def test_service_enabled_defaults_true_when_node_absent(fixture_dir, monkeypatch):
-    # config_minimal has no dhcp6 section
-    monkeypatch.setattr(kea_transport, "CONFIG_XML",
-                        str(fixture_dir / "config_minimal.xml"))
-    assert _is_service_enabled("dhcp6") is True
+def test_build_connection_http_url(monkeypatch):
+    monkeypatch.setattr(
+        "lib.keaubnd_runtime.get_kea_socket",
+        lambda svc: "http://127.0.0.1:8080",
+    )
+    t = _build_connection("dhcp4", 5.0)
+    assert isinstance(t, HttpTransport)
+    assert t.tls is False
+    assert t.host == "127.0.0.1"
+    assert t.port == 8080
 
 
-def test_service_enabled_d2_always_true(fixture_dir, monkeypatch):
-    monkeypatch.setattr(kea_transport, "CONFIG_XML",
-                        str(fixture_dir / "config_full.xml"))
-    assert _is_service_enabled("d2") is True
+def test_build_connection_https_url(monkeypatch):
+    monkeypatch.setattr(
+        "lib.keaubnd_runtime.get_kea_socket",
+        lambda svc: "https://127.0.0.1:8443",
+    )
+    t = _build_connection("dhcp4", 5.0)
+    assert isinstance(t, HttpTransport)
+    assert t.tls is True
+    assert t.port == 8443
 
 
-# ── _is_manual_config ─────────────────────────────────────────────────────────
-
-def test_manual_config_false_when_not_set(fixture_dir, monkeypatch):
-    monkeypatch.setattr(kea_transport, "CONFIG_XML",
-                        str(fixture_dir / "config_full.xml"))
-    assert _is_manual_config("dhcp4") is False
-
-
-def test_manual_config_true(tmp_path, monkeypatch):
-    xml = """<opnsense><OPNsense><Kea><dhcp4>
-        <general><manual_config>1</manual_config></general>
-        </dhcp4></Kea></OPNsense></opnsense>"""
-    cfg = tmp_path / "config.xml"
-    cfg.write_text(xml)
-    monkeypatch.setattr(kea_transport, "CONFIG_XML", str(cfg))
-    assert _is_manual_config("dhcp4") is True
-
-
-# ── _parse_conf_socket ────────────────────────────────────────────────────────
-
-def test_parse_conf_socket_unix(fixture_dir, monkeypatch):
-    monkeypatch.setitem(kea_transport._CONF_FILES, "dhcp4",
-                        str(fixture_dir / "kea_dhcp4.conf"))
-    desc = _parse_conf_socket("dhcp4")
-    assert desc is not None
-    assert desc["type"] == "unix"
-    assert "kea4-ctrl-socket" in desc["path"]
-
-
-def test_parse_conf_socket_http(tmp_path, monkeypatch):
-    conf = {
-        "Dhcp4": {
-            "control-socket": {
-                "socket-type": "http",
-                "socket-address": "127.0.0.1",
-                "socket-port": 8080,
-            }
-        }
-    }
-    cfg = tmp_path / "kea-dhcp4.conf"
-    cfg.write_text(json.dumps(conf))
-    monkeypatch.setitem(kea_transport._CONF_FILES, "dhcp4", str(cfg))
-    desc = _parse_conf_socket("dhcp4")
-    assert desc is not None
-    assert desc["type"] == "http"
-    assert desc["port"] == 8080
-
-
-def test_parse_conf_socket_prefers_http_over_unix(tmp_path, monkeypatch):
-    conf = {
-        "Dhcp4": {
-            "control-sockets": [
-                {"socket-type": "unix", "socket-name": "/var/run/kea.sock"},
-                {"socket-type": "http", "socket-address": "127.0.0.1", "socket-port": 8080},
-            ]
-        }
-    }
-    cfg = tmp_path / "kea-dhcp4.conf"
-    cfg.write_text(json.dumps(conf))
-    monkeypatch.setitem(kea_transport._CONF_FILES, "dhcp4", str(cfg))
-    desc = _parse_conf_socket("dhcp4")
-    assert desc["type"] == "http"
-
-
-def test_parse_conf_socket_missing_file(monkeypatch):
-    monkeypatch.setitem(kea_transport._CONF_FILES, "dhcp4", "/nonexistent.conf")
-    assert _parse_conf_socket("dhcp4") is None
-
-
-def test_parse_conf_socket_no_socket_stanza(tmp_path, monkeypatch):
-    conf = {"Dhcp4": {"subnet4": []}}
-    cfg = tmp_path / "kea.conf"
-    cfg.write_text(json.dumps(conf))
-    monkeypatch.setitem(kea_transport._CONF_FILES, "dhcp4", str(cfg))
-    assert _parse_conf_socket("dhcp4") is None
-
-
-# ── resolve_kea_connection waterfall ─────────────────────────────────────────
-
-def test_resolve_skips_disabled_service(tmp_path, monkeypatch):
-    xml = """<opnsense><OPNsense><Kea><dhcp4>
-        <general><enabled>0</enabled></general></dhcp4></Kea></OPNsense></opnsense>"""
-    cfg = tmp_path / "config.xml"
-    cfg.write_text(xml)
-    monkeypatch.setattr(kea_transport, "CONFIG_XML", str(cfg))
-    with pytest.raises(KeaServiceUnavailableError, match="not enabled"):
+def test_build_connection_none_raises_service_unavailable(monkeypatch):
+    """socket=None means the service is disabled — KeaServiceUnavailableError."""
+    monkeypatch.setattr(
+        "lib.keaubnd_runtime.get_kea_socket",
+        lambda svc: None,
+    )
+    with pytest.raises(KeaServiceUnavailableError):
         _build_connection("dhcp4", 5.0)
 
 
-def test_resolve_uses_conf_file_socket(fixture_dir, monkeypatch):
-    monkeypatch.setattr(kea_transport, "CONFIG_XML",
-                        str(fixture_dir / "config_full.xml"))
-    monkeypatch.setitem(kea_transport._CONF_FILES, "dhcp4",
-                        str(fixture_dir / "kea_dhcp4.conf"))
-    transport = _build_connection("dhcp4", 5.0)
-    assert isinstance(transport, UnixSocketTransport)
-
-
-def test_resolve_falls_back_to_default_socket(tmp_path, monkeypatch):
-    xml = """<opnsense><OPNsense><Kea><dhcp4>
-        <general><enabled>1</enabled></general></dhcp4></Kea></OPNsense></opnsense>"""
-    cfg = tmp_path / "config.xml"
-    cfg.write_text(xml)
-    monkeypatch.setattr(kea_transport, "CONFIG_XML", str(cfg))
-    # No conf file → falls back to default
-    monkeypatch.setitem(kea_transport._CONF_FILES, "dhcp4", "/nonexistent.conf")
-    transport = _build_connection("dhcp4", 5.0)
-    assert isinstance(transport, UnixSocketTransport)
-    assert "kea4-ctrl-socket" in transport.path
-
-
-def test_resolve_manual_config_no_socket_raises(tmp_path, monkeypatch):
-    xml = """<opnsense><OPNsense><Kea><dhcp4>
-        <general><enabled>1</enabled><manual_config>1</manual_config></general>
-        </dhcp4></Kea></OPNsense></opnsense>"""
-    cfg = tmp_path / "config.xml"
-    cfg.write_text(xml)
-    monkeypatch.setattr(kea_transport, "CONFIG_XML", str(cfg))
-    monkeypatch.setitem(kea_transport._CONF_FILES, "dhcp4", "/nonexistent.conf")
-    with pytest.raises(KeaUnavailableError, match="manual configuration"):
+def test_build_connection_runtime_error_propagates(monkeypatch):
+    """RuntimeError from keaubnd_runtime (no keaubnd.json) propagates up."""
+    def _raise(svc):
+        raise RuntimeError("keaubnd.json not found")
+    monkeypatch.setattr("lib.keaubnd_runtime.get_kea_socket", _raise)
+    with pytest.raises(RuntimeError, match="keaubnd.json"):
         _build_connection("dhcp4", 5.0)
 
 
-def test_resolve_memoized(fixture_dir, monkeypatch):
-    monkeypatch.setattr(kea_transport, "CONFIG_XML",
-                        str(fixture_dir / "config_full.xml"))
-    monkeypatch.setitem(kea_transport._CONF_FILES, "dhcp4",
-                        str(fixture_dir / "kea_dhcp4.conf"))
+def test_build_connection_dhcp6_independent(monkeypatch):
+    """dhcp6 and dhcp4 resolve independently."""
+    def _sock(svc):
+        return {
+            "dhcp4": "/run/kea/kea4-ctrl-socket",
+            "dhcp6": "/run/kea/kea6-ctrl-socket",
+        }.get(svc)
+    monkeypatch.setattr("lib.keaubnd_runtime.get_kea_socket", _sock)
+    t4 = _build_connection("dhcp4", 5.0)
+    t6 = _build_connection("dhcp6", 5.0)
+    assert isinstance(t4, UnixSocketTransport)
+    assert isinstance(t6, UnixSocketTransport)
+    assert t4.path != t6.path
+
+
+# ── resolve_kea_connection — memoisation ─────────────────────────────────────
+
+def test_resolve_memoized(monkeypatch):
+    calls = []
+    def _sock(svc):
+        calls.append(svc)
+        return "/var/run/kea/kea4-ctrl-socket"
+    monkeypatch.setattr("lib.keaubnd_runtime.get_kea_socket", _sock)
     t1 = resolve_kea_connection("dhcp4")
     t2 = resolve_kea_connection("dhcp4")
     assert t1 is t2
+    assert calls.count("dhcp4") == 1  # resolved once, then memoized
 
 
 # ── kea_query normalisation ───────────────────────────────────────────────────
@@ -230,13 +147,31 @@ def test_kea_query_empty_http_raises():
             kea_query("config-get", service="dhcp4")
 
 
-def test_kea_query_rc1_raises_service_error():
+def test_kea_query_rc1_raises_unavailable_error():
+    """rc=1 (command error from a reachable daemon) must raise the base
+    KeaUnavailableError — NOT the subclass KeaServiceUnavailableError.
+    Callers that catch KeaServiceUnavailableError to silently skip a disabled
+    service must NOT swallow a hard error from a reachable daemon."""
     transport = mock.MagicMock()
     transport.query.return_value = {"result": 1, "text": "some error"}
     with mock.patch.object(kea_transport, "resolve_kea_connection",
                            return_value=transport):
-        with pytest.raises(KeaServiceUnavailableError, match="some error"):
+        with pytest.raises(KeaUnavailableError, match="some error") as exc_info:
             kea_query("bad-command", service="dhcp4")
+    assert type(exc_info.value) is KeaUnavailableError, \
+        "rc=1 must raise KeaUnavailableError, not the KeaServiceUnavailableError subclass"
+
+
+def test_kea_query_rc2_raises_service_unavailable():
+    """rc=2 (command unsupported — e.g. lease_cmds hook not loaded) raises
+    KeaServiceUnavailableError so per-service skip logic treats it like a
+    disabled service rather than a hard failure."""
+    transport = mock.MagicMock()
+    transport.query.return_value = {"result": 2, "text": "unsupported command"}
+    with mock.patch.object(kea_transport, "resolve_kea_connection",
+                           return_value=transport):
+        with pytest.raises(KeaServiceUnavailableError, match="unsupported"):
+            kea_query("lease4-get-all", service="dhcp4")
 
 
 def test_kea_query_rc3_empty_treated_as_success():

@@ -13,7 +13,7 @@
         <tsig_key_name></tsig_key_name>
         <tsig_key_secret></tsig_key_secret>
         <tsig_algorithm>HMAC-SHA256</tsig_algorithm>
-        <aggressive_cleanup>0</aggressive_cleanup>
+        <clean_stale_records>1</clean_stale_records>
         <sync_static_reservations>1</sync_static_reservations>
         <sync_dynamic_leases>1</sync_dynamic_leases>
         <enable_auto_clean>1</enable_auto_clean>

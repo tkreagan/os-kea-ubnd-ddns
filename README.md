@@ -6,41 +6,75 @@ moment a lease is issued — with minimal drift between your DHCP and DNS tables
 
 ## How it works
 
-Two synchronization paths run in parallel:
+Four layers work together to keep Kea and Unbound in sync:
 
 ```
-┌──────────────────────────────────────────────────────────────────────────────┐
-│  OPNsense                                                                    │
-│                                                                              │
-│  kea-dhcp4/6 ─────────────────────────────────────── kea-dhcp-ddns           │
-│       │                                                     │                │
-│       │  [Static Path]                     [Dynamic Path]   │                │
-│       │                                                     │                │
-│  Kea reservations                                     RFC 2136 UPDATE        │
-│  Kea active leases                                          │                │
-│       │                                                     │                │
-│       └────────────────────► kea-ubnd-ddns ◄─────────────┘                │
-│                              (127.0.0.1:53535)                               │
-│                                     │                                        │
-│                               unbound-control                                │
-│                                     │                                        │
-│                            Unbound local_data                                │
-└──────────────────────────────────────────────────────────────────────────────┘
+┌────────────────────────────────────────────────────────────┐
+│  OPNsense                                                  │
+│                                                            │
+│  kea-dhcp4/6 ───────────────────── kea-dhcp-ddns           │
+│       │                                     │              │
+│       │ [Reconcile / on demand]             │ [Live DDNS]  │
+│       │                                     │              │
+│  Kea reservations                   RFC 2136 UPDATE        │
+│  Kea active leases                          │              │
+│       │                                     │              │
+│       └────────► kea-ubnd-ddns ◄────────────┘              │
+│                  (127.0.0.1:53535)                         │
+│                         │                                  │
+│                   unbound-control                          │
+│                         │                                  │
+│                Unbound local_data                          │
+└────────────────────────────────────────────────────────────┘
 ```
 
-**Dynamic path (real-time):** `kea-dhcp-ddns` sends RFC 2136 DNS UPDATE packets to
-the plugin's stub listener. Each packet is immediately translated into an
+**Layer 0 — Restart reconcile (always on):** The resident daemon watches the Kea
+and Unbound service pidfiles. Whenever either service restarts — flushing Unbound's
+runtime records or invalidating Kea's lease state — the daemon automatically runs a
+full reconcile from Kea, repopulating Unbound without any manual intervention.
+
+**Layer 1 — Live DDNS path (always on when kea-dhcp-ddns is running):**
+`kea-dhcp-ddns` sends RFC 2136 DNS UPDATE packets to the plugin's stub listener the
+moment a lease is issued or released. Each packet is immediately translated into an
 `unbound-control local_data` or `local_data_remove` call — A, AAAA, and PTR records
 are handled automatically.
 
-**Static path (reconcile / on demand):** The resident daemon watches the Kea and
-Unbound service pidfiles. Whenever either service restarts — flushing Unbound's
-runtime records — the daemon automatically runs a full reconcile from Kea,
-repopulating Unbound without any manual intervention. The Lease Audit tab also
-provides manual Sync and Clean buttons.
+**Layer 2 — Scheduled sync / clean (on by default):** A cron job runs a full
+Kea → Unbound reconcile on a schedule (default every 6 hours). An optional stale-
+record sweep can also run on the same schedule, removing Unbound entries no longer
+backed by any Kea lease, reservation, or Host Override.
+
+**Layer 3 — Log watcher (off by default):** A secondary daemon tails the Kea DHCP
+log and the listener log. It reacts to three types of event: lease releases
+(immediately purges the DNS records for that IP), listener SERVFAILs (triggers a
+targeted resync for the affected names), and DNS removes without a follow-up add
+(closes the LEASE_REUSE gap — see [Advanced Topics](ADVANCED-TOPICS.md)).
 
 OPNsense Unbound Host Overrides and "Register DHCP Static Mappings" entries are
-never touched by either path.
+never touched by any of these paths.
+
+### Default settings and how to tune them
+
+Out of the box the plugin runs layer 1 automatically and layer 2 (scheduled
+sync only, no clean) every 6 hours. This is a **conservative** default: Kea and
+Unbound stay broadly in sync, but stale records from expired leases may accumulate until
+you the next scheduled clean, and any drift since the last cron run persists until
+the next one.
+
+To tighten the coupling progressively:
+
+| Goal | What to enable |
+|---|---|
+| Clean up missing leases  automatically | Enable **Full sync** in DNS Record Cleaning / Enable scheduled sync / clean (same cron interval as sync) |
+| Attempt to clean up immediately when a lease is released | Enable **Log Watcher** → **Purge IP on lease release** |
+| Recover immediately after a transient SERVFAIL | Enable **Log Watcher** → **Re-sync names after listener SERVFAIL** |
+| Close the LEASE_REUSE gap within seconds | Enable **Log Watcher** → **Re-sync on missed DNS removes** |
+
+The trade-off of aggressive coupling: with the log watcher's release purge enabled,
+a DNS record for a released IP disappears almost immediately — which is correct
+behaviour on a well-managed network but may briefly break anything still using that
+address during the grace window. Review [Advanced Topics](ADVANCED-TOPICS.md) for a
+full discussion of what each layer covers, what drifts without it, and known gaps.
 
 ## Requirements
 
@@ -69,7 +103,7 @@ directory where you saved it:
 
 ```sh
 # On OPNsense, in the directory where you copied the file (as root or via sudo):
-pkg install ./os-kea-ubnd-ddns-0.96.pkg
+pkg install ./os-kea-ubnd-ddns-0.98.pkg
 ```
 
 No package repository is required — OPNsense's `pkg` accepts a local `.pkg` file
@@ -93,10 +127,10 @@ git clone https://github.com/tkreagan/os-kea-ubnd-ddns /usr/plugins/net/kea-ubnd
 # 3. Build the package
 cd /usr/plugins/net/kea-ubnd-ddns
 make package
-# → work/pkg/os-kea-ubnd-ddns-0.96.pkg
+# → work/pkg/os-kea-ubnd-ddns-0.98.pkg
 
 # 4. Install
-pkg add work/pkg/os-kea-ubnd-ddns-0.96.pkg
+pkg add work/pkg/os-kea-ubnd-ddns-0.98.pkg
 ```
 
 > **macOS / Linux cross-build note:** The `make package` target must run on a
@@ -162,7 +196,7 @@ Save and apply after editing each subnet.
 > silently drops every DNS UPDATE and nothing is registered. This is the most
 > common configuration mistake.
 
-> **Recommended DDNS settings:** For this plugin's
+> **Recommended DDNS settings:** For this plugin's target
 > architecture — Unbound is updated via the bridge and there is no external DDNS
 > server — enable **all three** override options together:
 >
@@ -181,7 +215,7 @@ Save and apply after editing each subnet.
 >   renewal at half the lease lifetime is outside the window and works.
 >
 > **Known gap:** these options only act when the client sends a name. Clients that
-> send no hostname/FQDN at all (e.g. MAC-randomizing phones) get no record; closing
+> send no hostname/FQDN at all get no record; closing
 > that would require `ddns-generated-prefix` + `ddns-replace-client-name`.
 
 #### Enable kea-dhcp-ddns
@@ -235,7 +269,7 @@ jobs — write to the same log facility.
 | Symptom | Likely cause | Where to check |
 |---|---|---|
 | No records appear after a new lease | kea-dhcp-ddns not running, or forward zone missing trailing dot | **Config Check** tab — look for errors |
-| Daemon shows stopped / not running | Startup preconditions not met (no DDNS-enabled subnet found, or Unbound not reachable) | **Log File** tab for the specific precondition failure |
+| Daemon shows stopped / not running | Startup preconditions not met (e.g., no DDNS-enabled subnet found, or Unbound not reachable) | **Log File** tab for the specific precondition failure |
 | PTR records missing | Reverse zone not set on the subnet, or **Synthesize PTR records** disabled | Subnet DDNS settings → DNS reverse zone; **Settings** tab |
 | Records disappear after Unbound restart | Expected — Unbound flushes runtime `local_data` on restart; the daemon detects the restart and reconciles within seconds | **Lease Audit** tab should repopulate automatically |
 | Leases visible but not registering via DDNS | `update-on-renew` not set and lease has not renewed since enabling the plugin | Wait for a lease renewal, or use the **Sync** button on the Lease Audit tab to force a static reconcile |
@@ -245,27 +279,40 @@ jobs — write to the same log facility.
 | Setting | Default | Notes |
 |---|---|---|
 | Enabled | **off** | Master switch for the daemon and all sync jobs |
-| Sync Kea static reservations | **on** | Registers reservations in Unbound during each reconcile and on demand |
-| Sync Kea active leases | **on** | Registers active leases; TTL = remaining lease time |
 | Synthesize PTR records | **on** | Automatically create the `in-addr.arpa`/`ip6.arpa` PTR for every A/AAAA update. Works without a reverse zone in kea-dhcp-ddns. Disable only if you manage reverse DNS separately — explicit PTR updates from kea-dhcp-ddns are always applied regardless |
 | Hostname collision policy | **Last wins** | Action when a hostname is already registered to a different IP — see [Hostname collision policy](#hostname-collision-policy) below |
-| Automatically clean stale DNS records | **on** | Scheduled bulk removal of entries not backed by Kea — see warning below |
-| Auto-clean frequency | **6 hours** | How often the scheduled bulk cleanup runs. Options: every 1/3/6/12 hours or daily at a specific hour |
+| **Magic hostnames** | **off** | Create parallel per-MAC FQDNs for all hosts in a collision group — see [Magic hostnames](#magic-hostnames) below |
+| → LAA tag in magic suffix | off | Insert `-laa-` into the magic hostname when the MAC has the locally-administered bit set (iOS/Android random MACs), signalling the suffix may not be stable |
+| → PTRs point to magic FQDN | off | On collision: write PTR records pointing to the magic FQDN rather than the bare hostname. No effect unless both Magic hostnames and Synthesize PTR records are enabled |
+| **Log Watcher** | **off** | Secondary daemon that tails Kea and listener logs for missed events. Enable sub-options to choose which events trigger action — see [Log watcher](#log-watcher) below |
+| → Purge IP on lease release | on | On DHCP4/6_RELEASE: immediately purge all DNS records for that IP |
+| → Re-sync names after SERVFAIL | on | On listener SERVFAIL: trigger targeted kea-sync for the affected names |
+| → Re-sync on missed DNS removes | on | On Remove-without-Add: trigger targeted kea-sync for that hostname (LEASE_REUSE gap) |
+| **Scheduled sync / clean** | **on** | Run sync and/or clean on a cron schedule |
+| → Full sync | **off** | Reconcile all Kea leases and reservations into Unbound at each interval |
+| → Clean stale records | on | Remove Unbound records not backed by Kea — review Lease Audit before enabling |
+| Schedule frequency | **6 hours** | How often the scheduled jobs run. Options: every 1/3/6/12 hours or daily at a specific hour |
+| **Fast reload** | **on** | Periodically run `unbound-control reload` under the mutation lock to reclaim Unbound heap memory fragmented by repeated `local_data` add/remove calls |
+| → Reload threshold *(advanced)* | `5000` NCRs | Number of successfully processed DNS UPDATE packets before the daemon triggers a reload. Each NCR typically generates 1–3 `unbound-control` calls |
+| → Safety-net cron | **off** | Scheduled reload that fires even when the daemon counter has not been reached — catches daemon restarts that reset the counter while Unbound heap continues to accumulate |
+| → Cron schedule *(advanced)* | Weekly | How often the safety-net cron fires. Options: daily / every 3 days / weekly / every 14 days / monthly |
+| → Cron hour *(advanced)* | `3` (03:00) | Hour of day the safety-net cron fires |
 | Port *(advanced)* | `53535` | UDP port for DNS UPDATE packets from kea-dhcp-ddns |
-| Dirty-set cap *(advanced)* | `100` | Max deferred hostnames before the next reconcile becomes a full sync |
+| Dirty-set cap *(advanced)* | `50` | Max deferred hostnames before the next reconcile becomes a full sync |
 | Max reconcile attempts *(advanced)* | `5` | Failed reconciles before the daemon marks itself degraded |
 | Readiness watchdog *(advanced)* | `10 min` | Time to wait for Kea/Unbound before the watchdog restarts the daemon. 0 = wait forever |
 
 ### Hostname collision policy
 
 When a DHCP client registers a hostname that is already in Unbound for a
-different IP address, the plugin applies one of three policies:
+different IP address, the plugin applies one of four policies:
 
 | Policy | Behaviour | Use when |
 |---|---|---|
 | **Last wins** *(default)* | The existing A/AAAA and its synthesized PTR are removed; the new IP is registered | Normal roaming network — a device that moves or gets a new lease should resolve to its current address |
 | **Allow** | Both records coexist — Unbound round-robins between them | Dual-stack hosts with separate DHCPv4 + DHCPv6 leases; or you intentionally want multiple A records per name |
 | **First wins** | Existing record is kept; the new registrant is rejected | You want static reservations to be immutable — reservations are always synced before dynamic leases, so they win naturally |
+| **None** | All dynamic records for the conflicting hostname are evicted from Unbound — the name resolves to nothing until the next kea-sync resolves who actually holds the address | You want to guarantee no stale address is ever served, even briefly — prefer a gap in resolution over a wrong answer |
 
 **Why no DHCID?** Kea sends DHCID records in RFC 2136 UPDATE packets when
 configured with a `check-with-dhcid` or `check-exists-with-dhcid`
@@ -281,6 +328,77 @@ reconcile run (reservations beat leases) but not guaranteed across restarts.
 On networks where clients randomize their MAC address, First wins can permanently
 block a hostname from updating if the original registrant's lease expired without
 sending a DELETE.
+
+**None caveats:** The live path evicts all records on conflict and marks the
+hostname dirty, but does not immediately re-register the winner. Re-registration
+happens during the next dirty-drain (`kea-sync --names=...`), which runs after
+the mutation lock is released. The name will be absent from DNS during that
+window. `kea-dhcp-ddns` does not retry SERVFAIL, so the dirty-drain is the sole
+recovery path for the evicted name.
+
+### Magic hostnames
+
+Magic hostnames are optional parallel FQDNs that exist alongside (and
+independently of) whatever the collision policy does to the bare hostname. When
+enabled, every host involved in a collision — winner and loser alike — gets a
+stable, per-identifier FQDN of the form:
+
+```
+<hostname>-m<AABBCC>.<domain>   # MAC-identified host, last 6 hex chars
+<hostname>-d<XXXXXX>.<domain>   # DUID-identified host, last 6 hex chars
+```
+
+For example, if two devices both claim the name `laptop.home.lan`:
+
+```
+laptop.home.lan       → 192.168.1.42    (last_wins: the most recent registrant)
+laptop-mAABBCC.home.lan → 192.168.1.42
+laptop-mDDEEFF.home.lan → 192.168.1.75  (the displaced device still has a name)
+```
+
+Magic FQDNs are written regardless of which collision policy is active and are
+never displaced by a subsequent collision. They give administrators a stable name
+to reach any device in a collision group, even when the bare hostname flaps.
+
+**LAA tag:** When the **LAA tag** sub-option is enabled, devices whose MAC has
+the locally-administered bit set (common with iOS, Android, and Windows MAC
+randomization) get `-laa-` inserted into their magic suffix:
+`laptop-laa-mAABBCC.home.lan`. This signals that the suffix encodes a randomized
+MAC and may change when the device rotates it.
+
+**PTRs to magic FQDNs:** When **PTRs point to magic FQDN** is enabled (requires
+both Magic hostnames and Synthesize PTR records to also be on), PTR records for
+IPs in a collision group point to the magic FQDN rather than the bare hostname.
+IPs that are not in a collision group are unaffected.
+
+**Interaction with collision policies:** For `none` and `first_wins`, magic FQDN
+computation is deferred to the dirty-drain rather than computed inline on the
+live path.
+
+### Log watcher
+
+The log watcher is an optional secondary daemon (`kea-ubnd-logwatch`) that tails
+the Kea DHCP log and the listener log. It provides three fast-path triggers that
+do not require waiting for the next cron run:
+
+| Trigger | Event watched | Action |
+|---|---|---|
+| **Purge IP on release** | `DHCP4_RELEASE` / `DHCP6_RELEASE_NA` in the Kea log | Immediately purge all Unbound records for that IP via `local-data-clean.py --purge-ip` |
+| **Re-sync after SERVFAIL** | Listener SERVFAIL logged by the daemon | Trigger `kea-sync --names=<name>` for the affected hostname as a recovery path alongside the daemon's built-in dirty-drain |
+| **Re-sync on missed removes** | A DNS Remove with no follow-up Add within a short grace window | Trigger `kea-sync --names=<name>` to catch the LEASE_REUSE gap where `kea-dhcp-ddns` sends a Remove for an IP that is immediately re-leased to the same client but skips the Add |
+
+> **IPv4 release log level caveat:** `DHCP4_RELEASE` (a normal successful DHCPv4
+> release) is logged by Kea at **DEBUG level 50**, not INFO. In a default
+> OPNsense Kea deployment (INFO-only logging), a healthy v4 release produces
+> **no log line the watcher can see**, so the release-purge trigger is silently
+> ineffective. Cleanup for released IPv4 addresses falls back to the next
+> scheduled cron run. To get fast purge on every v4 release, either:
+> - Set Kea DHCP4 logging to DEBUG level 50, or
+> - Set `"delete-lease-on-quit": true` in `kea-dhcp4.conf` — this causes Kea to
+>   emit `DHCP4_RELEASE_DELETED` (INFO) instead of `DHCP4_RELEASE` (DEBUG).
+>
+> DHCPv6 (`DHCP6_RELEASE_NA`) is always logged at INFO and is unaffected by
+> this limitation.
 
 ### Warning: settings that can remove DNS entries from other sources
 
@@ -335,34 +453,29 @@ Tested on OPNsense 26.1 with Kea DHCP4 and DHCP6:
 - RFC 2136 stub listener with A, AAAA, and PTR record handling
 - Static reservation sync (IPv4 and IPv6)
 - Active lease sync with TTL matching remaining lease lifetime
-- Lease Audit tab with per-record PTR state tracking
+- Lease Audit tab with per-record PTR state, collision state, and magic FQDN annotations
 - Config Check tab (forward zones, TSIG key detection, trailing-dot validation)
 - Scheduled stale-record cleanup
 - OPNsense Host Override guard (never removes managed entries)
 - Resident daemon with self-healing: detects Kea/Unbound restarts and automatically reconciles DNS records
+- Four hostname collision policies: last wins (default), allow, first wins, none
+- Magic hostname disambiguation: stable per-MAC FQDNs for all hosts in a collision group
+- Log watcher with configurable triggers: release purge, SERVFAIL recovery, missed-remove detection
+- Periodic Unbound heap reclaim via `unbound-control reload` (threshold-triggered + safety-net cron)
 
 ## Known issues and roadmap
 
-- **TSIG authentication** — partially implemented in the listener and startup code; not tested end-to-end, not configurable via Settings UI. Deferred indefinitely — the listener only accepts connections from `127.0.0.1`, so unsigned updates are safe for all standard single-host deployments.
-- **Reverse zones verified** — the DNS reverse zone field is tested and working;
-  PTR records register correctly when it is set (with a trailing dot).
-- **Override options verified** — `override-no-update`, `override-client-update`,
-  and `update-on-renew` were validated end-to-end and behave per the
-  recommended-settings note above.
-- **All four conflict-resolution modes tested** — the plugin silently ignores DHCID
-  records and RFC 2136 prerequisites in all modes; all four produce identical A + PTR
-  registration. The plugin's own **Hostname collision policy** setting is the correct
-  way to control same-name conflict handling. Recommended mode: `no-check-without-dhcid`.
-- **DHCID records not stored** — the plugin accepts and silently skips DHCID records
-  in RFC 2136 UPDATE packets; hostname ownership is tracked via the plugin's collision
-  policy, not via DHCID. This is an intentional design decision for Unbound-only
-  deployments where the plugin is the sole DNS writer.
-- **`ncr-protocol: TCP` hard-fails D2** — setting `ncr-protocol: TCP` in
-  `kea-dhcp-ddns.conf` causes D2 to refuse to start entirely (`TCP is not yet
-  supported`). UDP is the only supported protocol. kea-dhcp4 continues to serve leases
-  with no log warning when D2 is down; monitor D2 separately.
-- **Kea connection auto-discovery** — the plugin reads each Kea daemon's active config file to find its control socket (unix or HTTP) and falls back to the standard OPNsense socket paths. Manual connection override is not exposed in the UI and is deferred; it may not be necessary given reliable auto-discovery. HTTP socket support is deferred until OPNsense enables HTTP control sockets or deprecates unix sockets.
-- **kea-dhcp-ddns connection** — the Config Check tab reads `kea-dhcp-ddns.conf` directly rather than querying a control socket, because OPNsense does not provision a control socket or HTTP listener for `kea-dhcp-ddns` (it is not exposed in the web GUI and requires a manual config edit to enable).
+- **`unbound-control fast-reload` memory leak** — Unbound's `fast-reload` subcommand
+  (available since Unbound 1.22) has a confirmed upstream memory leak. As a workaround,
+  the periodic heap-reclaim feature currently uses `unbound-control reload` instead of
+  `fast-reload`, which is safe but causes a brief resolution gap during the reload window.
+  Re-enabling `fast-reload` requires a one-line change in `start.py` once the upstream
+  fix lands.
+- **DHCPv4 release purge requires DEBUG logging or `delete-lease-on-quit`** — the log
+  watcher's "purge IP on release" trigger for IPv4 depends on the `DHCP4_RELEASE` log
+  message, which Kea emits at DEBUG level 50. Default OPNsense Kea logging is INFO-only,
+  so a normal v4 release is invisible to the watcher and cleanup falls back to the next
+  cron run. See [Log watcher](#log-watcher) for workarounds. DHCPv6 is unaffected.
 - **Global reservations not tested** — ISC recommends against assigning IP addresses in Kea's
   global reservation scope (`Dhcp4.reservations`); that scope is designed for options and
   hostname assignment only, not IP binding. The plugin's static sync reads `ip-address` from

@@ -5,7 +5,7 @@
 # Uses pkg(8) directly with a generated +MANIFEST.
 #
 # Usage (run from repo root on macOS — SSHes to the OPNsense box):
-#   ./build_package.sh
+#   ./build_package.sh [--env-file PATH]
 #
 # Usage (run directly on the OPNsense box as root/sudo):
 #   sh build_package.sh
@@ -13,12 +13,38 @@
 # Output: ./os-kea-ubnd-ddns-VERSION.pkg  (on macOS, downloaded from the box)
 #         /tmp/os-kea-ubnd-ddns-VERSION.pkg  (on the OPNsense box itself)
 #
-# Environment (read from tools/.env on macOS; not needed on FreeBSD):
-#   OPNSENSE_HOST      defaults to DEV_OPNSENSE_HOST or dev-opnsense.plhm.rgn.cm
-#   OPNSENSE_SSH_USER  defaults to DEV_OPNSENSE_SSH_USER or del
-#   OPNSENSE_SSH_KEY   defaults to DEV_OPNSENSE_SSH_KEY or ~/.ssh/del_rgn.cm.private
+# Environment (macOS only; not needed on FreeBSD):
+#   OPNSENSE_HOST      OPNsense hostname or IP  (default: your-opnsense-box.example.com)
+#   OPNSENSE_SSH_USER  SSH user on that box     (default: root)
+#   OPNSENSE_SSH_KEY   Path to SSH private key  (default: ~/.ssh/id_ed25519)
+#
+# These can be set in the environment directly, or in a .env file.
+# Default .env path: tools/.env  (copy tools/.env.example to get started).
+# Override with --env-file PATH or KEAUBND_ENV_FILE=/path/to/file.
 
 set -e
+
+# ── Argument parsing ──────────────────────────────────────────────────────────
+_ARG_ENV_FILE=""
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --env-file)
+            shift
+            [ $# -gt 0 ] || { echo "ERROR: --env-file requires a PATH argument" >&2; exit 1; }
+            _ARG_ENV_FILE="$1"
+            shift
+            ;;
+        --env-file=*)
+            _ARG_ENV_FILE="${1#--env-file=}"
+            shift
+            ;;
+        *)
+            echo "ERROR: Unknown argument: $1" >&2
+            echo "Usage: $0 [--env-file PATH]" >&2
+            exit 1
+            ;;
+    esac
+done
 
 REPO="$(cd "$(dirname "$0")" && pwd)"
 
@@ -47,14 +73,15 @@ _build_on_box() {
     install -m 755 src/sbin/kea-ubnd-logwatch.py \
         "$STAGE/usr/local/sbin/kea-ubnd-logwatch.py"
 
-    for f in start.py stop.py kea-sync.py local-data-audit.py local-data-clean.py; do
+    for f in start.py stop.py kea-sync.py local-data-audit.py local-data-clean.py \
+              fast-reload.py run-sync.py run-clean.py; do
         install -m 755 "src/opnsense/scripts/keaubnd/$f" \
             "$STAGE/usr/local/opnsense/scripts/keaubnd/$f"
     done
     install -m 755 src/opnsense/scripts/keaubnd/uninstall.sh \
         "$STAGE/usr/local/opnsense/scripts/keaubnd/uninstall.sh"
 
-    for f in __init__.py keaubnd_sync.py kea_transport.py \
+    for f in __init__.py keaubnd_runtime.py keaubnd_sync.py kea_transport.py \
               consistency_sm.py pid_watch.py preconditions.py logwatch.py; do
         install -m 644 "src/opnsense/scripts/keaubnd/lib/$f" \
             "$STAGE/usr/local/opnsense/scripts/keaubnd/lib/$f"
@@ -69,7 +96,7 @@ _build_on_box() {
         src/opnsense/service/templates/OPNsense/Syslog/local/keaubnd.conf \
         "$STAGE/usr/local/opnsense/service/templates/OPNsense/Syslog/local/keaubnd.conf"
 
-    # MVC: controllers, models, views, forms
+    # MVC: controllers, models (including Migrations/), views, forms
     find src/opnsense/mvc -name "*.php" -o -name "*.volt" -o -name "*.xml" | \
     while read -r f; do
         rel="${f#src/opnsense/mvc/}"
@@ -77,6 +104,28 @@ _build_on_box() {
         mkdir -p "$(dirname "$dest")"
         install -m 644 "$f" "$dest"
     done
+
+    # ── Verify all src/ files are staged ─────────────────────────────────────
+    # src/opnsense/version/ is excluded: the version file is generated dynamically
+    # above so its content always matches the Makefile version at build time.
+    echo "==> Checking src/ → staging coverage..."
+    _missing_list=$(mktemp)
+    find src -type f \
+        ! -path '*/__pycache__/*' ! -name '*.pyc' \
+        ! -name '.DS_Store' ! -name '._*' \
+        ! -path 'src/opnsense/version/*' \
+        | sort | while IFS= read -r f; do
+            rel="${f#src/}"
+            [ -f "$STAGE/usr/local/$rel" ] || printf '%s\n' "$f"
+        done > "$_missing_list"
+    if [ -s "$_missing_list" ]; then
+        printf "ERROR: src/ files not staged in package:\n" >&2
+        sed 's/^/  /' "$_missing_list" >&2
+        rm -f "$_missing_list"
+        exit 1
+    fi
+    rm -f "$_missing_list"
+    echo "    Coverage check: OK"
 
     # Version metadata: required by register.php so OPNsense tracks this as a
     # "configured" plugin in config.xml (<system><firmware><plugins>). Without
@@ -153,6 +202,7 @@ post_install = json.dumps(
     "#  2. configd restart  — picks up new actions_keaubnd.conf\n"
     "#  3. run_migrations   — handles any future model version migrations\n"
     "#  4. rc.configure_plugins — flushes ACL cache, menu cache, model caches; reloads syslog\n"
+    "#  5. keaubnd restart  — reloads daemon/script code on upgrade (no-op on fresh install)\n"
     "/usr/local/opnsense/scripts/firmware/register.php install os-kea-ubnd-ddns"
     " >/dev/null 2>&1 || true\n"
     "if [ -f /usr/local/etc/rc.d/configd ]; then /usr/local/etc/rc.d/configd restart; fi\n"
@@ -160,6 +210,8 @@ post_install = json.dumps(
     " /usr/local/opnsense/mvc/script/run_migrations.php OPNsense/KeaUbnd; fi\n"
     "if [ -f /usr/local/etc/rc.configure_plugins ]; then"
     " /usr/local/etc/rc.configure_plugins POST_INSTALL; fi\n"
+    "sleep 2\n"
+    "/usr/local/sbin/configctl keaubnd restart >/dev/null 2>&1 || true\n"
 )
 
 manifest = f"""name: {pkgname}
@@ -216,8 +268,9 @@ PYEOF
 
 # ── Build remotely from macOS ─────────────────────────────────────────────────
 _build_remotely() {
-    # Load .env for SSH credentials (env vars take precedence over .env values)
-    _ENV_FILE="${REPO}/tools/.env"
+    # Load .env for SSH credentials (env vars take precedence over .env values).
+    # Resolution order: --env-file arg > KEAUBND_ENV_FILE env var > tools/.env default.
+    _ENV_FILE="${_ARG_ENV_FILE:-${KEAUBND_ENV_FILE:-${REPO}/tools/.env}}"
     if [ -f "$_ENV_FILE" ]; then
         # POSIX sh compatible .env loader
         while IFS= read -r _line; do
@@ -228,11 +281,14 @@ _build_remotely() {
             # Only export if not already set in environment
             eval "[ -z \"\${${_key}+x}\" ] && export ${_key}=\"${_val}\"" 2>/dev/null || true
         done < "$_ENV_FILE"
+    elif [ -n "$_ARG_ENV_FILE" ]; then
+        echo "ERROR: --env-file path not found: $_ARG_ENV_FILE" >&2
+        exit 1
     fi
 
-    HOST="${OPNSENSE_HOST:-${DEV_OPNSENSE_HOST:-dev-opnsense.plhm.rgn.cm}}"
-    SSH_USER="${OPNSENSE_SSH_USER:-${DEV_OPNSENSE_SSH_USER:-del}}"
-    SSH_KEY="${OPNSENSE_SSH_KEY:-${DEV_OPNSENSE_SSH_KEY:-$HOME/.ssh/del_rgn.cm.private}}"
+    HOST="${OPNSENSE_HOST:-your-opnsense-box.example.com}"
+    SSH_USER="${OPNSENSE_SSH_USER:-root}"
+    SSH_KEY="${OPNSENSE_SSH_KEY:-$HOME/.ssh/id_ed25519}"
     # Expand leading tilde
     SSH_KEY=$(echo "$SSH_KEY" | sed "s|^~|$HOME|")
     SSH_OPTS="-i $SSH_KEY -o StrictHostKeyChecking=no -o ConnectTimeout=10 \

@@ -53,14 +53,13 @@ from lib.keaubnd_sync import (
     query_kea_reservations,
     query_kea_leases,
     read_host_entries,
+    read_magic_state,
     reverse_ptr,
     unbound_list_local_data,
     is_ptr_name,
     find_stale_records,
     setup_logging,
-    get_synthesize_ptr,
     read_d2_reverse_zones,
-    get_collision_policy,
 )
 
 
@@ -112,7 +111,9 @@ def _host_entry_ips(lines):
     return ips
 
 
-def audit_local_data(report_json: bool = False, verbose: bool = False) -> int:
+def audit_local_data(report_json: bool = False, verbose: bool = False,
+                     synthesize_ptr: bool = True,
+                     collision_policy: str = "last_wins") -> int:
     """
     Audit Unbound local_data against all sources.
     Returns 0 on success, non-zero on error.
@@ -123,6 +124,7 @@ def audit_local_data(report_json: bool = False, verbose: bool = False) -> int:
     result = {
         "complete": True,
         "kea_error": None,
+        "collision_policy": collision_policy,
         "records": [],
         "orphaned_ptrs": [],
         "ptr_records": [],
@@ -170,16 +172,40 @@ def audit_local_data(report_json: bool = False, verbose: bool = False) -> int:
         result["complete"] = False
         result["kea_error"] = result["kea_error"] or "No Kea service (dhcp4/dhcp6) responded"
 
-    # IP indexes per hostname, by source
+    # IP indexes per hostname, by source.
+    # res_hostnames: every hostname with any Kea reservation (including hostname-only
+    # ones with no fixed IP).  Used for the hostname_reserved audit flag only — it
+    # deliberately does NOT affect reserved/sConfigured, which remain IP-scoped.
     kea_pairs = set()
     res_ips_by_host = {}
+    res_hostnames = set()
     lease_ips_by_host = {}
+    # Identifier lookup: (hostname, ip) → {"type": "mac"|"duid"|"circuit-id"|"client-id", "value": str}
+    # Precedence matches Kea DHCPv4 reservation priority order:
+    #   hw-address → duid → circuit-id → client-id
+    # See https://kea.readthedocs.io/en/latest/arm/dhcp4-srv.html#fine-tuning-dhcpv4-host-reservation
+    # Only populated for Kea reservations; empty dict when no identifier is present (hostname-only).
+    identifier_by_host_ip = {}
     for res in kea_reservations:
+        if res["hostname"]:
+            res_hostnames.add(res["hostname"])
         for ip in (res["ip"], res["ipv6"]):
             if ip:
                 res_ips_by_host.setdefault(res["hostname"], set()).add(ip)
                 if res["hostname"]:
                     kea_pairs.add((res["hostname"], ip))
+                    hw  = res.get("hw_address",  "")
+                    did = res.get("duid",        "")
+                    cid = res.get("circuit_id",  "")
+                    clid = res.get("client_id",  "")
+                    if hw:
+                        identifier_by_host_ip[(res["hostname"], ip)] = {"type": "mac",        "value": hw}
+                    elif did:
+                        identifier_by_host_ip[(res["hostname"], ip)] = {"type": "duid",       "value": did}
+                    elif cid:
+                        identifier_by_host_ip[(res["hostname"], ip)] = {"type": "circuit-id", "value": cid}
+                    elif clid:
+                        identifier_by_host_ip[(res["hostname"], ip)] = {"type": "client-id",  "value": clid}
     for lease in kea_leases:
         for ip in (lease["ip"], lease["ipv6"]):
             if ip:
@@ -203,23 +229,67 @@ def audit_local_data(report_json: bool = False, verbose: bool = False) -> int:
 
     unbound_ptr_names = {n for n in unbound_data if is_ptr_name(n)}
 
+    # ── Magic hostname state ──────────────────────────────────────────────────
+    # Build magic indexes and the protected set BEFORE stale detection so that
+    # find_stale_records never flags live magic FQDNs (or their PTRs) as stale.
+    #
+    # Indexes:
+    #   magic_reverse  — {(fqdn_lower, ip): entry} for recognising magic records
+    #   magic_by_orig  — {(bare_key, ip): magic_fqdn} for annotating original records
+    magic_state = read_magic_state()
+    magic_reverse: dict = {}
+    magic_by_orig: dict = {}
+    protected_magic: set = set()
+    for bare_key, entries in magic_state.get("magic_names", {}).items():
+        for entry in entries:
+            magic_fqdn = entry.get("magic_fqdn", "").rstrip(".").lower()
+            if not magic_fqdn:
+                continue
+            ip = entry.get("ip", "")
+            source = entry.get("source", "lease")
+            magic_reverse[(magic_fqdn, ip)] = {
+                "bare_key": bare_key,
+                "source": source,
+                "id_tag": entry.get("id_tail", ""),
+                "laa": entry.get("laa", False),
+            }
+            magic_by_orig[(bare_key, ip)] = magic_fqdn
+            if source in ("override", "static"):
+                protected_magic.add(magic_fqdn)
+            else:
+                # bare_key is the full original FQDN (e.g. "host.example.com");
+                # must match protected_magic_from_state in keaubnd_sync.py exactly.
+                if (bare_key, ip) in kea_pairs:
+                    protected_magic.add(magic_fqdn)
+
     # Authoritative stale/orphan set — only meaningful with complete Kea data.
     stale_pairs = set()
     orphaned_ptr_names = set()
     if result["complete"]:
-        synthesize_ptr = get_synthesize_ptr()
         d2_reverse_zones = read_d2_reverse_zones()
         stale_pairs, orphaned_ptr_names = find_stale_records(
             unbound_data, kea_pairs, host_entries,
             synthesize_ptr=synthesize_ptr, d2_reverse_zones=d2_reverse_zones,
+            protected_magic_fqdns=protected_magic,
         )
-
-    collision_policy = get_collision_policy()
 
     all_hostnames = (set(res_ips_by_host) | set(lease_ips_by_host)
                      | set(unbound_ips_by_host) | set(host_ips_by_host))
 
-    for hostname in sorted(all_hostnames):
+    # Sort magic hostnames immediately after their original — hyphen (U+002D)
+    # sorts before period (U+002E) so 'foo-mXXXXXX.domain' would otherwise
+    # precede 'foo.domain' in plain lexicographic order.
+    _magic_fqdn_to_orig: dict = {}
+    for (fqdn, _ip), entry in magic_reverse.items():
+        # bare_key is already the full original FQDN
+        _magic_fqdn_to_orig[fqdn] = entry["bare_key"]
+
+    def _hn_sort_key(hn):
+        h = hn.rstrip(".").lower()
+        orig = _magic_fqdn_to_orig.get(h)
+        return (orig or h, orig is not None, h)
+
+    for hostname in sorted(all_hostnames, key=_hn_sort_key):
         res_ips = res_ips_by_host.get(hostname, set())
         lease_ips = lease_ips_by_host.get(hostname, set())
         ub_ips = unbound_ips_by_host.get(hostname, set())
@@ -270,7 +340,17 @@ def audit_local_data(report_json: bool = False, verbose: bool = False) -> int:
                     # Under first_wins/last_wins a competing registration for the
                     # same hostname intentionally displaces this entry; under allow
                     # every device should be registered so absence means a gap.
-                    if collision_policy != "allow" and ub_ips:
+                    # Only count same-family records as evidence of a collision:
+                    # an existing A record does not displace a missing AAAA (they
+                    # can coexist), so cross-family absence is unregistered, not
+                    # a collision.
+                    try:
+                        ip_ver = ipaddress.ip_address(ip).version
+                    except ValueError:
+                        ip_ver = 4
+                    same_family_ub_ips = {u for u in ub_ips
+                                          if ipaddress.ip_address(u).version == ip_ver}
+                    if collision_policy != "allow" and same_family_ub_ips:
                         status = "collision"
                     else:
                         status = "unregistered"
@@ -283,7 +363,22 @@ def audit_local_data(report_json: bool = False, verbose: bool = False) -> int:
             # TTL is only meaningful for records actually present in Unbound.
             ttl = _ttl_for_ip(unbound_data.get(hostname, []), ip) if in_unbound else None
 
-            result["records"].append({
+            # Check if this hostname is itself a magic FQDN.
+            magic_meta = magic_reverse.get((hostname.rstrip(".").lower(), ip))
+            if magic_meta and status not in ("stale", "unknown"):
+                # Active magic record — override status so UI can render it
+                # distinctly. Expired-lease magic records keep "stale" and
+                # will be cleaned normally.
+                status = "magic"
+
+            # Annotate original hostname records with their magic FQDN (if any).
+            # bare_key is derived from the first label of the hostname.
+            hn_lower = hostname.rstrip(".").lower()
+            dot = hn_lower.find(".")
+            bare_key = hn_lower[:dot] if dot != -1 else hn_lower
+            magic_fqdn_for_this = magic_by_orig.get((bare_key, ip))
+
+            record = {
                 "hostname": hostname,
                 "ip": ip,
                 "type": record_type,
@@ -293,14 +388,26 @@ def audit_local_data(report_json: bool = False, verbose: bool = False) -> int:
                 # Independent attributes (not mutually exclusive) — an entry can
                 # be e.g. both a reservation and a live record. The UI shows these
                 # as columns; "status"/"source" remain for the summary roll-up.
-                "reserved": ip in res_ips,        # Kea static reservation
+                "reserved": ip in res_ips,                    # Kea static IP reservation
+                "hostname_reserved": (hostname in res_hostnames
+                                      and ip not in res_ips),  # hostname-only (dynamic IP)
                 "leased": ip in lease_ips,        # client currently holds it
                 "override": ip in he_ips,         # config-persistent (host_entries.conf)
                 "live": in_unbound,               # resolvable in Unbound right now
                 "source": source,
                 "in_unbound": in_unbound,
                 "status": status,
-            })
+                "identifier": identifier_by_host_ip.get((hostname, ip), {}),
+            }
+            if magic_fqdn_for_this:
+                record["magic_fqdn"] = magic_fqdn_for_this
+            if magic_meta:
+                record["is_magic"] = True
+                record["magic_for"] = magic_meta["bare_key"]
+                record["magic_id_tag"] = magic_meta["id_tag"]
+                record["magic_laa"] = magic_meta["laa"]
+                record["magic_source"] = magic_meta["source"]
+            result["records"].append(record)
 
     for ptr_name in sorted(orphaned_ptr_names):
         lines = unbound_data.get(ptr_name, [])
@@ -415,6 +522,11 @@ def audit_local_data(report_json: bool = False, verbose: bool = False) -> int:
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--collision-policy", default="last_wins",
+                        choices=["allow", "last_wins", "first_wins"],
+                        help="Collision resolution policy (default: last_wins)")
+    parser.add_argument("--no-synthesize-ptr", action="store_true", default=False,
+                        help="Treat PTR records as D2-managed; skip PTR stale detection")
     parser.add_argument("--report-json", action="store_true",
                         help="Output JSON suitable for API consumption")
     parser.add_argument("--human", action="store_true",
@@ -427,7 +539,12 @@ def main():
     if not args.report_json and not args.human:
         args.human = True
 
-    return audit_local_data(report_json=args.report_json, verbose=args.verbose)
+    return audit_local_data(
+        report_json=args.report_json,
+        verbose=args.verbose,
+        synthesize_ptr=not args.no_synthesize_ptr,
+        collision_policy=args.collision_policy,
+    )
 
 
 if __name__ == "__main__":

@@ -55,6 +55,40 @@ leases for the same hostname.
 
 ---
 
+## Reservation Identifier Precedence
+
+Kea DHCPv4 supports four ways to identify a host for reservation matching.
+When more than one identifier is present in a reservation record, Kea uses a
+fixed priority order to decide which one to match incoming clients against.
+The plugin's audit and UI follow the **same order** when deciding which
+identifier to display.
+
+| Priority | Kea JSON field | Display label | Notes |
+|----------|---------------|---------------|-------|
+| 1 | `hw-address` | `mac` | Hardware/MAC address — most common for DHCPv4 |
+| 2 | `duid` | `duid` | DHCP Unique Identifier; native to DHCPv6 but valid in v4 |
+| 3 | `circuit-id` | `circuit-id` | Relay agent Option 82 sub-option 1; only meaningful when traffic arrives through a DHCP relay |
+| 4 | `client-id` | `client-id` | DHCP client identifier sent by the client |
+| — | (none present) | `(hostname only)` | Reservation carries only a hostname; no hardware binding |
+
+Reference: https://kea.readthedocs.io/en/latest/arm/dhcp4-srv.html#fine-tuning-dhcpv4-host-reservation
+
+**In code**: `query_kea_reservations()` in `lib/keaubnd_sync.py` captures all four
+fields as `hw_address`, `duid`, `circuit_id`, `client_id`. `local-data-audit.py`
+builds `identifier_by_host_ip` using the priority above and stores
+`{"type": ..., "value": ...}` per `(hostname, ip)` pair. The Lease Audit UI
+renders the type as a small prefix label (`mac aa:bb:cc:…`, `duid 00:01:…`, etc.).
+
+**DHCPv6**: `duid` is the primary identifier; `hw-address` is also valid.
+`circuit-id` and `client-id` are rarely used in v6. All four fields are captured
+for v6 reservations but `circuit-id` in particular will almost never be populated.
+
+**Hostname-only reservations** (no IP address, no hardware identifier) are silently
+skipped by `query_kea_reservations()` because there is no IP to pre-populate in DNS.
+They still work through the live d2 path when the client comes online.
+
+---
+
 ## IPv6 PTR Records — Encoding and Parsing
 
 IPv6 PTR records use the `ip6.arpa` zone with a 32-nibble reversed encoding.
@@ -113,6 +147,80 @@ surviving family:
 returns a set of `(name, ip)` tuples. A dual-stack host with a valid A and a
 stale AAAA produces exactly one stale pair — `(name, stale_ipv6)` — without
 touching the A record.
+
+---
+
+## Magic Hostnames — Dual-Stack and Happy Eyeballs
+
+Magic hostnames (`magic_names` setting) create disambiguated parallel forward
+records for hosts involved in a hostname collision. They are inherently
+**family-scoped** — a dual-stack device in a collision receives two *different*
+magic FQDNs, one per address family, not a single name with both an A and AAAA
+record.
+
+### Why magic FQDNs are family-scoped
+
+Collision detection runs independently per family (see *Dual-Stack Hosts* above).
+More importantly, the suffix is derived from the hardware identifier that the DHCP
+daemon actually sees:
+
+- **DHCPv4** always provides `hw-address` (the MAC from the Ethernet frame) →
+  suffix is `m{6hex}`, e.g. `laptop-mAABBCC`
+- **DHCPv6** provides a DUID, not a MAC → suffix is `d{6hex}`, e.g.
+  `laptop-dXXXXXX`
+
+The same physical device produces different suffixes in each family, so the
+resulting magic FQDNs are different names. There is no mechanism in v1 to
+correlate them into a shared name.
+
+### Consequence for Happy Eyeballs (RFC 8305)
+
+Happy Eyeballs works by querying a **single FQDN** for both A and AAAA records
+simultaneously and using whichever family connects first. This requires the FQDN
+to have records in both families.
+
+Magic FQDNs do not satisfy this requirement for dual-stack devices:
+
+- `laptop-mAABBCC` has only an A record (v4 magic)
+- `laptop-dXXXXXX` has only an AAAA record (v6 magic)
+
+A client that looks up `laptop-mAABBCC` gets v4 only and connects over IPv4.
+A client that looks up `laptop-dXXXXXX` gets v6 only and connects over IPv6.
+Happy Eyeballs cannot operate across family boundaries here because the two names
+are unrelated from DNS's perspective.
+
+**This is by design.** Magic FQDNs are collision-resolution metadata, not
+production endpoints. The correct endpoint for application traffic is the **bare
+hostname** (`laptop`), which receives A and AAAA records from normal sync
+processing and works correctly with Happy Eyeballs. Magic names answer the
+question *"which specific physical device won the collision?"* — a question that
+is inherently per-family.
+
+### LAA tagging and dual-stack
+
+LAA tagging (`magic_laa_tag` setting) marks magic FQDNs for devices whose MAC
+has the locally administered bit set (iOS, Android, Windows MAC randomization).
+LAA detection requires reading the MAC and checking bit 1 of the first byte.
+
+- **v4 entries** (`hw-address` type): LAA detection works directly. The tag is
+  applied: `laptop-laa-mAABBCC`.
+- **v6 entries** (`duid` type): LAA detection is **not applied in v1**. DUID is
+  an opaque blob from this plugin's perspective. DUID-LLT (type 1) and DUID-LL
+  (type 3) embed a link-layer address at a known offset, from which the LAA bit
+  could be extracted, but this requires DUID structure parsing and only works for
+  two of the four DUID subtypes. DUID-EN and DUID-UUID have no embedded MAC.
+
+The result in a dual-stack collision: the v4 magic FQDN may carry `-laa-` while
+the v6 magic FQDN does not. This is an informational asymmetry rather than a
+functional problem — the LAA infix signals instability, and a device that
+randomizes its v4 MAC is also likely rotating its v6 DUID, which has the same
+instability property regardless of whether it is tagged.
+
+v2 consideration: parse DUID-LLT and DUID-LL to extract the embedded MAC and
+check the LAA bit. This would enable consistent tagging for the common case. The
+same DUID parsing could also enable cross-family collision detection (correlating
+v4 and v6 leases that embed the same MAC), closing the gap described in the
+Known Limitations table.
 
 ---
 
@@ -357,6 +465,210 @@ deterministic generated name that the live path keeps fresh.
 
 ---
 
+## Consistency Model — What Keeps Kea and Unbound in Sync
+
+The plugin maintains DNS consistency through four independent layers. Understanding
+what each layer covers — and what it does not — helps you choose the right settings
+for your network.
+
+### The four layers
+
+**Layer 1: Restart reconcile (always on)**
+
+The resident daemon (`kea-ubnd-ddns.py`) holds kqueue watches on the Kea and
+Unbound service pidfiles. Whenever either service restarts, the daemon detects the
+pidfile change and automatically runs a full reconcile: it queries Kea for all
+active leases and reservations and repopulates Unbound from scratch. This is the
+foundational safety net — even with all other layers disabled, a restart always
+brings Kea and Unbound back into agreement.
+
+**Layer 2: Live DDNS path (always on while kea-dhcp-ddns is running)**
+
+`kea-dhcp-ddns` delivers RFC 2136 DNS UPDATE packets to the plugin's stub listener
+the moment a lease is issued or released. The listener translates each packet into
+an `unbound-control` call — typically sub-millisecond. This is the primary real-time
+path for active networks.
+
+**Layer 3: Scheduled sync / clean (on by default)**
+
+A cron job runs on the configured schedule (default every 6 hours). Two independent
+operations can be scheduled:
+
+- **Full sync** (`kea-sync.py`): reads all Kea leases and reservations and adds any
+  records missing from Unbound. This catches drift in either direction that the live
+  path missed — including leases registered while `kea-dhcp-ddns` was temporarily
+  down. Recommended for all deployments.
+
+- **Stale-record clean** (`local-data-clean.py`): sweeps Unbound for records not
+  backed by any Kea lease, reservation, or Unbound Host Override and removes them.
+  This is the only path that removes records left behind by leases that expired
+  naturally (no explicit DHCPRELEASE from the client). Off by default — use the
+  Lease Audit tab to preview what would be removed before enabling.
+
+Note that sync and clean cover complementary failure modes. Sync adds records that
+should exist; clean removes records that should not. Neither substitutes for the
+other. Running sync without clean means stale records accumulate indefinitely from
+naturally expired leases. Running clean without sync means newly issued leases may
+remain unregistered until the next restart reconcile or cron interval.
+
+**Layer 4: Log watcher (off by default)**
+
+A secondary daemon (`kea-ubnd-logwatch.py`) tails both the Kea DHCP log and the
+listener log. It reacts to three categories of event, each independently
+configurable:
+
+- **Lease release** (`logwatch_on_release`): on `DHCP4_RELEASE` or `DHCP6_RELEASE`,
+  immediately runs `local-data-clean.py --purge-ip` for the released address. DNS
+  records for that IP disappear within seconds of the client releasing its lease,
+  rather than waiting for the next scheduled clean.
+
+- **Listener SERVFAIL** (`logwatch_on_servfail`): when the DDNS listener returns
+  SERVFAIL (Unbound was briefly unavailable or locked during an update), triggers a
+  targeted `kea-sync --names=...` for the affected hostnames. This supplements the
+  dirty-name drain path so missed adds and removes are recovered quickly.
+
+- **Remove without Add** (`logwatch_on_missed_remove`): when a DNS Remove is seen in
+  the listener log without a paired Add within a short grace window (default 10s),
+  triggers a targeted `kea-sync --names=hostname`. This closes the LEASE_REUSE gap
+  described below.
+
+### The LEASE_REUSE gap
+
+Kea has a lease-cache optimization: when a client requests a lease and its existing
+lease is still valid (same client, same IP, not near expiry), Kea serves it without
+writing to the lease database. Because no database write occurs, `kea-dhcp-ddns` may
+not consider this a meaningful change and may skip the DDNS update entirely — or in
+some cases, send a `CHG_REMOVE` (to clear the old registration) but no follow-up
+`CHG_ADD` (because the lease looks unchanged).
+
+The result: the DNS record for that hostname disappears and is not immediately
+re-registered. The record is absent until one of these occurs:
+
+- The lease reaches its T/2 renewal point (typically half the lease lifetime) and
+  the client sends a proper RENEW, which triggers a normal DDNS cycle.
+- A restart reconcile or scheduled sync runs.
+- The log watcher's `logwatch_on_missed_remove` fires (closes the gap in ~10s).
+
+The gap is therefore **not permanent** — it is bounded by at most half the lease
+lifetime. But on a network with long leases (24h is common), that can mean many
+hours without a working forward or reverse record for an active device.
+
+**Does `ddns-update-on-renew` fix this?** Partially. `update-on-renew: true` causes
+`kea-dhcp-ddns` to send a DDNS update on lease renewals. However, LEASE_REUSE
+specifically bypasses the renewal path — no database write, no renewal event — so
+`update-on-renew` may not cover it. Production testing has confirmed the gap can
+still occur with `update-on-renew` enabled. The log watcher's missed-remove detection
+is the most reliable plugin-side mitigation.
+
+### What drifts without each layer
+
+| Scenario | Covered by |
+|---|---|
+| Unbound flushes records on restart | Layer 1 (restart reconcile) |
+| Kea restarts and lease state changes | Layer 1 (restart reconcile) |
+| New lease issued in real time | Layer 2 (live DDNS) |
+| Lease released explicitly by client | Layer 2 (live DDNS) + Layer 4 release purge |
+| `kea-dhcp-ddns` was down when lease was issued | Layer 3 (scheduled sync) |
+| DDNS update SERVFAIL'd due to lock contention | Layer 2 dirty-drain + Layer 4 SERVFAIL resync |
+| LEASE_REUSE: Remove fired, Add skipped | Layer 4 missed-remove, or Layer 3, or T/2 renewal |
+| Lease expired naturally, no DHCPRELEASE | Layer 3 (scheduled clean) only |
+| Reservation removed from Kea config | Layer 1 (next restart) or Layer 3 (sync + clean) |
+
+---
+
+## Live Path Performance — `list_local_data` Call Budget
+
+The daemon's live NCR path (`process_update`) needs to read the current Unbound
+state for two purposes: **collision detection** (is this FQDN already mapped to a
+different IP?) and **dual-stack preservation** (what other-family records exist for
+this name so we can restore them after a remove-all?). Both are served by
+`unbound-control list_local_data`, which returns all local_data and is then filtered
+in-process.
+
+Spike R5 measured `list_local_data` at **9–15 ms** on a 446-record box. The live
+path must reply to each NCR within 500 ms (Kea's hardcoded ACK timeout), so this
+is real but bounded overhead.
+
+### Per-NCR `list_local_data` call count
+
+`process_update()` fetches `list_local_data` once at the top and caches the output
+as a plain string. Every read within the call — collision checks, other-family
+preservation, sibling guards — filters that string in-process. The result is always
+**1 call per DNS UPDATE**, regardless of collision policy or NCR type.
+
+| NCR type | Policy | list_local_data calls |
+|---|---|---|
+| ADD A/AAAA | `allow` | **0** — no collision check, no other-family read needed |
+| ADD A/AAAA | `first_wins` / `last_wins` | **1** |
+| ADD PTR | `allow` | **0** |
+| ADD PTR | `first_wins` | **1** — forward A/AAAA lookup to detect PTR conflict |
+| ADD PTR | `last_wins` | **0** — PTR adds are always accepted |
+| DELETE A/AAAA | any | **1** — always needs other-family siblings to preserve them |
+| DELETE ANY | any | **1** |
+
+The snapshot is fetched once before any mutation, giving a consistent pre-mutation
+view. It is skipped entirely when `allow` policy is in use and the message contains
+no deletes — the only case where no Unbound reads are needed at all.
+
+### Worst-case latency
+
+One snapshot at 15 ms plus 1–3 mutation calls (local_data_remove, local_data) at
+~5 ms each gives roughly **25–35 ms** end-to-end — well inside the 500 ms budget
+even at 10× the measured record count.
+
+### Future optimization note
+
+If `list_local_data` latency grew (very large Unbound datasets, slow control socket),
+the next step would be to maintain an **in-memory forward map** in the daemon,
+updated by every mutation and invalidated on BLOCKED→NORMAL (when a reconcile
+runs). This would reduce the snapshot cost to a dict lookup.
+
+---
+
+## Unbound `local_data_remove` Memory Growth
+
+Unbound does not immediately free the memory for a name removed via
+`local_data_remove` — the removed entry can persist in Unbound's internal
+allocator pools until the next full reload. On installations with high lease
+churn (many clients obtaining and releasing addresses over hours or days), this
+can cause steady Unbound RSS growth.
+
+### Practical impact
+
+On typical home/small-office networks with tens to low hundreds of DHCP clients
+and moderate turnover, RSS growth is negligible — Unbound's allocator pools are
+small and well-bounded. This becomes material only on networks with hundreds of
+clients and daily lease cycles.
+
+### What the plugin does to minimize removes
+
+The live path and sync path both avoid unnecessary `local_data_remove` calls:
+
+- **Sync path** (`kea-sync.py`): when replacing a record with a new IP under
+  `first_wins` / `last_wins`, it removes only the PTRs for IPs that are actually
+  being replaced (`existing - {new_ip}`), not the new IP's PTR (which is
+  immediately re-added).
+
+- **Live path** (`process_update`): same — the `last_wins` collision handler
+  removes PTRs only for `conflict_ips` (the old IPs that lose), not for the
+  incoming `rdata` IP. This avoids the earlier remove+readd cycle for the new
+  IP's PTR that was present in an older code version.
+
+- **Stale-clean** (`--clean-stale`, `local-data-clean.py`): the remove+restore
+  dance for partially-stale names (valid A, stale AAAA) is unavoidable since
+  `local_data_remove` is name-scoped, not record-scoped. But clean sweeps are
+  infrequent (daemon startup or manual trigger).
+
+### If memory growth becomes a concern
+
+The recommended mitigation on Unbound ≥ 1.17 is `local-zone` with
+`local-data-limit`; on older Unbound, a periodic `unbound-control reload` (which
+flushes all local_data — the daemon's reconcile re-populates it immediately after)
+is the bluntest but most effective tool. A future daemon option for scheduled
+periodic reconcile+reload is tracked in the Someday/Maybe list in CLAUDE.md.
+
+---
+
 ## Known Limitations Summary
 
 | Limitation | Notes |
@@ -371,3 +683,6 @@ deterministic generated name that the live path keeps fresh.
 | **Generated names after restart** | Kea stores the original client name in the lease, not the generated one. The sync path cannot restore generated-name records after an Unbound restart |
 | **Multiple `ip-addresses` in DHCPv6 reservations** | Fully supported — one AAAA + PTR per address |
 | **TSIG authentication** | Partially implemented in the daemon; deferred indefinitely — see README.md |
+| **Magic FQDNs and Happy Eyeballs** | Magic FQDNs are family-scoped: a dual-stack device in a collision gets separate A-only and AAAA-only magic names. No single magic FQDN carries both record types. Use the bare hostname for application traffic; magic names are for collision identification only |
+| **LAA tagging on IPv6** | LAA detection requires reading the MAC, which is not directly available from DUIDs without parsing DUID-LLT/LL structure. v1 applies LAA tagging to `hw-address` entries only; DUID-identified entries are never tagged regardless of whether the underlying MAC is locally administered |
+| **Cross-family collision detection** | Collision detection is per address family. Two physical devices each claiming the same hostname via DHCPv4 and DHCPv6 respectively are not detected as a collision and receive no magic names |
